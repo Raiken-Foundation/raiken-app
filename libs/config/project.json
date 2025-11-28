@@ -1,0 +1,27 @@
+{
+    "name": "config",
+    "$schema": "../../node_modules/nx/schemas/project-schema.json",
+    "sourceRoot": "libs/config/src",
+    "projectType": "library",
+    "tags": [],
+    "targets": {
+        "build": {
+            "executor": "@nx/esbuild:esbuild",
+            "outputs": ["{options.outputPath}"],
+            "options": {
+                "outputPath": "dist/libs/config",
+                "main": "libs/config/src/index.ts",
+                "tsConfig": "libs/config/tsconfig.lib.json",
+                "assets": ["libs/config/*.md"],
+                "format": ["cjs"],
+                "generatePackageJson": true
+            }
+        },
+        "lint": {
+            "executor": "nx:run-commands",
+            "options": {
+                "command": "pnpm biome lint libs/config"
+            }
+        }
+    }
+}

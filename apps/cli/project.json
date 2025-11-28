@@ -1,0 +1,59 @@
+{
+    "name": "cli",
+    "$schema": "../../node_modules/nx/schemas/project-schema.json",
+    "sourceRoot": "apps/cli/src",
+    "projectType": "application",
+    "tags": [],
+    "targets": {
+        "build": {
+            "executor": "@nx/esbuild:esbuild",
+            "outputs": ["{options.outputPath}"],
+            "dependsOn": [
+                "^build",
+                {
+                    "projects": ["dashboard"],
+                    "target": "build"
+                }
+            ],
+            "options": {
+                "platform": "node",
+                "outputPath": "dist/apps/cli",
+                "main": "apps/cli/src/bin.ts",
+                "tsConfig": "apps/cli/tsconfig.app.json",
+                "bundle": true,
+                "format": ["cjs"],
+                "generatePackageJson": true,
+                "additionalEntryPoints": ["apps/cli/src/index.ts"],
+                "assets": [
+                    {
+                        "input": "dist/apps/dashboard",
+                        "glob": "**/*",
+                        "output": "public"
+                    }
+                ]
+            }
+        },
+        "serve": {
+            "executor": "@nx/js:node",
+            "defaultConfiguration": "development",
+            "options": {
+                "buildTarget": "cli:build",
+                "args": ["start"]
+            },
+            "configurations": {
+                "development": {
+                    "buildTarget": "cli:build"
+                },
+                "production": {
+                    "buildTarget": "cli:build"
+                }
+            }
+        },
+        "lint": {
+            "executor": "nx:run-commands",
+            "options": {
+                "command": "pnpm biome lint apps/cli"
+            }
+        }
+    }
+}

@@ -8,7 +8,7 @@ export async function startServer(port = 7101) {
     const app = fastify({ logger: true });
 
     await app.register(fastifyTRPCPlugin, {
-        prefix: "/trpc",
+        prefix: "/api/trpc",
         trpcOptions: { router: appRouter },
     });
 

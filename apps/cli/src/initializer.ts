@@ -1,5 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { spawn } from 'child_process';
 import chalk from 'chalk';
 import { select, confirm, input } from '@inquirer/prompts';
 import { createConfig } from '@raiken/config';
@@ -130,13 +131,35 @@ async function promptUserPreferences(projectInfo: ProjectInfo): Promise<UserPref
   const testDirectory = await input({
     message: 'Where should E2E tests be stored?',
     default: projectInfo.testDir,
-    validate: (value) => {
+    validate: async (value) => {
       if (!value || value.trim() === '') {
         return 'Test directory cannot be empty';
       }
+
+      // Basic validation
       if (value.includes('..') || value.startsWith('/')) {
         return 'Please use a relative path without ".." or leading "/"';
       }
+
+      // Path traversal protection using realpath
+      try {
+        const resolved = await fs.realpath(path.resolve(projectInfo.rootDir, value));
+        const root = await fs.realpath(projectInfo.rootDir);
+
+        if (!resolved.startsWith(root)) {
+          return 'Test directory must be inside the project';
+        }
+      } catch {
+        // Path doesn't exist yet, which is fine - we'll create it
+        // But still check that the normalized path is safe
+        const normalized = path.normalize(path.join(projectInfo.rootDir, value));
+        const root = path.resolve(projectInfo.rootDir);
+
+        if (!normalized.startsWith(root)) {
+          return 'Test directory must be inside the project';
+        }
+      }
+
       return true;
     }
   });
@@ -174,10 +197,10 @@ export async function initializeProject(projectPath: string, force = false): Pro
   // Step 1: Detect project information
   console.log(chalk.blue('🔎 Analyzing your project...\n'));
   const projectInfo = await detectProject(projectPath);
-  
+
   // Step 2: Prompt user for preferences
   const preferences = await promptUserPreferences(projectInfo);
-  
+
   // Merge preferences with project info
   const finalProjectInfo: ProjectInfo = {
     ...projectInfo,
@@ -185,69 +208,102 @@ export async function initializeProject(projectPath: string, force = false): Pro
     testFramework: preferences.testFramework,
     testDir: preferences.testDirectory
   };
-  
+
   console.log(chalk.blue(`\n📁 Setting up ${finalProjectInfo.type} project: ${finalProjectInfo.name}\n`));
-  
-  // Step 3: Create .raiken directory and database structure
-  await initializeRaikenDirectory(projectPath);
-  
-  // Step 4: Update .gitignore to exclude .raiken
-  await updateGitignore(projectPath);
-  
-  // Step 5: Create test directory
-  await createTestDirectory(projectPath, finalProjectInfo);
-  
-  // Step 6: Create test-results directory structure
-  await createTestResultsDirectory(projectPath);
-  
-  // Step 7: Create Raiken configuration
-  await createRaikenConfig(projectPath, finalProjectInfo, force);
-  
-  // Step 8: Set up test framework configuration (if applicable)
-  if (preferences.testFramework === 'playwright') {
-    await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
-  } else if (preferences.testFramework !== 'none') {
-    console.log(chalk.yellow(`⚠️  Manual setup required for ${preferences.testFramework}`));
-    console.log(chalk.gray(`   Raiken works best with Playwright. Consider switching later.\n`));
+
+  try {
+    // Step 3: Create .raiken directory and database structure
+    await initializeRaikenDirectory(projectPath);
+
+    // Step 4: Update .gitignore to exclude .raiken
+    await updateGitignore(projectPath);
+
+    // Step 5: Create test directory
+    await createTestDirectory(projectPath, finalProjectInfo);
+
+    // Step 6: Create test-results directory structure
+    await createTestResultsDirectory(projectPath);
+
+    // Step 7: Create Raiken configuration
+    await createRaikenConfig(projectPath, finalProjectInfo, force);
+
+    // Step 8: Set up test framework configuration (if applicable)
+    if (preferences.testFramework === 'playwright') {
+      await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
+    } else if (preferences.testFramework !== 'none') {
+      console.log(chalk.yellow(`⚠️  Manual setup required for ${preferences.testFramework}`));
+      console.log(chalk.gray(`   Raiken works best with Playwright. Consider switching later.\n`));
+    }
+
+    // Step 9: Update package.json scripts
+    await updatePackageScripts(projectPath, finalProjectInfo, preferences.testFramework);
+
+    // Step 10: Create example test (if requested)
+    if (preferences.generateExampleTest) {
+      await createExampleTest(projectPath, finalProjectInfo);
+    }
+
+    // Step 11: Install Playwright browsers (if requested)
+    if (preferences.installPlaywright) {
+      await installPlaywrightBrowsers(projectPath, finalProjectInfo);
+    }
+
+    // Success message
+    console.log(chalk.green('\n✅ Project initialization complete!'));
+    console.log(chalk.cyan('\nNext steps:'));
+    console.log(chalk.gray('  1. Run "raiken start" to launch the dashboard'));
+    console.log(chalk.gray('  2. Open http://localhost:7101 in your browser'));
+    console.log(chalk.gray('  3. Start generating AI-powered tests!\n'));
+
+    // Additional info based on choices
+    if (!preferences.installPlaywright && preferences.testFramework === 'playwright') {
+      console.log(chalk.yellow('⚠️  Remember to install Playwright browsers:'));
+      console.log(chalk.gray('   npx playwright install\n'));
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.log(chalk.red(`\n❌ Setup failed: ${message}`));
+    console.log(chalk.yellow('\n💡 Tip: You can safely re-run "raiken init" to try again.'));
+    throw error;
   }
-  
-  // Step 9: Update package.json scripts
-  await updatePackageScripts(projectPath, finalProjectInfo, preferences.testFramework);
-  
-  // Step 10: Create example test (if requested)
-  if (preferences.generateExampleTest) {
-    await createExampleTest(projectPath, finalProjectInfo);
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+async function checkFileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
-  
-  // Step 11: Install Playwright browsers (if requested)
-  if (preferences.installPlaywright) {
-    await installPlaywrightBrowsers(projectPath, finalProjectInfo);
-  }
-  
-  // Success message
-  console.log(chalk.green('\n✅ Project initialization complete!'));
-  console.log(chalk.cyan('\nNext steps:'));
-  console.log(chalk.gray('  1. Run "raiken start" to launch the dashboard'));
-  console.log(chalk.gray('  2. Open http://localhost:7101 in your browser'));
-  console.log(chalk.gray('  3. Start generating AI-powered tests!\n'));
-  
-  // Additional info based on choices
-  if (!preferences.installPlaywright && preferences.testFramework === 'playwright') {
-    console.log(chalk.yellow('⚠️  Remember to install Playwright browsers:'));
-    console.log(chalk.gray('   npx playwright install\n'));
+}
+
+function getExampleTestFilename(testFramework: TestFramework): string {
+  switch (testFramework) {
+    case 'playwright':
+      return 'example.spec.ts';
+    case 'cypress':
+      return 'example.cy.ts';
+    case 'vitest':
+    case 'jest':
+      return 'example.test.ts';
+    default:
+      return 'example.test.js';
   }
 }
 
 async function initializeRaikenDirectory(projectPath: string): Promise<void> {
   const raikenDirPath = path.join(projectPath, '.raiken');
   
-  try {
-    await fs.mkdir(raikenDirPath, { recursive: true });
-    console.log(chalk.green('✓ Created .raiken/ directory'));
-    
-    // Create a README to explain the directory
-    const readmePath = path.join(raikenDirPath, 'README.md');
-    const readmeContent = `# Raiken Local Database
+  await fs.mkdir(raikenDirPath, { recursive: true });
+  console.log(chalk.green('✓ Created .raiken/ directory'));
+  
+  // Create a README to explain the directory
+  const readmePath = path.join(raikenDirPath, 'README.md');
+  const readmeContent = `# Raiken Local Database
 
 This directory contains Raiken's local state and database files.
 
@@ -259,99 +315,78 @@ Files in this directory:
 
 This directory is automatically added to .gitignore during initialization.
 `;
-    
-    await fs.writeFile(readmePath, readmeContent);
-    
-    // Create cache subdirectory
-    await fs.mkdir(path.join(raikenDirPath, 'cache'), { recursive: true });
-    
-  } catch (error) {
-    console.log(chalk.yellow('⚠️ Could not create .raiken/ directory'));
-  }
+  
+  await fs.writeFile(readmePath, readmeContent);
+  
+  // Create cache subdirectory
+  await fs.mkdir(path.join(raikenDirPath, 'cache'), { recursive: true });
 }
 
 async function updateGitignore(projectPath: string): Promise<void> {
   const gitignorePath = path.join(projectPath, '.gitignore');
   
+  let gitignoreContent = '';
+  
   try {
-    let gitignoreContent = '';
-    
-    try {
-      gitignoreContent = await fs.readFile(gitignorePath, 'utf-8');
-    } catch {
-      // .gitignore doesn't exist, will create it
-    }
-    
-    // Check if .raiken is already in .gitignore
-    if (!gitignoreContent.includes('.raiken')) {
-      const raikenSection = '\n# Raiken local database\n.raiken/\n';
-      gitignoreContent += raikenSection;
-      await fs.writeFile(gitignorePath, gitignoreContent);
-      console.log(chalk.green('✓ Updated .gitignore to exclude .raiken/'));
-    } else {
-      console.log(chalk.gray('  .gitignore already excludes .raiken/'));
-    }
-  } catch (error) {
-    console.log(chalk.yellow('❌ Could not update .gitignore'));
+    gitignoreContent = await fs.readFile(gitignorePath, 'utf-8');
+  } catch {
+    // .gitignore doesn't exist, will create it
+  }
+  
+  // Check if .raiken is already in .gitignore
+  if (!gitignoreContent.includes('.raiken')) {
+    const raikenSection = '\n# Raiken local database\n.raiken/\n';
+    gitignoreContent += raikenSection;
+    await fs.writeFile(gitignorePath, gitignoreContent);
+    console.log(chalk.green('✓ Updated .gitignore to exclude .raiken/'));
+  } else {
+    console.log(chalk.gray('  .gitignore already excludes .raiken/'));
   }
 }
 
 async function createTestDirectory(projectPath: string, projectInfo: ProjectInfo): Promise<void> {
   const testDirPath = path.join(projectPath, projectInfo.testDir);
-  
-  try {
-    await fs.access(testDirPath);
-    console.log(chalk.yellow(`⚠ Test directory ${projectInfo.testDir}/ already exists`));
-  } catch {
-    await fs.mkdir(testDirPath, { recursive: true });
-    console.log(chalk.green(`✓ Created test directory: ${projectInfo.testDir}/`));
-  }
+
+  await fs.mkdir(testDirPath, { recursive: true });
+  console.log(chalk.green(`✓ Created test directory: ${projectInfo.testDir}/`));
 }
 
 async function createTestResultsDirectory(projectPath: string): Promise<void> {
   const testResultsPath = path.join(projectPath, 'test-results');
   const testReportsPath = path.join(projectPath, 'test-reports');
+
+  // Create test-results directory (for Playwright artifacts)
+  await fs.mkdir(testResultsPath, { recursive: true });
+
+  // Create test-reports directory (for Raiken reports - separate from Playwright)
+  await fs.mkdir(testReportsPath, { recursive: true });
   
-  try {
-    // Create test-results directory (for Playwright artifacts)
-    await fs.mkdir(testResultsPath, { recursive: true });
-    
-    // Create test-reports directory (for Raiken reports - separate from Playwright)
-    await fs.mkdir(testReportsPath, { recursive: true });
-    
-    // Create .gitignore in test-results to exclude Playwright artifacts
-    const testResultsGitignorePath = path.join(testResultsPath, '.gitignore');
-    const testResultsGitignoreContent = `# Playwright test artifacts
+  // Create .gitignore in test-results to exclude Playwright artifacts
+  const testResultsGitignorePath = path.join(testResultsPath, '.gitignore');
+  const testResultsGitignoreContent = `# Playwright test artifacts
 *
 !.gitignore
 `;
-    
-    try {
-      await fs.access(testResultsGitignorePath);
-      console.log(chalk.yellow('⚠ test-results/.gitignore already exists'));
-    } catch {
-      await fs.writeFile(testResultsGitignorePath, testResultsGitignoreContent);
-      console.log(chalk.green('✓ Created test-results/.gitignore'));
-    }
-    
-    // Create .gitignore in test-reports to exclude report JSON files
-    const testReportsGitignorePath = path.join(testReportsPath, '.gitignore');
-    const testReportsGitignoreContent = `# Test report JSON files
+  
+  const testResultsGitignoreExists = await checkFileExists(testResultsGitignorePath);
+  if (!testResultsGitignoreExists) {
+    await fs.writeFile(testResultsGitignorePath, testResultsGitignoreContent);
+    console.log(chalk.green('✓ Created test-results/.gitignore'));
+  }
+  
+  // Create .gitignore in test-reports to exclude report JSON files
+  const testReportsGitignorePath = path.join(testReportsPath, '.gitignore');
+  const testReportsGitignoreContent = `# Test report JSON files
 *.json
 `;
-    
-    try {
-      await fs.access(testReportsGitignorePath);
-      console.log(chalk.yellow('⚠ test-reports/.gitignore already exists'));
-    } catch {
-      await fs.writeFile(testReportsGitignorePath, testReportsGitignoreContent);
-      console.log(chalk.green('✓ Created test-reports/.gitignore'));
-    }
-    
-    console.log(chalk.green('✓ Created test-results/ and test-reports/ directories'));
-  } catch (error) {
-    console.log(chalk.yellow('⚠ Could not create directory structure'));
+  
+  const testReportsGitignoreExists = await checkFileExists(testReportsGitignorePath);
+  if (!testReportsGitignoreExists) {
+    await fs.writeFile(testReportsGitignorePath, testReportsGitignoreContent);
+    console.log(chalk.green('✓ Created test-reports/.gitignore'));
   }
+  
+  console.log(chalk.green('✓ Created test-results/ and test-reports/ directories'));
 }
 
 async function createRaikenConfig(projectPath: string, projectInfo: ProjectInfo, force: boolean): Promise<void> {
@@ -440,68 +475,63 @@ async function updatePackageScripts(
 ): Promise<void> {
   const packageJsonPath = path.join(projectPath, 'package.json');
   
-  try {
-    const packageContent = await fs.readFile(packageJsonPath, 'utf-8');
-    const packageJson = JSON.parse(packageContent);
+  const packageContent = await fs.readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageContent);
+  
+  // Base Raiken script
+  const newScripts: Record<string, string> = {
+    'raiken': 'raiken start'
+  };
+  
+  // Add framework-specific scripts
+  switch (testFramework) {
+    case 'playwright':
+      newScripts['test:e2e'] = 'playwright test';
+      newScripts['test:e2e:ui'] = 'playwright test --ui';
+      newScripts['test:e2e:debug'] = 'playwright test --debug';
+      newScripts['test:e2e:headed'] = 'playwright test --headed';
+      break;
     
-    // Base Raiken script
-    const newScripts: Record<string, string> = {
-      'raiken': 'raiken start'
-    };
+    case 'cypress':
+      newScripts['test:e2e'] = 'cypress run';
+      newScripts['test:e2e:open'] = 'cypress open';
+      break;
     
-    // Add framework-specific scripts
-    switch (testFramework) {
-      case 'playwright':
-        newScripts['test:e2e'] = 'playwright test';
-        newScripts['test:e2e:ui'] = 'playwright test --ui';
-        newScripts['test:e2e:debug'] = 'playwright test --debug';
-        newScripts['test:e2e:headed'] = 'playwright test --headed';
-        break;
-      
-      case 'cypress':
-        newScripts['test:e2e'] = 'cypress run';
-        newScripts['test:e2e:open'] = 'cypress open';
-        break;
-      
-      case 'vitest':
-        newScripts['test:e2e'] = 'vitest run';
-        newScripts['test:e2e:watch'] = 'vitest watch';
-        break;
-      
-      case 'jest':
-        newScripts['test:e2e'] = 'jest';
-        newScripts['test:e2e:watch'] = 'jest --watch';
-        break;
-      
-      case 'none':
-        // Only add raiken script
-        break;
-    }
+    case 'vitest':
+      newScripts['test:e2e'] = 'vitest run';
+      newScripts['test:e2e:watch'] = 'vitest watch';
+      break;
     
-    packageJson.scripts = { ...packageJson.scripts, ...newScripts };
+    case 'jest':
+      newScripts['test:e2e'] = 'jest';
+      newScripts['test:e2e:watch'] = 'jest --watch';
+      break;
     
-    await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
-    console.log(chalk.green('✓ Updated package.json scripts'));
-  } catch (error) {
-    console.log(chalk.yellow('⚠️ Could not update package.json scripts'));
+    case 'none':
+      // Only add raiken script
+      break;
   }
+  
+  // Only add scripts that don't already exist with the same command
+  packageJson.scripts = packageJson.scripts || {};
+  for (const [name, command] of Object.entries(newScripts)) {
+    if (packageJson.scripts[name] !== command) {
+      packageJson.scripts[name] = command;
+    }
+  }
+  
+  await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
+  console.log(chalk.green('✓ Updated package.json scripts'));
 }
 
 async function createExampleTest(projectPath: string, projectInfo: ProjectInfo): Promise<void> {
-  const fileName = projectInfo.testFramework === 'playwright' 
-    ? 'example.spec.ts' 
-    : projectInfo.testFramework === 'cypress'
-    ? 'example.cy.ts'
-    : 'example.test.ts';
-    
+  const fileName = getExampleTestFilename(projectInfo.testFramework);
   const testPath = path.join(projectPath, projectInfo.testDir, fileName);
   
-  try {
-    await fs.access(testPath);
-    console.log(chalk.yellow('⚠️ Example test already exists'));
+  // Check if file already exists
+  if (await checkFileExists(testPath)) {
+    console.log(chalk.gray(`  Example test already exists: ${projectInfo.testDir}/${fileName}`));
     return;
-  } catch {
-    // File doesn't exist, create it
   }
   
   let exampleTest = '';
@@ -608,10 +638,18 @@ function getDefaultPort(projectType: string): number {
 }
 
 function getDevCommand(projectInfo: ProjectInfo): string {
-  if (projectInfo.scripts.dev) return 'npm run dev';
-  if (projectInfo.scripts.start) return 'npm run start';
-  if (projectInfo.scripts.serve) return 'npm run serve';
-  return 'npm run dev';
+  // Determine the package manager command
+  const runCommand = projectInfo.packageManager === 'npm' 
+    ? 'npm run' 
+    : projectInfo.packageManager;
+  
+  // Find the appropriate dev script
+  if (projectInfo.scripts.dev) return `${runCommand} dev`;
+  if (projectInfo.scripts.start) return `${runCommand} start`;
+  if (projectInfo.scripts.serve) return `${runCommand} serve`;
+  
+  // Fallback to dev
+  return `${runCommand} dev`;
 }
 
 async function installPlaywrightBrowsers(projectPath: string, projectInfo: ProjectInfo): Promise<void> {
@@ -622,33 +660,43 @@ async function installPlaywrightBrowsers(projectPath: string, projectInfo: Proje
   }
 
   console.log(chalk.blue('📦 Installing Playwright browsers...'));
-  
+
   try {
-    const { spawn } = require('child_process');
-    
-    return new Promise<void>((resolve, reject) => {
-      const child = spawn('npx', ['playwright', 'install'], {
-        cwd: projectPath,
-        stdio: 'inherit' // Show output to user
-      });
 
-      child.on('close', (code: number) => {
-        if (code === 0) {
-          console.log(chalk.green('✓ Playwright browsers installed successfully'));
-          resolve();
-        } else {
-          console.log(chalk.yellow('⚠ Playwright browser installation failed, you may need to run "npx playwright install" manually'));
-          resolve(); // Don't fail the entire setup
-        }
-      });
+    // Use Promise.race to implement timeout
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        const child = spawn('npx', ['playwright', 'install'], {
+          cwd: projectPath,
+          stdio: 'inherit' // Show output to user
+        });
 
-      child.on('error', (error: Error) => {
-        console.log(chalk.yellow(`⚠ Could not install Playwright browsers: ${error.message}`));
-        console.log(chalk.gray('  You can install them manually with: npx playwright install'));
-        resolve(); // Don't fail the entire setup
-      });
-    });
+        child.on('close', (code: number) => {
+          if (code === 0) {
+            console.log(chalk.green('✓ Playwright browsers installed successfully'));
+            resolve();
+          } else {
+            console.log(chalk.yellow(`⚠ Playwright install failed (exit code ${code})`));
+            reject(new Error(`Playwright install exited with code ${code}`));
+          }
+        });
+
+        child.on('error', (error: Error) => {
+          console.log(chalk.yellow('⚠ Failed to start Playwright installation'));
+          reject(new Error(`Failed to start Playwright install: ${error.message}`));
+        });
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => {
+          console.log(chalk.yellow('⚠ Playwright browser installation timed out'));
+          reject(new Error('Playwright browser installation timed out after 2 minutes'));
+        }, 120000)
+      )
+    ]);
   } catch (error) {
-    console.log(chalk.yellow('⚠ Could not install Playwright browsers, you may need to run "npx playwright install" manually'));
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.log(chalk.yellow(`⚠ Playwright browser installation failed: ${message}`));
+    console.log(chalk.gray('  You can install them manually with: npx playwright install'));
+    // Don't re-throw - this is not critical for setup completion
   }
 } 

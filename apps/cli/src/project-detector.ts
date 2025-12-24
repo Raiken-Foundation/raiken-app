@@ -5,9 +5,17 @@ import * as path from 'path';
 // Type Definitions
 // ============================================================================
 
-export type ProjectType = 'nextjs' | 'react' | 'vue' | 'svelte' | 'vite' | 'generic';
+export type ProjectType = 'nextjs' | 'react' | 'vue' | 'svelte' | 'vite' | 'monorepo' | 'generic';
 export type PackageManager = 'npm' | 'yarn' | 'pnpm' | 'bun';
 export type TestFramework = 'playwright' | 'cypress' | 'vitest' | 'jest' | 'none';
+
+interface PackageJson {
+  name?: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  scripts?: Record<string, string>;
+  workspaces?: string[] | { packages?: string[] };
+}
 
 export interface ProjectInfo {
   name: string;
@@ -23,72 +31,36 @@ export interface ProjectInfo {
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
   rootDir: string;
-}
-
-// ============================================================================
-// Simple Cache (5 minute TTL)
-// ============================================================================
-
-interface CachedProjectInfo {
-  info: ProjectInfo;
-  timestamp: number;
-}
-
-const projectCache = new Map<string, CachedProjectInfo>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-function getCachedProjectInfo(projectPath: string): ProjectInfo | null {
-  const cached = projectCache.get(projectPath);
-  if (!cached) return null;
-  
-  const isExpired = Date.now() - cached.timestamp > CACHE_TTL;
-  if (isExpired) {
-    projectCache.delete(projectPath);
-    return null;
-  }
-  
-  return cached.info;
-}
-
-function setCachedProjectInfo(projectPath: string, info: ProjectInfo): void {
-  projectCache.set(projectPath, {
-    info,
-    timestamp: Date.now()
-  });
-}
-
-export function clearProjectCache(projectPath?: string): void {
-  if (projectPath) {
-    projectCache.delete(projectPath);
-  } else {
-    projectCache.clear();
-  }
+  isMonorepo: boolean;
 }
 
 // ============================================================================
 // Main Detection Function
 // ============================================================================
 
-export async function detectProject(projectPath: string, useCache = true): Promise<ProjectInfo> {
-  // Check cache
-  if (useCache) {
-    const cached = getCachedProjectInfo(projectPath);
-    if (cached) return cached;
-  }
-  
+export async function detectProject(projectPath: string): Promise<ProjectInfo> {
   // Load package.json
   const packageJson = await loadPackageJson(projectPath);
+
+  // Extract with safe defaults
   const projectName = packageJson.name || path.basename(projectPath);
   const dependencies = packageJson.dependencies || {};
   const devDependencies = packageJson.devDependencies || {};
   const scripts = packageJson.scripts || {};
   const allDeps = { ...dependencies, ...devDependencies };
 
-  // Detect everything
-  const projectType = detectProjectType(allDeps);
+  // Check if this is a monorepo
+  const isMonorepo = await detectIsMonorepo(projectPath, packageJson);
+
+  // Detect project type (needed for test directory)
+  const projectType = detectProjectType(allDeps, isMonorepo);
+
+  // Detect package manager
   const packageManager = await detectPackageManager(projectPath);
+
+  // Get default test directory
   const testDir = getDefaultTestDirectory(projectType);
-  
+
   // Detect test frameworks
   const hasPlaywright = !!(allDeps['playwright'] || allDeps['@playwright/test']);
   const hasJest = !!(allDeps['jest'] || allDeps['@types/jest']);
@@ -102,7 +74,7 @@ export async function detectProject(projectPath: string, useCache = true): Promi
     hasCypress
   });
 
-  const projectInfo: ProjectInfo = {
+  return {
     name: projectName,
     type: projectType,
     packageManager,
@@ -115,40 +87,74 @@ export async function detectProject(projectPath: string, useCache = true): Promi
     scripts,
     dependencies,
     devDependencies,
-    rootDir: projectPath
+    rootDir: projectPath,
+    isMonorepo
   };
-  
-  // Cache it
-  if (useCache) {
-    setCachedProjectInfo(projectPath, projectInfo);
-  }
-  
-  return projectInfo;
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+function detectProjectType(dependencies: Record<string, string>, isMonorepo: boolean): ProjectType {
+  // Monorepo takes precedence
+  if (isMonorepo) return 'monorepo';
 
-async function loadPackageJson(projectPath: string): Promise<Record<string, any>> {
-  try {
-    const packageJsonPath = path.join(projectPath, 'package.json');
-    const content = await fs.readFile(packageJsonPath, 'utf-8');
-    return JSON.parse(content);
-  } catch {
-    return {};
-  }
-}
-
-function detectProjectType(dependencies: Record<string, string>): ProjectType {
   // Check for specific frameworks (order matters)
   if (dependencies['next']) return 'nextjs';
   if (dependencies['@sveltejs/kit'] || dependencies['svelte']) return 'svelte';
   if (dependencies['vue']) return 'vue';
   if (dependencies['react'] || dependencies['react-dom']) return 'react';
   if (dependencies['vite']) return 'vite';
-  
+
   return 'generic';
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+async function loadPackageJson(projectPath: string): Promise<PackageJson> {
+  const packageJsonPath = path.join(projectPath, 'package.json');
+
+  try {
+    const content = await fs.readFile(packageJsonPath, 'utf-8');
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error(
+      `Failed to load package.json from ${projectPath}: ${
+        error instanceof Error ? error.message : 'Unknown error'
+      }`
+    );
+  }
+}
+
+async function detectIsMonorepo(projectPath: string, packageJson: PackageJson): Promise<boolean> {
+  // Check package.json workspaces
+  if (packageJson.workspaces) {
+    const workspaces = packageJson.workspaces;
+    if (Array.isArray(workspaces) && workspaces.length > 0) {
+      return true;
+    }
+    if (!Array.isArray(workspaces) && workspaces.packages && workspaces.packages.length > 0) {
+      return true;
+    }
+  }
+
+  // Check for common monorepo configuration files
+  const monorepoFiles = [
+    'pnpm-workspace.yaml',
+    'lerna.json',
+    'nx.json',
+    'rush.json'
+  ];
+
+  for (const file of monorepoFiles) {
+    try {
+      await fs.access(path.join(projectPath, file));
+      return true;
+    } catch {
+      // Continue checking
+    }
+  }
+
+  return false;
 }
 
 function detectTestFramework(frameworks: {
@@ -166,7 +172,7 @@ function detectTestFramework(frameworks: {
 }
 
 async function detectPackageManager(projectPath: string): Promise<PackageManager> {
-  // Check for lock files
+  // Check for lock files (order matters - most specific first)
   const lockFiles: Array<{ file: string; manager: PackageManager }> = [
     { file: 'bun.lockb', manager: 'bun' },
     { file: 'pnpm-lock.yaml', manager: 'pnpm' },
@@ -179,11 +185,11 @@ async function detectPackageManager(projectPath: string): Promise<PackageManager
       await fs.access(path.join(projectPath, file));
       return manager;
     } catch {
-      continue;
+      // Continue to next lock file
     }
   }
 
-  return 'npm';
+  return 'npm'; // Default fallback
 }
 
 function getDefaultTestDirectory(projectType: ProjectType): string {
@@ -194,6 +200,7 @@ function getDefaultTestDirectory(projectType: ProjectType): string {
     vue: 'tests',
     svelte: 'tests',
     vite: 'tests',
+    monorepo: 'tests',
     generic: 'tests'
   };
 

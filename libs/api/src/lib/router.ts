@@ -1,19 +1,28 @@
 // libs/api/src/lib/router.ts
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import * as path from "path";
-import { CodeGraph, EntryPointDetector, formatBytes, CodeGraphDB } from "@raiken/core";
+import * as path from "node:path";
+import { EntryPointDetector, CodeGraph, CodeGraphDB, formatBytes } from "@raiken/core";
 
-const t = initTRPC.create();
+// Context type for tRPC procedures
+export interface Context {
+  projectPath: string;
+}
+
+const t = initTRPC.context<Context>().create();
 
 export const appRouter = t.router({
     getHealth: t.procedure.query(() => {
-        return { status: "ok", engine: "raiken-lib" };
+        return { 
+            status: "ok", 
+            engine: "raiken",
+            version: "0.0.1"
+        };
     }),
 
-    getProjectInfo: t.procedure.query(() => {
+    getProjectInfo: t.procedure.query(async ({ ctx }) => {
         return {
-            cwd: process.cwd(),
+            path: ctx.projectPath,
             nodeVersion: process.version,
         };
     }),
@@ -181,7 +190,91 @@ export const appRouter = t.router({
                 filePath: input.filePath,
                 imports: dependencies.map(dep => path.relative(projectPath, dep.target_file)),
                 importedBy: dependents.map(dep => path.relative(projectPath, dep.source_file)),
+                timestamp: new Date().toISOString()
+        };
+        }),
+
+    // ============================================================================
+    // Database Viewer Endpoints
+    // ============================================================================
+
+    getDatabaseTables: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .query(({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            
+            const tables = db.getTables();
+            
+            db.close();
+
+            return {
+                tables: tables.map(table => ({
+                    name: table.name,
+                    rowCount: table.row_count || 0
+                })),
+                timestamp: new Date().toISOString()
             };
+        }),
+
+    getTableData: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+            table: z.string(),
+            limit: z.number().default(50),
+            offset: z.number().default(0),
+        }))
+        .query(({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            
+            const data = db.queryTable(input.table, input.limit, input.offset);
+            const total = db.getTableCount(input.table);
+            
+            db.close();
+
+            return {
+                table: input.table,
+                data,
+                total,
+                limit: input.limit,
+                offset: input.offset,
+                hasMore: input.offset + input.limit < total
+            };
+        }),
+
+    executeQuery: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+            query: z.string(),
+            params: z.array(z.any()).optional(),
+        }))
+        .mutation(({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            
+            try {
+                const results = db.executeQuery(input.query, input.params || []);
+                db.close();
+
+                return {
+                    success: true,
+                    results,
+                    rowCount: Array.isArray(results) ? results.length : 0,
+                    timestamp: new Date().toISOString()
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    results: [],
+                    rowCount: 0,
+                    timestamp: new Date().toISOString()
+                };
+            }
         }),
 });
 

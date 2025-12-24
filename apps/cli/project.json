@@ -8,6 +8,7 @@
         "build": {
             "executor": "@nx/esbuild:esbuild",
             "outputs": ["{options.outputPath}"],
+            "defaultConfiguration": "production",
             "dependsOn": [
                 "^build",
                 {
@@ -31,11 +32,39 @@
                         "output": "public"
                     }
                 ]
+            },
+            "configurations": {
+                "development": {},
+                "production": {}
+            }
+        },
+        "install-deps": {
+            "executor": "nx:run-commands",
+            "outputs": ["{workspaceRoot}/dist/apps/cli/node_modules"],
+            "options": {
+                "commands": [
+                    "echo '📦 Installing CLI dependencies for development...'",
+                    "cd dist/apps/cli && npm install --silent",
+                    "echo '✅ Dependencies installed!'"
+                ],
+                "parallel": false
+            }
+        },
+        "build:dev": {
+            "executor": "nx:run-commands",
+            "outputs": ["{workspaceRoot}/dist/apps/cli"],
+            "dependsOn": ["build"],
+            "options": {
+                "commands": [
+                    "nx run cli:install-deps"
+                ],
+                "parallel": false
             }
         },
         "serve": {
             "executor": "@nx/js:node",
             "defaultConfiguration": "development",
+            "dependsOn": ["build:dev"],
             "options": {
                 "buildTarget": "cli:build",
                 "args": ["start"]

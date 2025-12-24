@@ -765,6 +765,68 @@ export class CodeGraphDB {
   }
 
   /**
+   * Get list of all tables in the database.
+   */
+  getTables(): Array<{ name: string; row_count: number }> {
+    const tables = this.db.prepare(`
+      SELECT name 
+      FROM sqlite_master 
+      WHERE type='table' 
+      AND name NOT LIKE 'sqlite_%'
+      ORDER BY name
+    `).all() as Array<{ name: string }>;
+
+    return tables.map(table => ({
+      name: table.name,
+      row_count: this.getTableCount(table.name)
+    }));
+  }
+
+  /**
+   * Get row count for a specific table.
+   */
+  getTableCount(tableName: string): number {
+    try {
+      const result = this.db.prepare(`SELECT COUNT(*) as count FROM ${tableName}`).get() as { count: number };
+      return result.count;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Query a table with pagination.
+   */
+  queryTable(tableName: string, limit: number, offset: number): any[] {
+    try {
+      return this.db.prepare(`
+        SELECT * FROM ${tableName}
+        LIMIT ? OFFSET ?
+      `).all(limit, offset);
+    } catch (error) {
+      console.error(`Error querying table ${tableName}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Execute a custom SQL query (SELECT only for safety).
+   */
+  executeQuery(query: string, params: any[] = []): any[] {
+    // Only allow SELECT queries for safety
+    const trimmedQuery = query.trim().toUpperCase();
+    if (!trimmedQuery.startsWith('SELECT')) {
+      throw new Error('Only SELECT queries are allowed');
+    }
+
+    try {
+      return this.db.prepare(query).all(...params);
+    } catch (error) {
+      throw new Error(`Query execution failed: ${(error as Error).message}`);
+    }
+  }
+
+  /**
    * Close the database connection.
    */
   close(): void {

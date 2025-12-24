@@ -12,6 +12,8 @@ interface SidebarProps {
   onSendMessage?: (message: string) => void;
   onFileSelect?: (fileId: string) => void;
   activeFileId?: string;
+  onDatabaseClick?: () => void;
+  showingDatabase?: boolean;
 }
 
 // Sample files data
@@ -39,7 +41,7 @@ const sampleFiles: TestFileItem[] = [
   },
 ];
 
-export function Sidebar({ onSendMessage, onFileSelect, activeFileId }: SidebarProps) {
+export function Sidebar({ onSendMessage, onFileSelect, activeFileId, onDatabaseClick, showingDatabase }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<'chat' | 'files' | 'settings'>('chat');
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [inputValue, setInputValue] = useState('');
@@ -89,6 +91,18 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFileId }: SidebarPr
           {/* Folder icon */}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
             <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+          </svg>
+        </button>
+        <button 
+          className={`nav-btn ${showingDatabase ? 'active' : ''}`}
+          onClick={() => onDatabaseClick?.()}
+          title="Database Explorer"
+        >
+          {/* Database icon */}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+            <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
           </svg>
         </button>
         <button 

@@ -19,9 +19,15 @@ program
 program
     .command("init")
     .description("Initialize Raiken in the current project")
-    .action(() => {
-        console.log(chalk.green("Raiken initialized! (Placeholder)"));
-        // Here you would generate raiken.config.ts
+    .option("-f, --force", "Overwrite existing configuration files", false)
+    .action(async (options) => {
+        try {
+            const { initializeProject } = await import("./initializer");
+            await initializeProject(process.cwd(), options.force);
+        } catch (error) {
+            console.error(chalk.red("\n ❌ Failed to initialize project:"), error);
+            process.exit(1);
+        }
     });
 
 program.parse(process.argv);

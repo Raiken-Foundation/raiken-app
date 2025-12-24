@@ -6,19 +6,11 @@ import { TestingView } from './testing-view';
 type View = 'landing' | 'overview' | 'testing';
 
 export function App() {
-  const [currentView, setCurrentView] = useState<View>('testing'); // Start with testing view for demo
-  const [testPrompt, setTestPrompt] = useState('');
+  const [currentView, setCurrentView] = useState<View>('testing');
 
   const handleStart = (prompt: string) => {
-    setTestPrompt(prompt);
     setCurrentView('testing');
-    // TODO: Start the AI test generation flow
     console.log('Starting test generation with prompt:', prompt);
-  };
-
-  const handleBack = () => {
-    setCurrentView('landing');
-    setTestPrompt('');
   };
 
   return (

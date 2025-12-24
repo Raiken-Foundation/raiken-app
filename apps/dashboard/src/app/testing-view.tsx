@@ -3,6 +3,7 @@ import { Header } from '../components/header';
 import { Sidebar } from '../components/sidebar';
 import { CodeEditor, TestFile } from '../components/code-editor';
 import { TestResults, TestResult, TestSummary } from '../components/test-results';
+import { DatabaseViewer } from '../components/database-viewer';
 
 // Sample data matching the Figma design
 const sampleTestFiles: TestFile[] = [
@@ -104,6 +105,7 @@ const sampleSummary: TestSummary = {
 export function TestingView() {
   const [activeFileId, setActiveFileId] = useState(sampleTestFiles[0].id);
   const [files, setFiles] = useState<TestFile[]>(sampleTestFiles);
+  const [showDatabase, setShowDatabase] = useState(false);
   const activeFile = files.find(f => f.id === activeFileId);
 
   const handleHealSync = () => {
@@ -135,16 +137,24 @@ export function TestingView() {
       />
       
       <div className="main-content">
-        <Sidebar onSendMessage={handleSendMessage} />
+        <Sidebar 
+          onSendMessage={handleSendMessage}
+          onDatabaseClick={() => setShowDatabase(!showDatabase)}
+          showingDatabase={showDatabase}
+        />
         
-        <div className="editor-section">
-          <CodeEditor 
-            files={files}
-            activeFileId={activeFileId}
-            onFileSelect={setActiveFileId}
-            onContentChange={handleContentChange}
-          />
-        </div>
+        {showDatabase ? (
+          <DatabaseViewer onClose={() => setShowDatabase(false)} />
+        ) : (
+          <div className="editor-section">
+            <CodeEditor 
+              files={files}
+              activeFileId={activeFileId}
+              onFileSelect={setActiveFileId}
+              onContentChange={handleContentChange}
+            />
+          </div>
+        )}
       </div>
 
       {/* Test Results - Full Width at Bottom */}

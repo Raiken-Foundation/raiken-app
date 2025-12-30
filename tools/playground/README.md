@@ -13,18 +13,36 @@ This playground app serves as a realistic test project for Raiken development. I
 
 ## 🚀 Getting Started
 
+### Installation
+
 ```bash
+# Navigate to the playground directory
+cd tools/playground
+
 # Install dependencies
 npm install
-
-# Start dev server
-npm run dev
-
-# Build for production
-npm run build
 ```
 
-The app runs on `http://localhost:3000`
+### Running the App
+
+```bash
+# Start development server
+npm run dev
+```
+
+The app will be available at **http://localhost:3000**
+
+### Building for Production
+
+```bash
+# Create production build
+npm run build
+
+# Preview production build
+npm run preview
+```
+
+The build output will be in the `dist/` directory.
 
 ## 🧪 Testing Features
 
@@ -126,6 +144,47 @@ playground/
 - Statistics display
 - Empty state messages
 
+## 📋 Complete Test ID Reference
+
+All interactive elements have `data-testid` attributes for E2E testing:
+
+### LoginForm Component
+| Test ID | Element | Purpose |
+|---------|---------|---------|
+| `login-form` | Form container | Target the entire login form |
+| `username-input` | Username input field | Enter username (required) |
+| `email-input` | Email input field | Enter email (optional) |
+| `username-error` | Error message | Validation error for username |
+| `email-error` | Error message | Validation error for email |
+| `login-submit` | Submit button | Submit login form |
+
+### Counter Component
+| Test ID | Element | Purpose |
+|---------|---------|---------|
+| `counter-value` | Display | Current counter value |
+| `counter-increment` | Button | Increment counter by step |
+| `counter-decrement` | Button | Decrement counter by step |
+| `counter-reset` | Button | Reset counter to 0 |
+| `counter-step-input` | Input | Set custom step size |
+
+### TodoList Component
+| Test ID | Element | Purpose |
+|---------|---------|---------|
+| `todo-input` | Input field | Enter new todo text |
+| `todo-add` | Button | Add new todo |
+| `todo-list` | Container | List of all todos |
+| `todo-item-{id}` | List item | Individual todo (dynamic ID) |
+| `todo-checkbox-{id}` | Checkbox | Toggle todo completion (dynamic ID) |
+| `todo-delete-{id}` | Button | Delete specific todo (dynamic ID) |
+| `filter-all` | Button | Show all todos |
+| `filter-active` | Button | Show only active todos |
+| `filter-completed` | Button | Show only completed todos |
+| `clear-completed` | Button | Remove all completed todos |
+| `empty-state` | Message | Shown when no todos match filter |
+| `todo-stats` | Display | Completion percentage |
+
+**Note:** Test IDs with `{id}` are dynamic and use the todo's unique ID (e.g., `todo-item-1234567890-abc123def`)
+
 ## 💡 Usage in Raiken Development
 
 This playground is perfect for testing:
@@ -135,4 +194,60 @@ This playground is perfect for testing:
 3. **Test Generation** - Generate E2E tests for user flows
 4. **Entry Point Detection** - Find and analyze entry points
 5. **Code Graph Building** - Map component relationships
+
+### Using with Raiken CLI
+
+```bash
+# Navigate to the playground
+cd tools/playground
+
+# Initialize Raiken (detects as Vite project)
+raiken init
+
+# Start Raiken (serves dashboard and API)
+raiken start
+# Open http://localhost:7101 to use the dashboard
+```
+
+**Expected Raiken Detection:**
+- **Framework**: Vite (React + TypeScript)
+- **Entry Point**: `src/main.tsx`
+- **Components**: 3 (Counter, TodoList, LoginForm)
+- **Utilities**: 11 functions in `utils.ts`
+- **Types**: 3 interfaces in `types.ts`
+
+### Test Generation Examples
+
+**Login Flow:**
+```typescript
+// Raiken should generate tests like:
+test('user can login with valid credentials', async () => {
+  await page.goto('http://localhost:3000');
+  await page.fill('[data-testid="username-input"]', 'testuser');
+  await page.fill('[data-testid="email-input"]', 'test@example.com');
+  await page.click('[data-testid="login-submit"]');
+  await expect(page.locator('text=Welcome, testuser!')).toBeVisible();
+});
+```
+
+**Counter Flow:**
+```typescript
+// Raiken should generate tests like:
+test('counter increments correctly', async () => {
+  // ... after login
+  await page.click('[data-testid="counter-increment"]');
+  await expect(page.locator('[data-testid="counter-value"]')).toHaveText('1');
+});
+```
+
+**Todo Flow:**
+```typescript
+// Raiken should generate tests like:
+test('user can add and complete todos', async () => {
+  // ... after login
+  await page.fill('[data-testid="todo-input"]', 'Buy milk');
+  await page.click('[data-testid="todo-add"]');
+  await expect(page.locator('[data-testid="todo-list"]')).toContainText('Buy milk');
+});
+```
 

@@ -5,11 +5,20 @@ interface DatabaseViewerProps {
   onClose: () => void;
 }
 
+type TableRow = Record<string, unknown>;
+
+interface QueryResult {
+  success: boolean;
+  rowCount?: number;
+  results?: TableRow[];
+  error?: string;
+}
+
 export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
   const [selectedTable, setSelectedTable] = useState<string>('');
   const [currentPage, setCurrentPage] = useState(0);
   const [customQuery, setCustomQuery] = useState('');
-  const [queryResults, setQueryResults] = useState<any>(null);
+  const [queryResults, setQueryResults] = useState<QueryResult | null>(null);
   const [activeView, setActiveView] = useState<'tables' | 'query'>('tables');
   const pageSize = 50;
 
@@ -43,46 +52,51 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
 
   if (tablesLoading) {
     return (
-      <div className="raiken-db-viewer">
-        <div className="loading">Loading database...</div>
+      <div className="database-viewer">
+        <div className="loading">
+          <div className="spinner"></div>
+          <p>Loading database...</p>
+        </div>
+        <style>{styles}</style>
       </div>
     );
   }
 
   if (!tablesData?.tables || tablesData.tables.length === 0) {
     return (
-      <div className="raiken-db-viewer">
+      <div className="database-viewer">
         <div className="empty-state">
           <div className="empty-icon">🗄️</div>
-          <h3>No Database Found</h3>
-          <p>Initialize the project with "raiken init" to create the database.</p>
+          <h3 className="empty-title">No Database Found</h3>
+          <p className="empty-text">Initialize the project with "raiken init" to create the database.</p>
         </div>
+        <style>{styles}</style>
       </div>
     );
   }
 
   return (
-    <div className="raiken-db-viewer">
+    <div className="database-viewer">
       {/* Header */}
-      <div className="raiken-db-header">
+      <div className="db-header">
         <div className="header-left">
           <button className="close-btn" onClick={onClose} title="Close Database Viewer">
             ←
           </button>
-          <h3>🗄️ Database Explorer</h3>
+          <h3 className="header-title">🗄️ Database Explorer</h3>
         </div>
         <div className="view-switcher">
           <button
-            className={activeView === 'tables' ? 'active' : ''}
+            className={`view-btn ${activeView === 'tables' ? 'active' : ''}`}
             onClick={() => setActiveView('tables')}
           >
-            Tables
+            📊 Tables
           </button>
           <button
-            className={activeView === 'query' ? 'active' : ''}
+            className={`view-btn ${activeView === 'query' ? 'active' : ''}`}
             onClick={() => setActiveView('query')}
           >
-            Query
+            🔍 Query
           </button>
         </div>
       </div>
@@ -93,18 +107,18 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
           <div className="tables-layout">
             {/* Sidebar: Table List */}
             <aside className="tables-sidebar">
-              <h4>Tables ({tablesData.tables.length})</h4>
+              <h4 className="sidebar-title">TABLES ({tablesData.tables.length})</h4>
               <ul className="table-list">
                 {tablesData.tables.map((table) => (
                   <li
                     key={table.name}
-                    className={selectedTable === table.name ? 'active' : ''}
+                    className={`table-item ${selectedTable === table.name ? 'active' : ''}`}
                     onClick={() => {
                       setSelectedTable(table.name);
                       setCurrentPage(0);
                     }}
                   >
-                    <span className="table-name">{table.name}</span>
+                    <span className="table-name">📋 {table.name}</span>
                     <span className="table-count">{table.rowCount}</span>
                   </li>
                 ))}
@@ -116,16 +130,19 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
               {selectedTable ? (
                 <>
                   <div className="table-header">
-                    <h4>{selectedTable}</h4>
+                    <h4 className="table-title">{selectedTable}</h4>
                     {tableData && (
                       <span className="row-info">
-                        {currentPage * pageSize + 1}-{Math.min((currentPage + 1) * pageSize, tableData.total)} of {tableData.total}
+                        Showing {currentPage * pageSize + 1}-{Math.min((currentPage + 1) * pageSize, tableData.total)} of {tableData.total} rows
                       </span>
                     )}
                   </div>
 
                   {dataLoading ? (
-                    <div className="loading">Loading...</div>
+                    <div className="loading">
+                      <div className="spinner"></div>
+                      <p>Loading data...</p>
+                    </div>
                   ) : tableData && tableData.data.length > 0 ? (
                     <>
                       <div className="table-wrapper">
@@ -140,12 +157,12 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                           <tbody>
                             {tableData.data.map((row, idx) => (
                               <tr key={idx}>
-                                {Object.values(row).map((val: any, colIdx) => (
+                                {Object.values(row).map((val: unknown, colIdx) => (
                                   <td key={colIdx}>
                                     {val === null ? (
                                       <span className="null-value">NULL</span>
                                     ) : typeof val === 'object' ? (
-                                      JSON.stringify(val)
+                                      <span className="object-value">{JSON.stringify(val)}</span>
                                     ) : (
                                       String(val)
                                     )}
@@ -159,27 +176,32 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
 
                       <div className="pagination">
                         <button
+                          className="pagination-btn"
                           onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
                           disabled={currentPage === 0}
                         >
-                          Previous
+                          ← Previous
                         </button>
-                        <span>Page {currentPage + 1}</span>
+                        <span className="page-info">Page {currentPage + 1}</span>
                         <button
+                          className="pagination-btn"
                           onClick={() => setCurrentPage(p => p + 1)}
                           disabled={!tableData.hasMore}
                         >
-                          Next
+                          Next →
                         </button>
                       </div>
                     </>
                   ) : (
-                    <div className="empty-state">No data</div>
+                    <div className="empty-state">
+                      <p>No data available in this table</p>
+                    </div>
                   )}
                 </>
               ) : (
-                <div className="select-table">
-                  <p>← Select a table to view its contents</p>
+                <div className="select-prompt">
+                  <div className="select-prompt-icon">👈</div>
+                  <p className="select-prompt-text">Select a table from the sidebar to view its contents</p>
                 </div>
               )}
             </main>
@@ -190,15 +212,15 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
         {activeView === 'query' && (
           <div className="query-layout">
             <div className="query-editor">
-              <h4>Custom SQL Query</h4>
-              <p className="query-hint">Only SELECT queries are allowed for safety.</p>
+              <h4 className="query-title">Custom SQL Query</h4>
+              <p className="query-hint">💡 Only SELECT queries are allowed for safety</p>
               
               <textarea
                 className="query-input"
                 value={customQuery}
                 onChange={(e) => setCustomQuery(e.target.value)}
                 placeholder="SELECT * FROM files WHERE size > 1000 LIMIT 10;"
-                rows={6}
+                rows={8}
               />
               
               <button 
@@ -206,7 +228,7 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                 onClick={handleRunQuery}
                 disabled={queryLoading || !customQuery.trim()}
               >
-                {queryLoading ? 'Running...' : '▶ Run Query'}
+                {queryLoading ? '⏳ Running...' : '▶ Run Query'}
               </button>
             </div>
 
@@ -214,10 +236,10 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
               <div className="query-results">
                 {queryResults.success ? (
                   <>
-                    <div className="results-header">
-                      ✅ {queryResults.rowCount} rows returned
+                    <div className="results-success">
+                      ✅ Query executed successfully - {queryResults.rowCount} rows returned
                     </div>
-                    {queryResults.results.length > 0 && (
+                    {queryResults.results && queryResults.results.length > 0 && (
                       <div className="table-wrapper">
                         <table className="data-table">
                           <thead>
@@ -228,14 +250,14 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                             </tr>
                           </thead>
                           <tbody>
-                            {queryResults.results.map((row: any, idx: number) => (
+                            {queryResults.results.map((row: TableRow, idx: number) => (
                               <tr key={idx}>
-                                {Object.values(row).map((val: any, colIdx) => (
+                                {Object.values(row).map((val: unknown, colIdx) => (
                                   <td key={colIdx}>
                                     {val === null ? (
                                       <span className="null-value">NULL</span>
                                     ) : typeof val === 'object' ? (
-                                      JSON.stringify(val)
+                                      <span className="object-value">{JSON.stringify(val)}</span>
                                     ) : (
                                       String(val)
                                     )}
@@ -249,8 +271,8 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                     )}
                   </>
                 ) : (
-                  <div className="error-message">
-                    ❌ {queryResults.error}
+                  <div className="results-error">
+                    ❌ Error: {queryResults.error}
                   </div>
                 )}
               </div>
@@ -259,389 +281,486 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
         )}
       </div>
 
-      <style>{`
-        .raiken-db-viewer {
-          display: flex;
-          flex-direction: column;
-          height: 100%;
-          flex: 1;
-          background: #0a0a0a;
-          color: #e5e7eb;
-          overflow: hidden;
-        }
-
-        .raiken-db-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 1rem 1.5rem;
-          background: #1a1a1a;
-          border-bottom: 1px solid #2a2a2a;
-          flex-shrink: 0;
-        }
-
-        .raiken-db-viewer .header-left {
-          display: flex;
-          align-items: center;
-          gap: 1rem;
-        }
-
-        .raiken-db-viewer .close-btn {
-          width: 2rem;
-          height: 2rem;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #2a2a2a;
-          border: none;
-          border-radius: 6px;
-          color: #e5e7eb;
-          font-size: 1.25rem;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .raiken-db-viewer .close-btn:hover {
-          background: #3a3a3a;
-        }
-
-        .raiken-db-header h3 {
-          font-size: 1.125rem;
-          margin: 0;
-          font-weight: 600;
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .view-switcher {
-          display: flex;
-          gap: 0.5rem;
-          background: #0a0a0a;
-          padding: 0.25rem;
-          border-radius: 8px;
-        }
-
-        .raiken-db-viewer .view-switcher button {
-          padding: 0.5rem 1.25rem;
-          background: transparent;
-          border: none;
-          border-radius: 6px;
-          color: #888;
-          font-size: 0.875rem;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .raiken-db-viewer .view-switcher button:hover {
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .view-switcher button.active {
-          background: #7C3AED;
-          color: #ffffff;
-        }
-
-        .raiken-db-viewer .db-content {
-          flex: 1;
-          overflow: hidden;
-          background: #0a0a0a;
-        }
-
-        .raiken-db-viewer .tables-layout {
-          display: grid;
-          grid-template-columns: 240px 1fr;
-          height: 100%;
-        }
-
-        .raiken-db-viewer .tables-sidebar {
-          background: #1a1a1a;
-          border-right: 1px solid #2a2a2a;
-          padding: 1rem;
-          overflow-y: auto;
-        }
-
-        .raiken-db-viewer .tables-sidebar h4 {
-          font-size: 0.75rem;
-          color: #888;
-          text-transform: uppercase;
-          margin: 0 0 0.75rem 0;
-          font-weight: 600;
-          letter-spacing: 0.5px;
-        }
-
-        .raiken-db-viewer .table-list {
-          list-style: none;
-          display: flex;
-          flex-direction: column;
-          gap: 0.375rem;
-          padding: 0;
-          margin: 0;
-        }
-
-        .raiken-db-viewer .table-list li {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 0.625rem 0.75rem;
-          background: #0a0a0a;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: all 0.2s;
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .table-list li:hover {
-          background: #2a2a2a;
-        }
-
-        .raiken-db-viewer .table-list li.active {
-          background: #7C3AED;
-          color: #ffffff;
-        }
-
-        .raiken-db-viewer .table-name {
-          font-weight: 500;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .table-count {
-          font-size: 0.75rem;
-          opacity: 0.7;
-          background: rgba(255, 255, 255, 0.1);
-          padding: 0.125rem 0.5rem;
-          border-radius: 10px;
-        }
-
-        .raiken-db-viewer .table-list li.active .table-count {
-          background: rgba(255, 255, 255, 0.2);
-        }
-
-        .raiken-db-viewer .table-content {
-          padding: 1.5rem;
-          overflow-y: auto;
-          background: #0a0a0a;
-        }
-
-        .raiken-db-viewer .table-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1rem;
-        }
-
-        .raiken-db-viewer .table-header h4 {
-          font-size: 1rem;
-          color: #7C3AED;
-          margin: 0;
-          font-weight: 600;
-        }
-
-        .raiken-db-viewer .row-info {
-          color: #888;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .table-wrapper {
-          overflow-x: auto;
-          overflow-y: auto;
-          max-height: calc(100vh - 400px);
-          background: #1a1a1a;
-          border-radius: 8px;
-          border: 1px solid #2a2a2a;
-        }
-
-        .raiken-db-viewer .data-table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 0.8125rem;
-        }
-
-        .raiken-db-viewer .data-table th {
-          background: #2a2a2a;
-          padding: 0.625rem 0.875rem;
-          text-align: left;
-          font-weight: 600;
-          color: #7C3AED;
-          position: sticky;
-          top: 0;
-          z-index: 10;
-          border-bottom: 1px solid #3a3a3a;
-        }
-
-        .raiken-db-viewer .data-table td {
-          padding: 0.625rem 0.875rem;
-          border-bottom: 1px solid #2a2a2a;
-          max-width: 400px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .data-table tbody tr:hover {
-          background: #2a2a2a;
-        }
-
-        .raiken-db-viewer .null-value {
-          color: #666;
-          font-style: italic;
-        }
-
-        .raiken-db-viewer .pagination {
-          display: flex;
-          gap: 1rem;
-          align-items: center;
-          justify-content: center;
-          padding-top: 1rem;
-        }
-
-        .raiken-db-viewer .pagination button {
-          padding: 0.5rem 1.25rem;
-          background: #7C3AED;
-          color: white;
-          border: none;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: all 0.2s;
-          font-weight: 500;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .pagination button:hover:not(:disabled) {
-          background: #6D28D9;
-        }
-
-        .raiken-db-viewer .pagination button:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .raiken-db-viewer .pagination span {
-          color: #888;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .query-layout {
-          padding: 1.5rem;
-          display: flex;
-          flex-direction: column;
-          gap: 1.5rem;
-          overflow-y: auto;
-          height: 100%;
-          background: #0a0a0a;
-        }
-
-        .raiken-db-viewer .query-editor h4 {
-          font-size: 1rem;
-          margin: 0 0 0.5rem 0;
-          font-weight: 600;
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .query-hint {
-          color: #888;
-          font-size: 0.8125rem;
-          margin-bottom: 0.75rem;
-        }
-
-        .raiken-db-viewer .query-input {
-          width: 100%;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 0.875rem;
-          color: #e5e7eb;
-          font-family: 'Monaco', 'Courier New', monospace;
-          font-size: 0.8125rem;
-          resize: vertical;
-          margin-bottom: 0.75rem;
-        }
-
-        .raiken-db-viewer .query-input:focus {
-          outline: none;
-          border-color: #7C3AED;
-          box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.2);
-        }
-
-        .raiken-db-viewer .run-query-btn {
-          padding: 0.625rem 1.5rem;
-          background: #10B981;
-          color: white;
-          border: none;
-          border-radius: 6px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.2s;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .run-query-btn:hover:not(:disabled) {
-          background: #059669;
-        }
-
-        .raiken-db-viewer .run-query-btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .raiken-db-viewer .query-results {
-          margin-top: 0.5rem;
-        }
-
-        .raiken-db-viewer .results-header {
-          color: #10B981;
-          font-weight: 600;
-          margin-bottom: 1rem;
-          padding: 0.75rem;
-          background: rgba(16, 185, 129, 0.1);
-          border-radius: 6px;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .error-message {
-          color: #EF4444;
-          font-weight: 600;
-          padding: 0.75rem;
-          background: rgba(239, 68, 68, 0.1);
-          border-radius: 6px;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .loading {
-          text-align: center;
-          padding: 3rem;
-          color: #888;
-          font-size: 0.875rem;
-        }
-
-        .raiken-db-viewer .empty-state {
-          text-align: center;
-          padding: 3rem 1.5rem;
-          color: #888;
-        }
-
-        .raiken-db-viewer .empty-icon {
-          font-size: 3rem;
-          margin-bottom: 0.75rem;
-          opacity: 0.5;
-        }
-
-        .raiken-db-viewer .empty-state h3 {
-          font-size: 1.125rem;
-          margin-bottom: 0.5rem;
-          color: #e5e7eb;
-        }
-
-        .raiken-db-viewer .select-table {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100%;
-          color: #888;
-          font-size: 1rem;
-        }
-      `}</style>
+      <style>{styles}</style>
     </div>
   );
 }
 
+// Styles - Light theme for visibility
+const styles = `
+  /* Container */
+  .database-viewer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    justify-content: center;
+    width: 100%;
+    background-color: #f8fafc;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Header */
+  .database-viewer .db-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    background-color: #ffffff;
+    border-bottom: 2px solid #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+
+  .database-viewer .header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .database-viewer .close-btn {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    color: #475569;
+    font-size: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .database-viewer .close-btn:hover {
+    background-color: #e2e8f0;
+  }
+
+  .database-viewer .header-title {
+    font-size: 1.5rem;
+    margin: 0;
+    font-weight: 600;
+    color: #1e293b;
+  }
+
+  .database-viewer .view-switcher {
+    display: flex;
+    gap: 0.5rem;
+    background-color: #f1f5f9;
+    padding: 0.25rem;
+    border-radius: 10px;
+  }
+
+  .database-viewer .view-btn {
+    padding: 0.625rem 1.5rem;
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    color: #64748b;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .database-viewer .view-btn:hover {
+    color: #475569;
+  }
+
+  .database-viewer .view-btn.active {
+    background-color: #7C3AED;
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+  }
+
+  /* Content */
+  .database-viewer .db-content {
+    flex: 1;
+    overflow: hidden;
+    background-color: #f8fafc;
+  }
+
+  .database-viewer .tables-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    height: 100%;
+  }
+
+  /* Sidebar */
+  .database-viewer .tables-sidebar {
+    background-color: #ffffff;
+    border-right: 2px solid #e2e8f0;
+    padding: 1.5rem;
+    overflow-y: auto;
+  }
+
+  .database-viewer .sidebar-title {
+    font-size: 0.75rem;
+    color: #64748b;
+    text-transform: uppercase;
+    margin: 0 0 1rem 0;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  .database-viewer .table-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0;
+    margin: 0;
+  }
+
+  .database-viewer .table-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.875rem 1rem;
+    background-color: #f8fafc;
+    border: 2px solid #e2e8f0;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: #334155;
+  }
+
+  .database-viewer .table-item:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+  }
+
+  .database-viewer .table-item.active {
+    background-color: #7C3AED;
+    border-color: #7C3AED;
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
+    transform: translateX(4px);
+  }
+
+  .database-viewer .table-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+
+  .database-viewer .table-count {
+    font-size: 0.8rem;
+    font-weight: 700;
+    background-color: rgba(0, 0, 0, 0.1);
+    padding: 0.25rem 0.625rem;
+    border-radius: 12px;
+  }
+
+  /* Table Content */
+  .database-viewer .table-content {
+    padding: 2rem;
+    overflow-y: auto;
+    background-color: #f8fafc;
+  }
+
+  .database-viewer .table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background-color: #ffffff;
+    border-radius: 10px;
+    border: 2px solid #e2e8f0;
+  }
+
+  .database-viewer .table-title {
+    font-size: 1.25rem;
+    color: #7C3AED;
+    margin: 0;
+    font-weight: 700;
+  }
+
+  .database-viewer .row-info {
+    color: #64748b;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .database-viewer .table-wrapper {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: calc(100vh - 300px);
+    background-color: #ffffff;
+    border-radius: 12px;
+    border: 2px solid #e2e8f0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  }
+
+  .database-viewer .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  .database-viewer .data-table th {
+    background-color: #f1f5f9;
+    padding: 1rem 1.25rem;
+    text-align: left;
+    font-weight: 700;
+    color: #475569;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 2px solid #cbd5e1;
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+  }
+
+  .database-viewer .data-table tbody tr {
+    transition: background-color 0.15s;
+  }
+
+  .database-viewer .data-table tbody tr:hover {
+    background-color: #f8fafc;
+  }
+
+  .database-viewer .data-table td {
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid #e2e8f0;
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #334155;
+  }
+
+  .database-viewer .null-value {
+    color: #94a3b8;
+    font-style: italic;
+    font-size: 0.85rem;
+  }
+
+  .database-viewer .object-value {
+    color: #059669;
+    font-family: monospace;
+    font-size: 0.85rem;
+  }
+
+  /* Pagination */
+  .database-viewer .pagination {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    justify-content: center;
+    padding-top: 1.5rem;
+  }
+
+  .database-viewer .pagination-btn {
+    padding: 0.75rem 1.5rem;
+    background-color: #7C3AED;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-weight: 600;
+    font-size: 0.9rem;
+    box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+  }
+
+  .database-viewer .pagination-btn:hover:not(:disabled) {
+    background-color: #6D28D9;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4);
+  }
+
+  .database-viewer .pagination-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .database-viewer .page-info {
+    color: #64748b;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  /* Query View */
+  .database-viewer .query-layout {
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    overflow-y: auto;
+    height: 100%;
+    background-color: #f8fafc;
+  }
+
+  .database-viewer .query-editor {
+    background-color: #ffffff;
+    padding: 2rem;
+    border-radius: 12px;
+    border: 2px solid #e2e8f0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  }
+
+  .database-viewer .query-title {
+    font-size: 1.25rem;
+    margin: 0 0 0.5rem 0;
+    font-weight: 700;
+    color: #1e293b;
+  }
+
+  .database-viewer .query-hint {
+    color: #64748b;
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+  }
+
+  .database-viewer .query-input {
+    width: 100%;
+    background-color: #f8fafc;
+    border: 2px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 1rem;
+    color: #1e293b;
+    font-family: "Fira Code", "Courier New", monospace;
+    font-size: 0.9rem;
+    resize: vertical;
+    margin-bottom: 1rem;
+    line-height: 1.6;
+  }
+
+  .database-viewer .query-input:focus {
+    outline: none;
+    border-color: #7C3AED;
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1);
+  }
+
+  .database-viewer .run-query-btn {
+    padding: 0.875rem 2rem;
+    background-color: #10B981;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 1rem;
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  }
+
+  .database-viewer .run-query-btn:hover:not(:disabled) {
+    background-color: #059669;
+    box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4);
+  }
+
+  .database-viewer .run-query-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .database-viewer .query-results {
+    background-color: #ffffff;
+    padding: 2rem;
+    border-radius: 12px;
+    border: 2px solid #e2e8f0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  }
+
+  .database-viewer .results-success {
+    color: #059669;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background-color: #d1fae5;
+    border-radius: 10px;
+    font-size: 0.95rem;
+    border: 2px solid #a7f3d0;
+  }
+
+  .database-viewer .results-error {
+    color: #dc2626;
+    font-weight: 600;
+    padding: 1rem;
+    background-color: #fee2e2;
+    border-radius: 10px;
+    font-size: 0.95rem;
+    border: 2px solid #fecaca;
+  }
+
+  /* Loading & Empty States */
+  .database-viewer .loading {
+    text-align: center;
+    padding: 4rem;
+    color: #64748b;
+    font-size: 1rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .database-viewer .spinner {
+    border: 4px solid #e2e8f0;
+    border-top: 4px solid #7C3AED;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+
+  .database-viewer .empty-state {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: #64748b;
+    background-color: #ffffff;
+    border-radius: 12px;
+    border: 2px dashed #cbd5e1;
+  }
+
+  .database-viewer .empty-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+  }
+
+  .database-viewer .empty-title {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+    color: #475569;
+    font-weight: 600;
+  }
+
+  .database-viewer .empty-text {
+    color: #64748b;
+    font-size: 1rem;
+  }
+
+  .database-viewer .select-prompt {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #64748b;
+    background-color: #ffffff;
+    border-radius: 12px;
+    border: 2px dashed #cbd5e1;
+    padding: 3rem;
+  }
+
+  .database-viewer .select-prompt-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+    opacity: 0.6;
+  }
+
+  .database-viewer .select-prompt-text {
+    font-size: 1.125rem;
+    font-weight: 500;
+    margin: 0;
+  }
+`;

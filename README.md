@@ -66,6 +66,8 @@ graph TD
 
 #### Development Mode (Recommended)
 
+> **Important:** During development, you MUST run both servers. The CLI serves the API, and Vite serves the dashboard with hot reload. In production, the CLI serves everything.
+
 Run the backend and frontend in **two separate terminals**:
 
 **Terminal 1 - Backend (Fastify Server)**

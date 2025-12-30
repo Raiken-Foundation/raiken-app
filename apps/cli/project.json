@@ -5,7 +5,7 @@
     "projectType": "application",
     "tags": [],
     "targets": {
-        "build": {
+        "build:esbuild": {
             "executor": "@nx/esbuild:esbuild",
             "outputs": ["{options.outputPath}"],
             "defaultConfiguration": "production",
@@ -24,18 +24,32 @@
                 "bundle": true,
                 "format": ["cjs"],
                 "generatePackageJson": true,
-                "additionalEntryPoints": ["apps/cli/src/index.ts"],
-                "assets": [
-                    {
-                        "input": "dist/apps/dashboard",
-                        "glob": "**/*",
-                        "output": "public"
-                    }
-                ]
+                "additionalEntryPoints": ["apps/cli/src/index.ts"]
             },
             "configurations": {
                 "development": {},
                 "production": {}
+            }
+        },
+        "copy-dashboard": {
+            "executor": "nx:run-commands",
+            "outputs": ["{workspaceRoot}/dist/apps/cli/public"],
+            "dependsOn": ["build:esbuild"],
+            "options": {
+                "commands": [
+                    "mkdir -p dist/apps/cli/public",
+                    "cp -r dist/apps/dashboard/* dist/apps/cli/public/"
+                ],
+                "parallel": false
+            }
+        },
+        "build": {
+            "executor": "nx:run-commands",
+            "outputs": ["{workspaceRoot}/dist/apps/cli"],
+            "dependsOn": ["build:esbuild", "copy-dashboard"],
+            "options": {
+                "commands": ["echo '✅ CLI build complete with dashboard assets'"],
+                "parallel": false
             }
         },
         "install-deps": {
@@ -62,20 +76,11 @@
             }
         },
         "serve": {
-            "executor": "@nx/js:node",
+            "executor": "nx:run-commands",
             "defaultConfiguration": "development",
             "dependsOn": ["build:dev"],
             "options": {
-                "buildTarget": "cli:build",
-                "args": ["start"]
-            },
-            "configurations": {
-                "development": {
-                    "buildTarget": "cli:build"
-                },
-                "production": {
-                    "buildTarget": "cli:build"
-                }
+                "command": "node dist/apps/cli/bin.cjs start"
             }
         },
         "lint": {

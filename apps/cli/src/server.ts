@@ -42,6 +42,17 @@ export async function startServer(port = 7101) {
         prefix: "/",
     });
 
+    // SPA fallback: serve index.html for client-side routing
+    app.setNotFoundHandler((request, reply) => {
+        const isApiRoute = request.url.startsWith('/api');
+        if (isApiRoute) {
+            reply.code(404).send({ error: 'Not found' });
+        } else {
+            // Serve index.html for client-side routing
+            reply.sendFile('index.html');
+        }
+    });
+
     try {
         await app.listen({ port, host: "0.0.0.0" });
         console.log(`\n🚀 Raiken UI running at http://localhost:${port}`);

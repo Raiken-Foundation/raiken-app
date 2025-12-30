@@ -29,9 +29,9 @@ export function LandingPage({ onStart }: LandingPageProps) {
   }, [healthQuery.isSuccess]);
 
   useEffect(() => {
-    if (projectQuery.data?.cwd) {
+    if (projectQuery.data?.path) {
       // Extract project name from path
-      const parts = projectQuery.data.cwd.split('/');
+      const parts = projectQuery.data.path.split('/');
       setProjectName(parts[parts.length - 1] || 'project');
     }
   }, [projectQuery.data]);

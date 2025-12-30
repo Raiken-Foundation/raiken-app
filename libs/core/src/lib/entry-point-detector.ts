@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { PackageJson, NextConfig, EntryPointResult } from '../types';
 
-import fg = require('fast-glob');
+import fg from 'fast-glob';
 
 /**
  * EntryPointDetector - Optimized for performance

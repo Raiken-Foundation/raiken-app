@@ -61,11 +61,16 @@ export async function detectProject(projectPath: string): Promise<ProjectInfo> {
   // Get default test directory
   const testDir = getDefaultTestDirectory(projectType);
 
-  // Detect test frameworks
-  const hasPlaywright = !!(allDeps['playwright'] || allDeps['@playwright/test']);
+  // Detect test frameworks from dependencies
+  let hasPlaywright = !!(allDeps['playwright'] || allDeps['@playwright/test']);
   const hasJest = !!(allDeps['jest'] || allDeps['@types/jest']);
   const hasVitest = !!(allDeps['vitest']);
   const hasCypress = !!(allDeps['cypress']);
+
+  // Also check for config files (even if package not installed)
+  if (!hasPlaywright) {
+    hasPlaywright = await hasPlaywrightConfig(projectPath);
+  }
 
   const testFramework = detectTestFramework({
     hasPlaywright,
@@ -169,6 +174,27 @@ function detectTestFramework(frameworks: {
   if (frameworks.hasVitest) return 'vitest';
   if (frameworks.hasJest) return 'jest';
   return 'none';
+}
+
+async function hasPlaywrightConfig(projectPath: string): Promise<boolean> {
+  // Check for Playwright config files
+  const configFiles = [
+    'playwright.config.ts',
+    'playwright.config.js',
+    'playwright.config.mjs',
+    'playwright.config.cjs'
+  ];
+
+  for (const file of configFiles) {
+    try {
+      await fs.access(path.join(projectPath, file));
+      return true;
+    } catch {
+      // Continue checking
+    }
+  }
+
+  return false;
 }
 
 async function detectPackageManager(projectPath: string): Promise<PackageManager> {

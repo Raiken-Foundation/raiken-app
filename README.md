@@ -35,3 +35,108 @@ graph TD
     API -->|Calls| Core[libs/core]
     Core -->|Reads/Writes| DB[(.raiken/raiken.db)]
 ```
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- **Node.js**: v18 or higher
+- **pnpm**: v8 or higher (install with `npm install -g pnpm`)
+
+### Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/Raiken-Foundation/raiken-app.git
+   cd raiken-app
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pnpm install
+   ```
+
+   This will install all dependencies for the monorepo, including:
+   - Root workspace dependencies
+   - CLI app dependencies (`apps/cli`)
+   - Dashboard app dependencies (`apps/dashboard`)
+   - All library dependencies (`libs/*`)
+
+### Running the Project
+
+#### Development Mode (Recommended)
+
+> **Important:** During development, you MUST run both servers. The CLI serves the API, and Vite serves the dashboard with hot reload. In production, the CLI serves everything.
+
+Run the backend and frontend in **two separate terminals**:
+
+**Terminal 1 - Backend (Fastify Server)**
+```bash
+nx serve cli
+```
+- Starts Fastify server on `http://localhost:7101`
+- Serves tRPC API at `/api/trpc`
+- Hot-reloads on code changes
+
+**Terminal 2 - Frontend (React Dashboard)**
+```bash
+nx serve dashboard
+```
+- Starts Vite dev server on `http://localhost:4200`
+- Proxies `/api` requests to backend (port 7101)
+- Hot Module Replacement (HMR) enabled
+- **Open your browser to `http://localhost:4200`**
+
+#### Production Build
+
+1. **Build all projects**
+   ```bash
+   nx run-many -t build
+   ```
+
+2. **Build CLI only** (includes dashboard as static assets)
+   ```bash
+   nx build cli
+   ```
+
+3. **Run the built CLI**
+   ```bash
+   node dist/apps/cli/bin.js start
+   ```
+   - Serves both API and dashboard on `http://localhost:7101`
+
+### Available Commands
+
+#### Development
+```bash
+nx serve cli              # Run CLI backend (Fastify on :7101)
+nx serve dashboard        # Run React dashboard (Vite on :4200)
+```
+
+#### Building
+```bash
+nx build cli              # Build CLI (includes dashboard as static assets)
+nx build dashboard        # Build dashboard only
+nx run-many -t build      # Build all projects
+```
+
+#### Code Quality
+```bash
+pnpm lint                 # Lint entire codebase (Biome)
+pnpm format               # Format entire codebase (Biome)
+pnpm check                # Run all Biome checks
+nx lint <project>         # Lint specific project
+```
+
+### Build Errors
+```bash
+# Clean Nx cache
+nx reset
+
+# Rebuild all
+nx run-many -t build --skip-nx-cache
+```
+
+## License
+
+MIT

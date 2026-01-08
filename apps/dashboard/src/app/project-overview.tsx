@@ -28,7 +28,7 @@ export function ProjectOverview() {
     }
 
     // At this point, projectQuery.data is guaranteed to be defined
-    const { cwd, nodeVersion } = projectQuery.data!;
+    const { path: cwd, nodeVersion } = projectQuery.data!;
 
     return (
         <div className="p-6 bg-white rounded-lg shadow-sm border border-gray-200">

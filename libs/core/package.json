@@ -5,5 +5,15 @@
     "type": "commonjs",
     "main": "./index.cjs",
     "types": "./index.d.ts",
-    "dependencies": {}
+    "dependencies": {
+        "@babel/parser": "^7.26.3",
+        "@babel/traverse": "^7.26.5",
+        "@babel/types": "^7.26.3",
+        "better-sqlite3": "^11.8.1",
+        "fast-glob": "^3.3.2"
+    },
+    "devDependencies": {
+        "@types/babel__traverse": "^7.28.0",
+        "@types/better-sqlite3": "^7.6.13"
+    }
 }

@@ -40,7 +40,27 @@ export interface ParsedFile {
   imports: ParsedImport[];
   exports: string[];
   types: ParsedType[];          
-}  
+}
+
+export interface ParsedFileWithAst {
+  parsed: ParsedFile;  // Simplified structure for embeddings
+  ast: unknown;        // Complete Babel AST for test generation
+}
+
+// ============================================================================
+// Code Chunks (Used for embeddings generation)
+// ============================================================================
+
+export interface CodeChunk {
+  type: 'function' | 'class' | 'type' | 'file';
+  name: string;
+  filePath: string;
+  data: ParsedFunction | ParsedClass | ParsedType | null;
+  // Metadata for context
+  line?: number;
+  isExported?: boolean;
+  isAsync?: boolean;
+}
 
 // ============================================================================
 // Entry Point Detector
@@ -78,7 +98,8 @@ export interface ParsedFile {
   export interface CodeNode {
     filePath: string;          // Absolute path
     relativePath: string;      // Relative to project root
-    parsed: ParsedFile;        // AST data (functions, classes, imports, exports)
+    parsed: ParsedFile;        // Simplified AST (functions, classes, imports, exports) - for embeddings
+    ast?: unknown;             // Complete Babel AST - for test generation
     imports: string[];         // Files this imports (absolute paths)
     importedBy: string[];      // Files that import this (absolute paths)
     depth: number;             // Distance from entry point
@@ -121,3 +142,58 @@ export interface ParsedFile {
     onUpdate?: (event: UpdateEvent) => void;
   }
   
+// ============================================================================
+// Database Types
+// ============================================================================
+
+export interface DBFileNode {
+  id: number;
+  project_path: string;
+  file_path: string;
+  relative_path: string;
+  content_hash: string;
+  tree_hash: string;
+  size: number;
+  lines: number;
+  depth: number;
+  last_indexed: number;
+  functions_count: number;
+  classes_count: number;
+  types_count: number;
+  imports_count: number;
+  exported_count: number;
+  parsed_ast: string;       // Simplified AST structure as JSON (for embeddings)
+  ast: string | null;       // Complete Babel AST as JSON (for test generation)
+  indexed_via: 'scan' | 'watch'; // Track how file was indexed
+}
+
+export interface DBDependency {
+  id: number;
+  project_path: string;
+  source_file: string;
+  target_file: string;
+  import_type: 'static' | 'dynamic' | 'type-only'; // ✅ Track import type
+  created_at: number;
+}
+
+export interface DBEntryPoint {
+  id: number;
+  project_path: string;
+  file_path: string;
+  framework: string | null;
+  role: string;
+  type: string;
+  created_at: number;
+}
+
+export interface DBStats {
+  project_path: string;
+  total_files: number;
+  total_size: number;
+  total_lines: number;
+  total_functions: number;
+  total_classes: number;
+  total_types: number;
+  last_scan: number;
+  schema_version: number;
+}

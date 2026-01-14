@@ -2,7 +2,7 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
 import * as path from "node:path";
-import { EntryPointDetector, CodeGraph, CodeGraphDB, formatBytes } from "@raiken/core";
+import { EntryPointDetector, CodeGraph, CodeGraphDB, formatBytes, EmbeddingsGenerator, fullAstToSearchableText } from "@raiken/core";
 
 // Context type for tRPC procedures
 export interface Context {
@@ -37,7 +37,7 @@ export const appRouter = t.router({
                 persist: z.boolean().default(true),
             })
         )
-        .query(async ({ input }) => {
+        .mutation(async ({ input }) => {
             const projectPath = input.path || process.cwd();
 
             // Detect entry points
@@ -194,6 +194,27 @@ export const appRouter = t.router({
         };
         }),
 
+    getFileContent: t.procedure
+        .input(z.object({
+            filePath: z.string(),
+        }))
+        .query(async ({ input }) => {
+            const projectPath = process.cwd();
+            const fullPath = path.join(projectPath, input.filePath);
+            
+            try {
+                const fs = await import('fs/promises');
+                const content = await fs.readFile(fullPath, 'utf-8');
+                return {
+                    filePath: input.filePath,
+                    content,
+                    timestamp: new Date().toISOString()
+                };
+            } catch {
+                throw new Error(`Failed to read file: ${input.filePath}`);
+            }
+        }),
+
     // ============================================================================
     // Database Viewer Endpoints
     // ============================================================================
@@ -275,6 +296,200 @@ export const appRouter = t.router({
                     timestamp: new Date().toISOString()
                 };
             }
+        }),
+
+    // ============================================================================
+    // Embeddings & Semantic Search Endpoints
+    // ============================================================================
+
+    generateEmbeddings: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+                forceRegenerate: z.boolean().default(false),
+            })
+        )
+        .mutation(async ({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            const embGen = EmbeddingsGenerator.getInstance();
+
+            try {
+                // Initialize model
+                await embGen.initialize();
+
+                // Get all files from database
+                const files = db.getFiles();
+                let totalChunks = 0;
+                let filesProcessed = 0;
+
+                console.log(`🔄 Generating embeddings for ${files.length} files...`);
+
+                for (const file of files) {
+                    // Skip if embeddings already exist and not forcing regeneration
+                    if (!input.forceRegenerate && db.hasEmbeddings(file.id)) {
+                        continue;
+                    }
+
+                    // Use full AST for richer embeddings (needed for test generation)
+                    if (!file.ast) {
+                        console.warn(`⚠️  No AST data for ${file.relative_path}, skipping`);
+                        continue;
+                    }
+
+                    // Parse stored full AST
+                    let ast;
+                    try {
+                        ast = JSON.parse(file.ast);
+                    } catch {
+                        console.warn(`⚠️  Failed to parse AST for ${file.relative_path}, skipping`);
+                        continue;
+                    }
+
+                    // Convert full AST to rich searchable text
+                    const searchableText = fullAstToSearchableText(ast, file.relative_path);
+
+                    // Skip if no content
+                    if (!searchableText || searchableText.trim().length === 0) {
+                        continue;
+                    }
+
+                    // For now, embed the entire file as one chunk
+                    // Future: Can split into semantic chunks based on AST nodes
+                    const chunks = [{
+                        type: 'file' as const,
+                        name: file.relative_path,
+                        text: searchableText,
+                    }];
+
+                    // Generate embeddings
+                    const texts = chunks.map(c => c.text);
+                    const embeddings = await embGen.generateEmbeddingsBatch(texts);
+
+                    // Store in database
+                    const chunksWithEmbeddings = chunks.map((chunk, i) => ({
+                        ...chunk,
+                        embedding: embeddings[i],
+                    }));
+
+                    db.saveEmbeddings(file.id, chunksWithEmbeddings);
+                    totalChunks += chunks.length;
+                    filesProcessed++;
+
+                    if (filesProcessed % 10 === 0) {
+                        console.log(`  Progress: ${filesProcessed}/${files.length} files`);
+                    }
+                }
+
+                db.close();
+
+                return {
+                    success: true,
+                    filesProcessed,
+                    totalFiles: files.length,
+                    chunksGenerated: totalChunks,
+                    modelUsed: 'Xenova/all-MiniLM-L6-v2',
+                    embeddingDimension: 384,
+                    timestamp: new Date().toISOString(),
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    filesProcessed: 0,
+                    totalFiles: 0,
+                    chunksGenerated: 0,
+                    timestamp: new Date().toISOString(),
+                };
+            }
+        }),
+
+    searchCode: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+                query: z.string(),
+                limit: z.number().default(10),
+                chunkTypes: z.array(z.enum(['function', 'class', 'file', 'type'])).optional(),
+            })
+        )
+        .query(async ({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            const embGen = EmbeddingsGenerator.getInstance();
+
+            try {
+                // Check if embeddings exist
+                const embeddingsCount = db.getEmbeddingsCount();
+                if (embeddingsCount === 0) {
+                    db.close();
+                    return {
+                        query: input.query,
+                        results: [],
+                        message: 'No embeddings found. Please run generateEmbeddings first.',
+                        timestamp: new Date().toISOString(),
+                    };
+                }
+
+                // Generate embedding for query
+                await embGen.initialize();
+                const queryEmbedding = await embGen.generateEmbedding(input.query);
+
+                // Search database
+                const results = db.searchSimilar(
+                    queryEmbedding,
+                    input.limit,
+                    input.chunkTypes
+                );
+
+                db.close();
+
+                return {
+                    query: input.query,
+                    results: results.map(r => ({
+                        filePath: r.filePath,
+                        chunkType: r.chunkType,
+                        chunkName: r.chunkName,
+                        chunkText: r.chunkText,
+                        similarity: r.similarity,
+                        relevanceScore: Math.round(r.similarity * 100),
+                    })),
+                    totalResults: results.length,
+                    timestamp: new Date().toISOString(),
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    query: input.query,
+                    results: [],
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    timestamp: new Date().toISOString(),
+                };
+            }
+        }),
+
+    getEmbeddingsStats: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .query(({ input }) => {
+            const projectPath = input.path || process.cwd();
+            const db = new CodeGraphDB(projectPath);
+            
+            const totalEmbeddings = db.getEmbeddingsCount();
+            const totalFiles = db.getStats()?.total_files || 0;
+            
+            db.close();
+
+            return {
+                totalEmbeddings,
+                totalFiles,
+                embeddingsPerFile: totalFiles > 0 ? (totalEmbeddings / totalFiles).toFixed(2) : '0',
+                modelUsed: 'Xenova/all-MiniLM-L6-v2',
+                embeddingDimension: 384,
+                timestamp: new Date().toISOString(),
+            };
         }),
 });
 

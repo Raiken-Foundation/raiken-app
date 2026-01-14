@@ -2,62 +2,9 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import { load as loadSqliteVec } from 'sqlite-vec';
 import { CodeNode, ParsedFile } from '../types';
-
-// ============================================================================
-// Database Types
-// ============================================================================
-
-export interface DBFileNode {
-  id: number;
-  project_path: string;
-  file_path: string;
-  relative_path: string;
-  content_hash: string;
-  tree_hash: string;
-  size: number;
-  lines: number;
-  depth: number;
-  last_indexed: number;
-  functions_count: number;
-  classes_count: number;
-  types_count: number;
-  imports_count: number;
-  exported_count: number;
-  parsed_ast: string; // ✅ Store full AST as JSON
-  indexed_via: 'scan' | 'watch'; // ✅ Track how file was indexed
-}
-
-export interface DBDependency {
-  id: number;
-  project_path: string;
-  source_file: string;
-  target_file: string;
-  import_type: 'static' | 'dynamic' | 'type-only'; // ✅ Track import type
-  created_at: number;
-}
-
-export interface DBEntryPoint {
-  id: number;
-  project_path: string;
-  file_path: string;
-  framework: string | null;
-  role: string;
-  type: string;
-  created_at: number;
-}
-
-export interface DBStats {
-  project_path: string;
-  total_files: number;
-  total_size: number;
-  total_lines: number;
-  total_functions: number;
-  total_classes: number;
-  total_types: number;
-  last_scan: number;
-  schema_version: number;
-}
+import { DBEntryPoint, DBFileNode, DBDependency, DBStats } from '../types';
 
 // ============================================================================
 // Custom Errors
@@ -92,7 +39,7 @@ export class CodeGraphDB {
   private projectPath: string;
   private readonly dbPath: string;
   
-  private static readonly SCHEMA_VERSION = 2;
+  private static readonly SCHEMA_VERSION = 3;
   private static readonly RETRY_ATTEMPTS = 3;
   private static readonly RETRY_DELAY_MS = 100;
 
@@ -111,6 +58,9 @@ export class CodeGraphDB {
       }
       
       this.db = new Database(this.dbPath);
+      
+      // ✅ Load sqlite-vec extension for vector similarity search
+      loadSqliteVec(this.db);
       
       // ✅ Enable WAL mode for better concurrency
       this.db.pragma('journal_mode = WAL');
@@ -160,6 +110,11 @@ export class CodeGraphDB {
       this.setUserVersion(2);
     }
     
+    if (this.getUserVersion() === 2) {
+      this.migrateToV3();
+      this.setUserVersion(3);
+    }
+    
     // Future migrations go here...
   }
 
@@ -186,6 +141,7 @@ export class CodeGraphDB {
         imports_count INTEGER DEFAULT 0,
         exported_count INTEGER DEFAULT 0,
         parsed_ast TEXT DEFAULT '{}',
+        ast TEXT DEFAULT NULL,
         indexed_via TEXT DEFAULT 'scan' CHECK(indexed_via IN ('scan', 'watch')),
         UNIQUE(project_path, file_path)
       );
@@ -272,6 +228,43 @@ export class CodeGraphDB {
   }
 
   /**
+   * Migration from v2 to v3 - Add embeddings support
+   */
+  private migrateToV3(): void {
+    this.db.transaction(() => {
+      // Create embeddings table
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS embeddings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_id INTEGER NOT NULL,
+          chunk_type TEXT NOT NULL CHECK(chunk_type IN ('function', 'class', 'file', 'type')),
+          chunk_name TEXT NOT NULL,
+          chunk_text TEXT NOT NULL,
+          embedding BLOB NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_embeddings_file ON embeddings(file_id);
+        CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(chunk_type);
+        CREATE INDEX IF NOT EXISTS idx_embeddings_name ON embeddings(chunk_name);
+      `);
+
+      // Create virtual table for vector search using sqlite-vec
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
+          embedding float[384]
+        );
+      `);
+
+      // Update stats schema_version
+      this.db.exec(`
+        UPDATE stats SET schema_version = 3 WHERE schema_version < 3
+      `);
+    })();
+  }
+
+  /**
    * Ensure .raiken/ is in .gitignore
    */
   private ensureGitignore(): void {
@@ -348,8 +341,8 @@ export class CodeGraphDB {
           INSERT OR REPLACE INTO files (
             project_path, file_path, relative_path, content_hash, tree_hash,
             size, lines, depth, last_indexed, functions_count, classes_count,
-            types_count, imports_count, exported_count, parsed_ast, indexed_via
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            types_count, imports_count, exported_count, parsed_ast, ast, indexed_via
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const insertDep = this.db.prepare(`
@@ -380,6 +373,7 @@ export class CodeGraphDB {
 
           // ✅ Serialize full AST data
           const parsedAst = JSON.stringify(node.parsed);
+          const ast = node.ast ? JSON.stringify(node.ast) : null;
 
           insertFile.run(
             this.projectPath,
@@ -397,6 +391,7 @@ export class CodeGraphDB {
             node.imports.length,
             node.parsed.exports.length,
             parsedAst,
+            ast,
             indexedVia
           );
 
@@ -461,14 +456,16 @@ export class CodeGraphDB {
           DELETE FROM dependencies WHERE project_path = ? AND source_file = ?
         `).run(this.projectPath, node.filePath);
 
-        // Upsert file
+        // Upsert file with both parsed structure and complete AST
         const parsedAst = JSON.stringify(node.parsed);
+        const ast = node.ast ? JSON.stringify(node.ast) : null;
+        
         this.db.prepare(`
           INSERT OR REPLACE INTO files (
             project_path, file_path, relative_path, content_hash, tree_hash,
             size, lines, depth, last_indexed, functions_count, classes_count,
-            types_count, imports_count, exported_count, parsed_ast, indexed_via
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            types_count, imports_count, exported_count, parsed_ast, ast, indexed_via
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           this.projectPath,
           node.filePath,
@@ -485,6 +482,7 @@ export class CodeGraphDB {
           node.imports.length,
           node.parsed.exports.length,
           parsedAst,
+          ast,
           indexedVia
         );
 
@@ -797,7 +795,7 @@ export class CodeGraphDB {
   /**
    * Query a table with pagination.
    */
-  queryTable(tableName: string, limit: number, offset: number): any[] {
+  queryTable(tableName: string, limit: number, offset: number): unknown[] {
     try {
       return this.db.prepare(`
         SELECT * FROM ${tableName}
@@ -812,7 +810,7 @@ export class CodeGraphDB {
   /**
    * Execute a custom SQL query (SELECT only for safety).
    */
-  executeQuery(query: string, params: any[] = []): any[] {
+  executeQuery(query: string, params: unknown[] = []): unknown[] {
     // Only allow SELECT queries for safety
     const trimmedQuery = query.trim().toUpperCase();
     if (!trimmedQuery.startsWith('SELECT')) {
@@ -824,6 +822,233 @@ export class CodeGraphDB {
     } catch (error) {
       throw new Error(`Query execution failed: ${(error as Error).message}`);
     }
+  }
+
+  // ==========================================================================
+  // Embeddings Operations
+  // ==========================================================================
+
+  /**
+   * Save embeddings for a file's code chunks.
+   * 
+   * @param fileId - The database ID of the file
+   * @param chunks - Array of chunks with their embeddings
+   */
+  saveEmbeddings(
+    fileId: number,
+    chunks: Array<{
+      type: 'function' | 'class' | 'file' | 'type';
+      name: string;
+      text: string;
+      embedding: number[];
+    }>
+  ): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        // Get embedding IDs BEFORE deleting from main table
+        const oldEmbeddingIds = (this.db.prepare(`
+          SELECT id FROM embeddings WHERE file_id = ?
+        `).all(fileId) as Array<{ id: number }>).map((row) => row.id);
+
+        // Delete from vector table first
+        for (const id of oldEmbeddingIds) {
+          this.db.prepare(`
+            DELETE FROM vec_embeddings WHERE rowid = ?
+          `).run(id);
+        }
+
+        // Then delete from main embeddings table
+        this.db.prepare(`
+          DELETE FROM embeddings WHERE file_id = ?
+        `).run(fileId);
+
+        const insertStmt = this.db.prepare(`
+          INSERT INTO embeddings (file_id, chunk_type, chunk_name, chunk_text, embedding, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+
+        const insertVecStmt = this.db.prepare(`
+          INSERT INTO vec_embeddings (embedding)
+          VALUES (?)
+        `);
+
+        for (const chunk of chunks) {
+          // Convert embedding array to Float32Array buffer
+          const embeddingBuffer = Buffer.from(new Float32Array(chunk.embedding).buffer);
+
+          // Insert into main table first
+          const result = insertStmt.run(
+            fileId,
+            chunk.type,
+            chunk.name,
+            chunk.text,
+            embeddingBuffer,
+            Date.now()
+          );
+
+          // Insert into vector search table
+          // sqlite-vec virtual tables auto-assign rowid
+          insertVecStmt.run(embeddingBuffer);
+        }
+      });
+
+      transaction();
+    });
+  }
+
+  /**
+   * Search for similar code using vector similarity.
+   * 
+   * @param queryEmbedding - The embedding vector to search for
+   * @param limit - Maximum number of results (default: 10)
+   * @param chunkTypes - Filter by chunk types (optional)
+   * @returns Array of matching chunks with similarity scores
+   */
+  searchSimilar(
+    queryEmbedding: number[],
+    limit = 10,
+    chunkTypes?: Array<'function' | 'class' | 'file' | 'type'>
+  ): Array<{
+    fileId: number;
+    filePath: string;
+    chunkType: string;
+    chunkName: string;
+    chunkText: string;
+    similarity: number;
+  }> {
+    const embeddingBuffer = Buffer.from(new Float32Array(queryEmbedding).buffer);
+
+    // Build query with optional type filter
+    let query = `
+      SELECT 
+        e.file_id,
+        f.relative_path,
+        e.chunk_type,
+        e.chunk_name,
+        e.chunk_text,
+        vec_distance_cosine(v.embedding, ?) as distance
+      FROM embeddings e
+      JOIN files f ON e.file_id = f.id
+      JOIN vec_embeddings v ON v.rowid = e.id
+      WHERE f.project_path = ?
+    `;
+
+    const params: (Buffer | string | number)[] = [embeddingBuffer, this.projectPath];
+
+    if (chunkTypes && chunkTypes.length > 0) {
+      const placeholders = chunkTypes.map(() => '?').join(',');
+      query += ` AND e.chunk_type IN (${placeholders})`;
+      params.push(...chunkTypes);
+    }
+
+    query += ` ORDER BY distance ASC LIMIT ?`;
+    params.push(limit);
+
+    const results = this.db.prepare(query).all(...params) as Array<{
+      file_id: number;
+      relative_path: string;
+      chunk_type: string;
+      chunk_name: string;
+      chunk_text: string;
+      distance: number;
+    }>;
+
+    return results.map((row) => ({
+      fileId: row.file_id,
+      filePath: row.relative_path,
+      chunkType: row.chunk_type,
+      chunkName: row.chunk_name,
+      chunkText: row.chunk_text,
+      similarity: 1 - row.distance, // Convert distance to similarity (0-1)
+    }));
+  }
+
+  /**
+   * Get all embeddings for a specific file.
+   * 
+   * @param fileId - The database ID of the file
+   * @returns Array of embeddings with metadata
+   */
+  getFileEmbeddings(fileId: number): Array<{
+    id: number;
+    chunkType: string;
+    chunkName: string;
+    chunkText: string;
+    createdAt: number;
+  }> {
+    const results = this.db.prepare(`
+      SELECT id, chunk_type, chunk_name, chunk_text, created_at
+      FROM embeddings
+      WHERE file_id = ?
+      ORDER BY chunk_type, chunk_name
+    `).all(fileId) as Array<{
+      id: number;
+      chunk_type: string;
+      chunk_name: string;
+      chunk_text: string;
+      created_at: number;
+    }>;
+    
+    return results.map((row) => ({
+      id: row.id,
+      chunkType: row.chunk_type,
+      chunkName: row.chunk_name,
+      chunkText: row.chunk_text,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Delete all embeddings for a specific file.
+   * 
+   * @param fileId - The database ID of the file
+   */
+  deleteFileEmbeddings(fileId: number): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        // Get embedding IDs first
+        const embeddingIds = (this.db.prepare(`
+          SELECT id FROM embeddings WHERE file_id = ?
+        `).all(fileId) as Array<{ id: number }>).map((row) => row.id);
+
+        // Delete from vector table
+        for (const id of embeddingIds) {
+          this.db.prepare(`
+            DELETE FROM vec_embeddings WHERE rowid = ?
+          `).run(id);
+        }
+
+        // Delete from main table
+        this.db.prepare(`
+          DELETE FROM embeddings WHERE file_id = ?
+        `).run(fileId);
+      });
+
+      transaction();
+    });
+  }
+
+  /**
+   * Get count of embeddings in the database.
+   */
+  getEmbeddingsCount(): number {
+    const result = this.db.prepare(`
+      SELECT COUNT(*) as count FROM embeddings
+    `).get() as { count: number };
+    return result.count;
+  }
+
+  /**
+   * Check if a file has embeddings.
+   * 
+   * @param fileId - The database ID of the file
+   * @returns True if embeddings exist
+   */
+  hasEmbeddings(fileId: number): boolean {
+    const result = this.db.prepare(`
+      SELECT 1 FROM embeddings WHERE file_id = ? LIMIT 1
+    `).get(fileId);
+    return result !== undefined;
   }
 
   /**

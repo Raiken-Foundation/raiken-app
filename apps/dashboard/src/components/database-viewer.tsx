@@ -40,7 +40,10 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
   // Execute custom query
   const { mutate: executeQuery, isPending: queryLoading } = trpc.executeQuery.useMutation({
     onSuccess: (data) => {
-      setQueryResults(data);
+      setQueryResults({
+        ...data,
+        results: data.results as TableRow[],
+      });
     },
   });
 
@@ -149,7 +152,7 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                         <table className="data-table">
                           <thead>
                             <tr>
-                              {Object.keys(tableData.data[0]).map((col) => (
+                              {Object.keys(tableData.data[0] as Record<string, unknown>).map((col) => (
                                 <th key={col}>{col}</th>
                               ))}
                             </tr>
@@ -157,7 +160,7 @@ export function DatabaseViewer({ onClose }: DatabaseViewerProps) {
                           <tbody>
                             {tableData.data.map((row, idx) => (
                               <tr key={idx}>
-                                {Object.values(row).map((val: unknown, colIdx) => (
+                                {Object.values(row as Record<string, unknown>).map((val: unknown, colIdx) => (
                                   <td key={colIdx}>
                                     {val === null ? (
                                       <span className="null-value">NULL</span>

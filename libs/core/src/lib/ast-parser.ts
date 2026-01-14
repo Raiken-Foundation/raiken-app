@@ -2,7 +2,7 @@ import * as parser from '@babel/parser';
 import type { ParserPlugin } from '@babel/parser';
 import traverse from '@babel/traverse';
 import * as t from '@babel/types';
-import { ParsedFile } from '../types';
+import { ParsedFile, CodeChunk, ParsedFunction, ParsedClass, ParsedType } from '../types';
 import { getParamName, isExportedNode } from '../utils';
 
 /**
@@ -54,7 +54,11 @@ function getParserPlugins(filename: string): ParserPlugin[] {
  * @param filename - The filename (used to determine parser plugins).
  * @returns The parsed file structure.
  */
-export function parseSourceFile(code: string, filename = 'unknown.js'): ParsedFile {
+/**
+ * Parse source code into structured format + complete Babel AST.
+ * Always returns both simplified structure (for embeddings) and complete Babel AST (for test generation).
+ */
+export function parseSourceFile(code: string, filename = 'unknown.js'): import('../types').ParsedFileWithAst {
   const result: ParsedFile = {
     functions: [],
     classes: [],
@@ -63,6 +67,8 @@ export function parseSourceFile(code: string, filename = 'unknown.js'): ParsedFi
     types: []
   };
 
+  let astTree: unknown;
+
   try {
     // Parse the code into an AST with appropriate plugins
     // Use 'unambiguous' to auto-detect module vs script based on import/export presence
@@ -70,6 +76,9 @@ export function parseSourceFile(code: string, filename = 'unknown.js'): ParsedFi
       sourceType: 'unambiguous',
       plugins: getParserPlugins(filename)
     });
+
+    // Store complete AST for advanced features (test generation, refactoring, etc.)
+    astTree = ast;
 
     // Traverse the AST
     traverse(ast, {
@@ -285,7 +294,8 @@ export function parseSourceFile(code: string, filename = 'unknown.js'): ParsedFi
     );
   }
 
-  return result;
+  // Always return both parsed structure (for embeddings) and complete AST (for test generation)
+  return { parsed: result, ast: astTree };
 }
 
 /**
@@ -344,6 +354,317 @@ export function summarizeParsedFile(parsed: ParsedFile): string {
   }
   
   return lines.join('\n');
+}
+
+/**
+ * Convert parsed AST to searchable text format for embeddings.
+ * This creates a human-readable representation of the code structure.
+ * 
+ * @param parsed - The parsed file structure
+ * @param filePath - The file path (for context)
+ * @returns Searchable text representation
+ */
+export function astToSearchableText(parsed: ParsedFile, filePath: string): string {
+  const chunks = generateCodeChunks(parsed, filePath);
+  
+  // Add file header
+  const lines = [`File: ${filePath}`];
+  
+  // Convert each chunk to text
+  for (const chunk of chunks) {
+    const text = chunkToSearchableText(chunk);
+    // Remove file path from individual lines (redundant)
+    const simplifiedText = text.replace(` in ${filePath}`, '');
+    lines.push(simplifiedText);
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Convert full Babel AST to rich searchable text for embeddings.
+ * Extracts complete structural and semantic information for test generation.
+ * 
+ * @param ast - The complete Babel AST
+ * @param filePath - The file path (for context)
+ * @param sourceCode - Optional source code for code snippets
+ * @returns Rich searchable text with full context
+ */
+export function fullAstToSearchableText(ast: unknown, filePath: string, sourceCode?: string): string {
+  const lines = [`File: ${filePath}\n`];
+  const astNode = ast as t.File;
+  
+  if (!astNode || !astNode.program) {
+    return lines.join('\n');
+  }
+  
+  // Traverse AST and extract detailed information
+  traverse(astNode, {
+    // Function declarations with full context
+    FunctionDeclaration(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id)) {
+        const async = node.async ? 'async ' : '';
+        const exported = isExportedNode(path) ? 'export ' : '';
+        const params = node.params.map(p => getParamName(p)).join(', ');
+        
+        lines.push(`${exported}${async}function ${node.id.name}(${params})`);
+        
+        // Add function body context (first few statements)
+        if (node.body && node.body.body.length > 0) {
+          const bodyPreview = node.body.body.slice(0, 3).map(stmt => {
+            return `  ${t.isReturnStatement(stmt) ? 'returns' : t.isIfStatement(stmt) ? 'if condition' : 'statement'}`;
+          }).join('\n');
+          lines.push(bodyPreview);
+        }
+        lines.push('');
+      }
+    },
+    
+    // Arrow functions and function expressions
+    VariableDeclarator(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id) && 
+          (t.isArrowFunctionExpression(node.init) || t.isFunctionExpression(node.init))) {
+        const async = node.init.async ? 'async ' : '';
+        const params = node.init.params.map(p => getParamName(p)).join(', ');
+        const exported = isExportedNode(path.parentPath) || isExportedNode(path.parentPath.parentPath) ? 'export ' : '';
+        
+        lines.push(`${exported}${async}const ${node.id.name} = (${params}) => {...}`);
+        lines.push('');
+      }
+    },
+    
+    // Classes with full details
+    ClassDeclaration(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id)) {
+        const exported = isExportedNode(path) ? 'export ' : '';
+        lines.push(`${exported}class ${node.id.name}`);
+        
+        // List all methods and properties
+        node.body.body.forEach(member => {
+          if (t.isClassMethod(member)) {
+            const key = member.key;
+            let name = 'unknown';
+            if (t.isIdentifier(key)) {
+              name = key.name;
+            } else if (t.isPrivateName(key)) {
+              name = `#${(key as t.PrivateName).id.name}`;
+            }
+            const kind = member.kind === 'constructor' ? 'constructor' : member.kind === 'get' ? 'getter' : member.kind === 'set' ? 'setter' : 'method';
+            const async = member.async ? 'async ' : '';
+            const params = member.params.map(p => getParamName(p)).join(', ');
+            lines.push(`  ${async}${kind} ${name}(${params})`);
+          } else if (t.isClassProperty(member)) {
+            const key = member.key;
+            let name = 'unknown';
+            if (t.isIdentifier(key)) {
+              name = key.name;
+            } else if (t.isPrivateName(key)) {
+              name = `#${(key as t.PrivateName).id.name}`;
+            }
+            lines.push(`  property ${name}`);
+          }
+        });
+        lines.push('');
+      }
+    },
+    
+    // Type definitions
+    TSInterfaceDeclaration(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id)) {
+        const exported = isExportedNode(path) ? 'export ' : '';
+        lines.push(`${exported}interface ${node.id.name}`);
+        
+        // List interface members
+        if (node.body && node.body.body) {
+          node.body.body.slice(0, 5).forEach(member => {
+            if (t.isTSPropertySignature(member) && t.isIdentifier(member.key)) {
+              lines.push(`  ${member.key.name}: ${member.typeAnnotation ? 'type' : 'any'}`);
+            } else if (t.isTSMethodSignature(member) && t.isIdentifier(member.key)) {
+              const params = member.parameters?.map(p => 
+                t.isIdentifier(p) ? p.name : 'param'
+              ).join(', ') || '';
+              lines.push(`  ${member.key.name}(${params})`);
+            }
+          });
+        }
+        lines.push('');
+      }
+    },
+    
+    TSTypeAliasDeclaration(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id)) {
+        const exported = isExportedNode(path) ? 'export ' : '';
+        lines.push(`${exported}type ${node.id.name} = ...`);
+        lines.push('');
+      }
+    },
+    
+    TSEnumDeclaration(path) {
+      const node = path.node;
+      if (t.isIdentifier(node.id)) {
+        const exported = isExportedNode(path) ? 'export ' : '';
+        lines.push(`${exported}enum ${node.id.name}`);
+        
+        // List enum members
+        node.members.slice(0, 5).forEach(member => {
+          if (t.isIdentifier(member.id)) {
+            lines.push(`  ${member.id.name}`);
+          }
+        });
+        lines.push('');
+      }
+    },
+    
+    // Import statements with full details
+    ImportDeclaration(path) {
+      const node = path.node;
+      const source = node.source.value;
+      const specifiers: string[] = [];
+      
+      node.specifiers.forEach(spec => {
+        if (t.isImportDefaultSpecifier(spec)) {
+          specifiers.push(spec.local.name);
+        } else if (t.isImportNamespaceSpecifier(spec)) {
+          specifiers.push(`* as ${spec.local.name}`);
+        } else if (t.isImportSpecifier(spec)) {
+          specifiers.push(spec.local.name);
+        }
+      });
+      
+      if (specifiers.length > 0) {
+        lines.push(`import ${specifiers.join(', ')} from "${source}"`);
+      }
+    },
+  });
+  
+  // If source code is provided, add snippets of key sections
+  if (sourceCode) {
+    const codeLines = sourceCode.split('\n');
+    if (codeLines.length > 0 && codeLines.length < 50) {
+      lines.push('\n--- Code Snippet ---');
+      lines.push(sourceCode.substring(0, 500)); // First 500 chars
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Generate individual code chunks from parsed AST.
+ * Each chunk represents a searchable unit (function, class, type).
+ * 
+ * @param parsed - The parsed file structure
+ * @param filePath - The file path for context
+ * @returns Array of code chunks ready for embedding generation
+ */
+export function generateCodeChunks(
+  parsed: ParsedFile, 
+  filePath: string
+): CodeChunk[] {
+  const chunks: CodeChunk[] = [];
+
+  // Function chunks
+  for (const func of parsed.functions) {
+    chunks.push({
+      type: 'function',
+      name: func.name,
+      filePath,
+      data: func,
+      line: func.line,
+      isExported: func.isExported,
+      isAsync: func.isAsync,
+    });
+  }
+
+  // Class chunks (class itself + individual methods)
+  for (const cls of parsed.classes) {
+    // Class chunk
+    chunks.push({
+      type: 'class',
+      name: cls.name,
+      filePath,
+      data: cls,
+      line: cls.line,
+      isExported: cls.isExported,
+    });
+
+    // Method chunks (as separate searchable units)
+    for (const method of cls.methods) {
+      chunks.push({
+        type: 'function',
+        name: `${cls.name}.${method}`,
+        filePath,
+        data: null, // Methods are strings, no full data
+        line: cls.line,
+        isExported: cls.isExported,
+      });
+    }
+  }
+
+  // Type chunks
+  for (const type of parsed.types) {
+    chunks.push({
+      type: 'type',
+      name: type.name,
+      filePath,
+      data: type,
+      line: type.line,
+      isExported: type.isExported,
+    });
+  }
+
+  return chunks;
+}
+
+/**
+ * Convert a single code chunk to searchable text format.
+ * This creates the embedding-friendly representation.
+ * 
+ * @param chunk - The code chunk to convert
+ * @returns Human-readable text representation
+ */
+export function chunkToSearchableText(chunk: CodeChunk): string {
+  const relativePath = chunk.filePath;
+
+  switch (chunk.type) {
+    case 'function':
+      if (chunk.data && 'params' in chunk.data) {
+        const func = chunk.data as ParsedFunction;
+        const asyncPrefix = func.isAsync ? 'async ' : '';
+        const params = func.params.join(', ');
+        return `${asyncPrefix}function ${chunk.name}(${params}) in ${relativePath}`;
+      }
+      // Method case (no full data)
+      return `method ${chunk.name}() in ${relativePath}`;
+
+    case 'class':
+      if (chunk.data && 'methods' in chunk.data) {
+        const cls = chunk.data as ParsedClass;
+        const methodsInfo = cls.methods.length > 0 
+          ? ` with ${cls.methods.length} methods` 
+          : '';
+        return `class ${chunk.name}${methodsInfo} in ${relativePath}`;
+      }
+      return `class ${chunk.name} in ${relativePath}`;
+
+    case 'type':
+      if (chunk.data && 'kind' in chunk.data) {
+        const type = chunk.data as ParsedType;
+        return `${type.kind} ${chunk.name} in ${relativePath}`;
+      }
+      return `type ${chunk.name} in ${relativePath}`;
+
+    case 'file':
+      return `File: ${relativePath}`;
+
+    default:
+      return `${chunk.name} in ${relativePath}`;
+  }
 }
 
 /**

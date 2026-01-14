@@ -632,7 +632,10 @@ export class CodeGraph {
     try {
       const stats = await fs.stat(filePath);
       const code = await fs.readFile(filePath, 'utf-8');
-      const parsed = parseTypeScriptFile(code, filePath);
+      
+      // Parse file - always returns both parsed structure and complete AST
+      const { parsed, ast } = parseTypeScriptFile(code, filePath);
+      
       const resolvedImports = await this.resolveImports(parsed.imports.map(imp => imp.source), filePath);
       const lineCount = await countLines(filePath);
       const extension = path.extname(filePath);
@@ -642,6 +645,7 @@ export class CodeGraph {
         filePath,
         relativePath: path.relative(this.rootPath, filePath),
         parsed,
+        ast,
         imports: resolvedImports,
         importedBy: [],
         depth,

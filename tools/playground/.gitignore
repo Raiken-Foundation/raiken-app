@@ -37,5 +37,6 @@ lerna-debug.log*
 /test-results/
 /test-reports/
 /tests/
+/e2e/ 
 playwright.config.ts
 raiken.config.json

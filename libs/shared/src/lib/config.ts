@@ -1,12 +1,10 @@
-// ============================================================================
-// Raiken Configuration Types
-// ============================================================================
 
 export interface RaikenConfig {
     projectType: string;
     testDirectory: string;
     playwrightConfig: string;
     outputFormats: string[];
+    storageStatePath?: string; // Path to Playwright storageState for authenticated sessions
     ai: {
         provider: 'openrouter' | 'openai';
         model: string;

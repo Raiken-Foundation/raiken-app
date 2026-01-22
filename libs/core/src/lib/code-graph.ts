@@ -1,14 +1,11 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { watch, FSWatcher, readFileSync } from 'fs';
-import { parseTypeScriptFile } from './ast-parser';
-import { countLines } from '../utils';
-import type { CodeGraphOptions, CodeNode, UpdateEvent, GraphStats } from '../types';
-import { shouldIgnoreDirectory, shouldIgnoreFile, isTestDirectory, isTestFile } from '../utils';
-
-// ============================================================================
-// Code Graph - Tree Structure of Code Files
-// ============================================================================
+import { readFileSync } from 'fs';
+import chokidar, { type FSWatcher } from 'chokidar';
+import ignore, { type Ignore } from 'ignore';
+import { parseSourceFile } from './ast-parser';
+import type { CodeGraphOptions, CodeNode, UpdateEvent, GraphStats, ParsedFile } from '../types';
+import { isBinaryFile, isTestDirectory, isTestFile } from '../utils';
 
 export class CodeGraph {
   private rootPath: string;
@@ -28,7 +25,7 @@ export class CodeGraph {
     this.rootPath = path.resolve(rootPath);
     this.options = {
       maxDepth: options.maxDepth ?? 10,
-      extensions: options.extensions ?? ['.ts', '.tsx', '.js', '.jsx', '.vue', '.svelte'],
+      extensions: options.extensions ?? ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte'],
       excludeDirs: options.excludeDirs,
       includeTests: options.includeTests ?? true,
       useGitignore: options.useGitignore ?? true,
@@ -385,11 +382,11 @@ export class CodeGraph {
 
   // Scan entire project (find all files)
   async scanProject(): Promise<void> {
-    const ignorePatterns = await this.getIgnorePatterns();
+    const ignoreMatcher = await this.getIgnoreMatcher();
     
     await this.traverseDirectory(this.rootPath, {
       extensions: this.options.extensions,
-      ignorePatterns,
+      ignoreMatcher,
       maxDepth: this.options.maxDepth,
       includeTests: this.options.includeTests,
       currentDepth: 0
@@ -403,19 +400,29 @@ export class CodeGraph {
     }
   }
 
-  private async getIgnorePatterns(): Promise<string[]> {
-    if (!this.options.useGitignore) {
-      return this.options.excludeDirs || ['node_modules', '.git'];
+  private async getIgnoreMatcher(): Promise<Ignore> {
+    const matcher = ignore();
+    const criticalExcludes = ['.git', 'node_modules', '.raiken'];
+    matcher.add(criticalExcludes.map(name => `${name}/`));
+    matcher.add(criticalExcludes);
+
+    if (this.options.excludeDirs && this.options.excludeDirs.length > 0) {
+      matcher.add(this.options.excludeDirs.map(name => `${name}/`));
     }
 
-    const patterns = await parseGitignore(this.rootPath);
-    const criticalExcludes = ['.git', 'node_modules', '.raiken'];
-    for (const dir of criticalExcludes) {
-      if (!patterns.includes(dir)) {
-        patterns.push(dir);
-      }
+    if (!this.options.useGitignore) {
+      return matcher;
     }
-    return patterns;
+
+    const gitignorePath = path.join(this.rootPath, '.gitignore');
+    try {
+      const content = await fs.readFile(gitignorePath, 'utf-8');
+      matcher.add(content);
+    } catch {
+      // No .gitignore or unreadable file - ignore patterns only
+    }
+
+    return matcher;
   }
 
   /**
@@ -428,7 +435,7 @@ export class CodeGraph {
     currentPath: string, 
     options: { 
       extensions: string[]; 
-      ignorePatterns: string[]; 
+      ignoreMatcher: Ignore; 
       maxDepth: number; 
       includeTests: boolean; 
       currentDepth: number 
@@ -446,18 +453,15 @@ export class CodeGraph {
         const fullPath = path.join(currentPath, entry.name);
         const relativePath = path.relative(this.rootPath, fullPath);
 
+        const ignorePath = this.toIgnorePath(relativePath, entry.isDirectory());
+        if (ignorePath && options.ignoreMatcher.ignores(ignorePath)) continue;
+
         if (entry.isDirectory()) {
-          if (shouldIgnoreDirectory(entry.name, options.ignorePatterns)) continue;
           if (!options.includeTests && isTestDirectory(entry.name)) continue;
-          
           directories.push(fullPath);
         } else if (entry.isFile()) {
-           const ext = path.extname(entry.name);
-           if (!options.extensions.includes(ext)) continue;
-           if (shouldIgnoreFile(entry.name, relativePath, options.ignorePatterns)) continue;
-           if (!options.includeTests && isTestFile(entry.name)) continue;
-
-           files.push(fullPath);
+          if (!options.includeTests && isTestFile(entry.name)) continue;
+          files.push(fullPath);
         }
       }
       
@@ -536,8 +540,8 @@ export class CodeGraph {
         await this.addFile(addedImport, existingNode.depth + 1);
         affectedFiles.push(addedImport);
       } else {
-        const importedNode = this.nodes.get(addedImport)!;
-        if (!importedNode.importedBy.includes(resolvedPath)) {
+        const importedNode = this.nodes.get(addedImport);
+        if (importedNode && !importedNode.importedBy.includes(resolvedPath)) {
           importedNode.importedBy.push(resolvedPath);
         }
       }
@@ -607,7 +611,6 @@ export class CodeGraph {
     if (visited.has(filePath)) return;
     visited.add(filePath);
     if (this.nodes.has(filePath)) return;
-    if (!this.isParseableFile(filePath)) return;
 
     const node = await this.parseFile(filePath, depth);
     if (!node) return;
@@ -631,15 +634,40 @@ export class CodeGraph {
   private async parseFile(filePath: string, depth: number): Promise<CodeNode | null> {
     try {
       const stats = await fs.stat(filePath);
-      const code = await fs.readFile(filePath, 'utf-8');
-      
-      // Parse file - always returns both parsed structure and complete AST
-      const { parsed, ast } = parseTypeScriptFile(code, filePath);
-      
-      const resolvedImports = await this.resolveImports(parsed.imports.map(imp => imp.source), filePath);
-      const lineCount = await countLines(filePath);
+      if (await isBinaryFile(filePath)) {
+        return null;
+      }
+
+      const emptyParsed: ParsedFile = {
+        functions: [],
+        classes: [],
+        imports: [],
+        exports: [],
+        types: []
+      };
+
       const extension = path.extname(filePath);
       const fileName = path.basename(filePath);
+      const isCodeFile = this.isParseableFile(filePath);
+      const code = await fs.readFile(filePath, 'utf-8');
+      const lineCount = code ? code.split('\n').length : 0;
+
+      let parsed: ParsedFile = emptyParsed;
+      let ast: unknown | undefined;
+      let resolvedImports: string[] = [];
+
+      if (isCodeFile) {
+        try {
+          const result = parseSourceFile(code, filePath);
+          parsed = result.parsed;
+          ast = result.ast;
+          resolvedImports = await this.resolveImports(parsed.imports.map(imp => imp.source), filePath);
+        } catch {
+          parsed = emptyParsed;
+          ast = undefined;
+          resolvedImports = [];
+        }
+      }
 
       const node: CodeNode = {
         filePath,
@@ -796,6 +824,12 @@ export class CodeGraph {
     return this.options.extensions.includes(ext);
   }
 
+  private toIgnorePath(relativePath: string, isDir: boolean): string {
+    const normalized = relativePath.split(path.sep).join('/');
+    if (!normalized) return normalized;
+    return isDir ? `${normalized}/` : normalized;
+  }
+
   /**
    * Fast non-cryptographic hash using FNV-1a algorithm.
    * 
@@ -848,20 +882,43 @@ export class CodeGraph {
   private startWatching(): void {
     if (this.watcher) return;
 
-    this.watcher = watch(
-      this.rootPath,
-      { recursive: true },
-      (eventType, filename) => {
-        if (!filename) return;
+    void this.getIgnoreMatcher()
+      .then(ignoreMatcher => {
+        if (this.watcher) return;
 
-        const fullPath = path.join(this.rootPath, filename);
-        const ext = path.extname(filename);
+        const shouldIgnorePath = (filePath: string): boolean => {
+          const relativePath = path.relative(this.rootPath, filePath);
+          if (!relativePath || relativePath.startsWith('..')) return false;
+          const ignorePath = this.toIgnorePath(relativePath, false);
+          return ignorePath ? ignoreMatcher.ignores(ignorePath) : false;
+        };
 
-        if (!this.options.extensions.includes(ext)) return;
+        const handleFile = async (filePath: string, eventType: 'add' | 'change' | 'unlink') => {
+          if (shouldIgnorePath(filePath)) return;
+          if (await isBinaryFile(filePath)) return;
 
-        this.debounceUpdate(fullPath);
-      }
-    );
+          if (eventType === 'unlink') {
+            void this.removeFile(filePath);
+            return;
+          }
+
+          this.debounceUpdate(filePath);
+        };
+
+        this.watcher = chokidar.watch(this.rootPath, {
+          ignoreInitial: true,
+          persistent: true,
+          ignored: shouldIgnorePath,
+        });
+
+        this.watcher
+          .on('add', (filePath: string) => void handleFile(filePath, 'add'))
+          .on('change', (filePath: string) => void handleFile(filePath, 'change'))
+          .on('unlink', (filePath: string) => void handleFile(filePath, 'unlink'));
+      })
+      .catch(error => {
+        console.warn('[CodeGraph] Watch mode disabled:', error);
+      });
   }
 
   private debounceUpdate(filePath: string): void {
@@ -974,7 +1031,10 @@ export class CodeGraph {
 
     // Phase 1: Find all nodes that depend on this file (directly or indirectly)
     while (toRecompute.length > 0) {
-      const current = toRecompute.pop()!;
+      const current = toRecompute.pop();
+      if (!current) {
+        continue;
+      }
       if (visited.has(current)) continue;
       visited.add(current);
 
@@ -1172,28 +1232,4 @@ export class CodeGraph {
     this.nodes.clear();
     this.clearCaches();
   }
-}
-
-async function parseGitignore(projectPath: string): Promise<string[]> {
-  const gitignorePath = path.join(projectPath, '.gitignore');
-  const patterns: string[] = [];
-  
-  try {
-    const content = await fs.readFile(gitignorePath, 'utf-8');
-    const lines = content.split('\n');
-    
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      
-      const pattern = trimmed.replace(/\/$/, '');
-      if (pattern.startsWith('!')) continue;
-      
-      patterns.push(pattern);
-    }
-  } catch {
-    return [];
-  }
-  
-  return patterns;
 }

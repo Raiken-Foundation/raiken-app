@@ -1,4 +1,4 @@
-import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
+import type { FeatureExtractionPipeline } from '@xenova/transformers';
 
 /**
  * Singleton embeddings generator using Transformers.js
@@ -17,6 +17,7 @@ export class EmbeddingsGenerator {
   private model: FeatureExtractionPipeline | null = null;
   private isInitialized = false;
   private cache = new Map<string, number[]>();
+  private inFlight = new Map<string, Promise<number[]>>();
   private maxCacheSize = 1000;
 
   private constructor() { /* empty */ }
@@ -38,6 +39,7 @@ export class EmbeddingsGenerator {
     console.log('📥 Loading embeddings model (first run may download ~23MB)...');
     
     try {
+      const { pipeline } = await import('@xenova/transformers');
       this.model = await pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2',
@@ -64,22 +66,28 @@ export class EmbeddingsGenerator {
     // Check cache first
     const cached = this.cache.get(text);
     if (cached) {
+      // Refresh LRU position
+      this.cache.delete(text);
+      this.cache.set(text, cached);
       return cached;
     }
 
-    // Generate if not cached
-    const embedding = await this._generateUncached(text);
-
-    // Store in cache (with LRU eviction)
-    if (this.cache.size >= this.maxCacheSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey) {
-        this.cache.delete(firstKey);
-      }
+    const inFlight = this.inFlight.get(text);
+    if (inFlight) {
+      return inFlight;
     }
-    this.cache.set(text, embedding);
 
-    return embedding;
+    const embeddingPromise = this._generateUncached(text)
+      .then(embedding => {
+        this.setCache(text, embedding);
+        return embedding;
+      })
+      .finally(() => {
+        this.inFlight.delete(text);
+      });
+
+    this.inFlight.set(text, embeddingPromise);
+    return embeddingPromise;
   }
 
   /**
@@ -89,13 +97,17 @@ export class EmbeddingsGenerator {
     if (!this.model) {
       await this.initialize();
     }
+    const model = this.model;
+    if (!model) {
+      throw new Error('Embeddings model is not initialized.');
+    }
 
     // Truncate text to max tokens (512 for this model)
     // Rough estimate: ~4 chars per token, so 2000 chars ≈ 500 tokens
     const truncated = text.slice(0, 2000);
 
     try {
-      const output = await this.model!(truncated, {
+      const output = await model(truncated, {
         pooling: 'mean',
         normalize: true,
       });
@@ -105,6 +117,22 @@ export class EmbeddingsGenerator {
     } catch (error) {
       console.error('Error generating embedding:', error);
       throw new Error(`Embedding generation failed: ${error}`);
+    }
+  }
+
+  private setCache(text: string, embedding: number[]): void {
+    // Store in cache (LRU eviction)
+    if (this.cache.has(text)) {
+      this.cache.delete(text);
+    }
+
+    this.cache.set(text, embedding);
+
+    if (this.cache.size > this.maxCacheSize) {
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey) {
+        this.cache.delete(firstKey);
+      }
     }
   }
 

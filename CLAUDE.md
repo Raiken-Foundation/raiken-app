@@ -22,8 +22,7 @@ This is an Nx Integrated Monorepo with 4 main modules:
 
 **Import Aliases:**
 - `@raiken/core` → `libs/core/src/index.ts`
-- `@raiken/config` → `libs/config/src/index.ts`
-- `@raiken/api` → `libs/api/src/index.ts`
+- `@raiken/shared` → `libs/shared/src/index.ts`
 
 ## Common Commands
 

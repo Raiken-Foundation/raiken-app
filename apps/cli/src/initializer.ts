@@ -3,7 +3,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 import { select, confirm, input } from '@inquirer/prompts';
-import { createConfig } from '@raiken/config';
+import { createConfig } from '@raiken/shared';
 import { detectProject, type ProjectInfo, type ProjectType, type TestFramework } from './project-detector';
 
 interface UserPreferences {

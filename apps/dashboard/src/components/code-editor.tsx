@@ -16,10 +16,14 @@ interface CodeEditorProps {
   files: TestFile[];
   activeFileId: string;
   onFileSelect: (fileId: string) => void;
+  onFileClose?: (fileId: string) => void;
   onContentChange?: (fileId: string, content: string) => void;
+  onRunTests?: (fileId: string) => void;
+  onNewFile?: () => void;
+  isRunningTests?: boolean;
 }
 
-export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange }: CodeEditorProps) {
+export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onContentChange, onRunTests, onNewFile, isRunningTests }: CodeEditorProps) {
   const activeFile = files.find(f => f.id === activeFileId);
   const [isEditorReady, setIsEditorReady] = useState(false);
 
@@ -28,6 +32,85 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
       onContentChange(activeFileId, value);
     }
   };
+
+  // Empty state when no file is selected
+  if (!activeFile) {
+    return (
+      <div className="code-editor">
+        <div className="empty-state">
+          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          <h3>No file selected</h3>
+          <p>Select a test file from the sidebar or create a new one</p>
+          {onNewFile && (
+            <button className="new-file-btn" onClick={onNewFile}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New File
+            </button>
+          )}
+        </div>
+        <style>{`
+          .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1.5rem;
+            padding: 3rem 2rem;
+            text-align: center;
+            background: #0a0a0a;
+          }
+
+          .empty-icon {
+            width: 5rem;
+            height: 5rem;
+            color: #4b5563;
+          }
+
+          .empty-state h3 {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: #9ca3af;
+          }
+
+          .empty-state p {
+            margin: 0;
+            font-size: 0.9375rem;
+            color: #6b7280;
+          }
+
+          .empty-state .new-file-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.625rem 1.25rem;
+            background: #2563eb;
+            border: none;
+            border-radius: 0.5rem;
+            color: white;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+          }
+
+          .empty-state .new-file-btn:hover {
+            background: #1d4ed8;
+          }
+
+          .empty-state .new-file-btn svg {
+            width: 1rem;
+            height: 1rem;
+          }
+        `}</style>
+      </div>
+    );
+  }
 
   const getStatusIcon = (status: TestFile['status']) => {
     switch (status) {
@@ -76,17 +159,35 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
       {/* Tabs */}
       <div className="editor-tabs">
         {files.map((file) => (
-          <button
+          <div
             key={file.id}
             className={`editor-tab ${file.id === activeFileId ? 'active' : ''}`}
+          >
+            <button
+              className="tab-content"
             onClick={() => onFileSelect(file.id)}
           >
             <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            <span>{file.name}</span>
+              <span className="tab-name">{file.name}</span>
             {getStatusIcon(file.status)}
           </button>
+            {onFileClose && (
+              <button
+                className="tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onFileClose(file.id);
+                }}
+                title="Close file"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
         ))}
       </div>
 
@@ -99,6 +200,44 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
             </svg>
             <span>{activeFile.path}</span>
           </div>
+          <div className="header-actions">
+            {onNewFile && (
+              <button
+                className="new-file-header-btn"
+                onClick={onNewFile}
+                title="Create new file"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                New
+              </button>
+            )}
+            {onRunTests && (
+              <button
+                className={`run-tests-btn ${isRunningTests ? 'running' : ''}`}
+                onClick={() => onRunTests(activeFile.id)}
+                disabled={isRunningTests}
+                title="Run tests in this file"
+              >
+                {isRunningTests ? (
+                  <>
+                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Running...
+                  </>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Run Tests
+                  </>
+                )}
+              </button>
+            )}
           <div className={`status-badge ${activeFile.status}`}>
             {activeFile.status === 'failed' && (
               <>
@@ -124,6 +263,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
                 Running...
               </>
             )}
+            </div>
           </div>
         </div>
       )}
@@ -241,14 +381,13 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
         .editor-tab {
           display: flex;
           align-items: center;
-          gap: 0.5rem;
-          padding: 0.75rem 1rem;
+          gap: 0;
+          padding: 0;
           background: transparent;
           border: none;
           border-bottom: 2px solid transparent;
           color: #6b7280;
           font-size: 0.8125rem;
-          cursor: pointer;
           transition: all 0.15s;
           white-space: nowrap;
         }
@@ -262,6 +401,55 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
           background: #0a0a0a;
           color: #e5e7eb;
           border-bottom-color: #3b82f6;
+        }
+
+        .tab-content {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.75rem 0.75rem;
+          background: transparent;
+          border: none;
+          color: inherit;
+          font-size: inherit;
+          cursor: pointer;
+        }
+
+        .tab-name {
+          max-width: 150px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .tab-close {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 1.25rem;
+          height: 1.25rem;
+          margin-right: 0.5rem;
+          background: transparent;
+          border: none;
+          border-radius: 4px;
+          color: #6b7280;
+          cursor: pointer;
+          transition: all 0.15s;
+          opacity: 0;
+        }
+
+        .editor-tab:hover .tab-close,
+        .editor-tab.active .tab-close {
+          opacity: 1;
+        }
+
+        .tab-close:hover {
+          background: rgba(239, 68, 68, 0.2);
+          color: #ef4444;
+        }
+
+        .tab-close svg {
+          width: 0.75rem;
+          height: 0.75rem;
         }
 
         .file-icon {
@@ -313,6 +501,78 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onContentChange 
         .file-path svg {
           width: 1rem;
           height: 1rem;
+        }
+
+        .header-actions {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+        }
+
+        .new-file-header-btn {
+          display: flex;
+          align-items: center;
+          gap: 0.375rem;
+          padding: 0.375rem 0.75rem;
+          background: transparent;
+          border: 1px solid #3a3a3a;
+          border-radius: 0.375rem;
+          color: #9ca3af;
+          font-size: 0.75rem;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+
+        .new-file-header-btn:hover {
+          background: #1f1f1f;
+          border-color: #4a4a4a;
+          color: #e5e7eb;
+        }
+
+        .new-file-header-btn svg {
+          width: 0.875rem;
+          height: 0.875rem;
+        }
+
+        .run-tests-btn {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.5rem 1rem;
+          background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+          border: none;
+          border-radius: 6px;
+          color: white;
+          font-size: 0.8125rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s;
+          box-shadow: 0 2px 8px rgba(34, 197, 94, 0.25);
+        }
+
+        .run-tests-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: 0 4px 12px rgba(34, 197, 94, 0.35);
+        }
+
+        .run-tests-btn:disabled {
+          opacity: 0.7;
+          cursor: not-allowed;
+        }
+
+        .run-tests-btn.running {
+          background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+          box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+        }
+
+        .run-tests-btn svg {
+          width: 1rem;
+          height: 1rem;
+        }
+
+        .run-tests-btn .spin {
+          animation: spin 1s linear infinite;
         }
 
         .status-badge {

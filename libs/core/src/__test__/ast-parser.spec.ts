@@ -397,6 +397,31 @@ describe('AST Parser', () => {
       expect(ast.classes).toHaveLength(1);
       expect(ast.classes[0].name).toBe('MyComponent');
     });
+
+    it('should parse modern syntax without throwing', () => {
+      const code = `
+        import data from './data.json' assert { type: 'json' };
+
+        class Example {
+          field = 1;
+          #privateField = 2;
+          static staticField = 3;
+          static {
+            this.staticField ??= 4;
+          }
+
+          getValue() {
+            return this?.field ?? 0;
+          }
+        }
+
+        const value = (data?.value ?? 0) + 1_000n;
+
+        await Promise.resolve(value);
+      `;
+
+      expect(() => parseSourceFile(code, 'test.ts')).not.toThrow();
+    });
   });
 
   describe('AST to Searchable Text', () => {

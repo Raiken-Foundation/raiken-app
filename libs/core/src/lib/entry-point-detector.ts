@@ -4,6 +4,10 @@ import type { PackageJson, NextConfig, EntryPointResult } from '../types';
 
 import fg from 'fast-glob';
 
+type EntryPointDetectorOptions = {
+  includeWorkspaces?: boolean;
+};
+
 /**
  * EntryPointDetector - Optimized for performance
  * 
@@ -17,6 +21,7 @@ import fg from 'fast-glob';
 export class EntryPointDetector {
   private projectRoot: string;
   private packageJson: PackageJson | null = null;
+  private options: Required<EntryPointDetectorOptions>;
   
   // Performance optimization: Cache file existence checks
   private fileCache = new Map<string, boolean>();
@@ -27,8 +32,11 @@ export class EntryPointDetector {
   // Performance optimization: Deduplication with O(1) lookups
   private seenFiles = new Map<string, EntryPointResult>();
 
-  constructor(projectRoot: string) {
+  constructor(projectRoot: string, options: EntryPointDetectorOptions = {}) {
     this.projectRoot = path.resolve(projectRoot);
+    this.options = {
+      includeWorkspaces: options.includeWorkspaces ?? false,
+    };
     this.loadPackageJson();
   }
   
@@ -80,6 +88,27 @@ export class EntryPointDetector {
     this.seenFiles.clear();
 
     // Run all independent detections in parallel
+    const baseResults = await this.detectEntryPointsForCurrentRoot();
+    for (const result of baseResults) {
+      this.addResult(result);
+    }
+
+    if (this.options.includeWorkspaces) {
+      const workspaceRoots = await this.detectWorkspacePackageRoots();
+      for (const workspaceRoot of workspaceRoots) {
+        if (path.resolve(workspaceRoot) === this.projectRoot) continue;
+        const detector = new EntryPointDetector(workspaceRoot, { includeWorkspaces: false });
+        const workspaceResults = await detector.detectEntryPoints();
+        for (const result of workspaceResults) {
+          this.addResult(result);
+        }
+      }
+    }
+
+    return this.sortResults(Array.from(this.seenFiles.values()));
+  }
+
+  private async detectEntryPointsForCurrentRoot(): Promise<EntryPointResult[]> {
     const [
       packageJsonResults,
       frameworkResults,
@@ -92,19 +121,12 @@ export class EntryPointDetector {
       this.analyzeBuildConfigs()
     ]);
 
-    // Add all results with O(1) deduplication
-    const allResults = [
+    return [
       ...packageJsonResults,
       ...frameworkResults,
       ...conventionalResults,
       ...buildConfigResults
     ];
-
-    for (const result of allResults) {
-      this.addResult(result);
-    }
-
-    return this.sortResults(Array.from(this.seenFiles.values()));
   }
   
   /**
@@ -485,7 +507,7 @@ export class EntryPointDetector {
   // ============================================
   private async detectReactEntries(): Promise<EntryPointResult[]> {
     const results: EntryPointResult[] = [];
-    const extensions = ['tsx', 'ts', 'jsx', 'js'];
+    const extensions = ['tsx', 'ts', 'jsx', 'js', 'mts', 'cts', 'mjs', 'cjs'];
 
     // Main entry
     for (const ext of extensions) {
@@ -525,7 +547,7 @@ export class EntryPointDetector {
   // ============================================
   private async detectVueEntries(): Promise<EntryPointResult[]> {
     const results: EntryPointResult[] = [];
-    const extensions = ['ts', 'js'];
+    const extensions = ['ts', 'js', 'mts', 'cts', 'mjs', 'cjs'];
 
     // Main entry
     for (const ext of extensions) {
@@ -601,14 +623,14 @@ export class EntryPointDetector {
     const results: EntryPointResult[] = [];
     
     const serverEntries = [
-      'src/index.ts', 'src/index.js',
-      'src/server.ts', 'src/server.js',
-      'src/app.ts', 'src/app.js',
-      'src/main.ts', 'src/main.js',
-      'server/index.ts', 'server/index.js',
-      'server.ts', 'server.js',
-      'app.ts', 'app.js',
-      'index.ts', 'index.js'
+      'src/index.ts', 'src/index.js', 'src/index.mts', 'src/index.cts', 'src/index.mjs', 'src/index.cjs',
+      'src/server.ts', 'src/server.js', 'src/server.mts', 'src/server.cts', 'src/server.mjs', 'src/server.cjs',
+      'src/app.ts', 'src/app.js', 'src/app.mts', 'src/app.cts', 'src/app.mjs', 'src/app.cjs',
+      'src/main.ts', 'src/main.js', 'src/main.mts', 'src/main.cts', 'src/main.mjs', 'src/main.cjs',
+      'server/index.ts', 'server/index.js', 'server/index.mts', 'server/index.cts', 'server/index.mjs', 'server/index.cjs',
+      'server.ts', 'server.js', 'server.mts', 'server.cts', 'server.mjs', 'server.cjs',
+      'app.ts', 'app.js', 'app.mts', 'app.cts', 'app.mjs', 'app.cjs',
+      'index.ts', 'index.js', 'index.mts', 'index.cts', 'index.mjs', 'index.cjs'
     ];
 
     for (const entryPath of serverEntries) {
@@ -667,10 +689,10 @@ export class EntryPointDetector {
     const results: EntryPointResult[] = [];
 
     const patterns = [
-      'index.{ts,tsx,js,jsx}',
-      'src/index.{ts,tsx,js,jsx}',
-      'lib/index.{ts,tsx,js,jsx}',
-      'src/main.{ts,js}'
+      'index.{ts,tsx,js,jsx,mts,cts,mjs,cjs}',
+      'src/index.{ts,tsx,js,jsx,mts,cts,mjs,cjs}',
+      'lib/index.{ts,tsx,js,jsx,mts,cts,mjs,cjs}',
+      'src/main.{ts,js,mts,cts,mjs,cjs}'
     ];
 
     // Single glob with all patterns
@@ -705,6 +727,69 @@ export class EntryPointDetector {
     if (viteEntry) results.push(viteEntry);
 
     return results;
+  }
+
+  private getWorkspacePatterns(): string[] {
+    const workspaces = this.packageJson?.workspaces;
+    if (Array.isArray(workspaces)) {
+      return workspaces;
+    }
+    if (workspaces && typeof workspaces === 'object' && Array.isArray(workspaces.packages)) {
+      return workspaces.packages;
+    }
+    return [];
+  }
+
+  private loadPnpmWorkspacePatterns(): string[] {
+    const workspacePath = path.join(this.projectRoot, 'pnpm-workspace.yaml');
+    if (!this.fileExists(workspacePath)) return [];
+
+    try {
+      const content = fs.readFileSync(workspacePath, 'utf-8');
+      const lines = content.split('\n');
+      const patterns: string[] = [];
+      let inPackages = false;
+
+      for (const line of lines) {
+        if (/^\s*packages\s*:/.test(line)) {
+          inPackages = true;
+          continue;
+        }
+
+        if (!inPackages) continue;
+
+        if (/^\S/.test(line)) {
+          break;
+        }
+
+        const match = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/);
+        if (match) {
+          patterns.push(match[1]);
+        }
+      }
+
+      return patterns;
+    } catch {
+      return [];
+    }
+  }
+
+  private async detectWorkspacePackageRoots(): Promise<string[]> {
+    const patterns = [
+      ...this.getWorkspacePatterns(),
+      ...this.loadPnpmWorkspacePatterns(),
+    ];
+
+    if (patterns.length === 0) return [];
+
+    const workspaceRoots = await fg(patterns, {
+      cwd: this.projectRoot,
+      onlyDirectories: true,
+      absolute: true,
+      ignore: ['**/node_modules/**', '**/.git/**', '**/.raiken/**'],
+    });
+
+    return workspaceRoots.map(root => path.resolve(root));
   }
 
   private async parseViteConfig(): Promise<EntryPointResult | null> {

@@ -8,26 +8,11 @@ export interface TestFileItem {
 
 interface FilesPanelProps {
   files: TestFileItem[];
-  activeFileId?: string;
-  onFileSelect?: (fileId: string) => void;
+  activeFilePath?: string;
+  onFileSelect?: (filePath: string) => void;
 }
 
-export function FilesPanel({ files, activeFileId, onFileSelect }: FilesPanelProps) {
-  // Group files by directoryy
-  const groupedFiles = files.reduce((acc, file) => {
-    if (!acc[file.directory]) {
-      acc[file.directory] = [];
-    }
-    acc[file.directory].push(file);
-    return acc;
-  }, {} as Record<string, TestFileItem[]>);
-
-  const statusCounts = {
-    fresh: files.filter(f => f.status === 'fresh').length,
-    stale: files.filter(f => f.status === 'stale').length,
-    broken: files.filter(f => f.status === 'broken').length,
-  };
-
+export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelProps) {
   const getStatusIcon = (status: TestFileItem['status']) => {
     switch (status) {
       case 'fresh':
@@ -51,6 +36,80 @@ export function FilesPanel({ files, activeFileId, onFileSelect }: FilesPanelProp
     }
   };
 
+  // Empty state if no test files
+  if (files.length === 0) {
+    return (
+      <div className="files-panel">
+        {/* Header */}
+        <div className="files-header">
+          <svg className="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+          </svg>
+          <div className="header-info">
+            <span className="header-title">Test Files</span>
+            <span className="header-subtitle">No test files yet</span>
+          </div>
+        </div>
+
+        {/* Empty State */}
+        <div className="empty-state">
+          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          <h3 className="empty-title">No test files yet</h3>
+          <p className="empty-text">Use the AI chat to generate your first test</p>
+        </div>
+
+        <style>{`
+          .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            padding: 2rem 1rem;
+            text-align: center;
+          }
+
+          .empty-icon {
+            width: 4rem;
+            height: 4rem;
+            color: #6b7280;
+          }
+
+          .empty-title {
+            margin: 0;
+            font-size: 1rem;
+            font-weight: 500;
+            color: #9ca3af;
+          }
+
+          .empty-text {
+            margin: 0;
+            font-size: 0.875rem;
+            color: #6b7280;
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  // Group files by directory
+  const groupedFiles = files.reduce((acc, file) => {
+    if (!acc[file.directory]) {
+      acc[file.directory] = [];
+    }
+    acc[file.directory].push(file);
+    return acc;
+  }, {} as Record<string, TestFileItem[]>);
+
+  const statusCounts = {
+    fresh: files.filter(f => f.status === 'fresh').length,
+    stale: files.filter(f => f.status === 'stale').length,
+    broken: files.filter(f => f.status === 'broken').length,
+  };
+
   return (
     <div className="files-panel">
       {/* Header */}
@@ -60,7 +119,7 @@ export function FilesPanel({ files, activeFileId, onFileSelect }: FilesPanelProp
         </svg>
         <div className="header-info">
           <span className="header-title">Test Files</span>
-          <span className="header-subtitle">{files.length} files generated</span>
+          <span className="header-subtitle">{files.length} test files</span>
         </div>
       </div>
 
@@ -77,9 +136,9 @@ export function FilesPanel({ files, activeFileId, onFileSelect }: FilesPanelProp
             
             {dirFiles.map((file) => (
               <button
-                key={file.id}
-                className={`file-item ${file.status} ${activeFileId === file.id ? 'active' : ''}`}
-                onClick={() => onFileSelect?.(file.id)}
+                key={file.path}
+                className={`file-item ${file.status} ${activeFilePath === file.path ? 'active' : ''}`}
+                onClick={() => onFileSelect?.(file.path)}
               >
                 <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />

@@ -26,7 +26,23 @@ function isJsxFile(filename: string): boolean {
  */
 function getParserPlugins(filename: string): ParserPlugin[] {
   const plugins: ParserPlugin[] = [
-    ['decorators', { decoratorsBeforeExport: true }]  // Modern decorator syntax
+    ['decorators', { decoratorsBeforeExport: true }],  // Modern decorator syntax
+    'classProperties',
+    'classPrivateProperties',
+    'classPrivateMethods',
+    'classStaticBlock',
+    'privateIn',
+    'dynamicImport',
+    'exportDefaultFrom',
+    'exportNamespaceFrom',
+    'importMeta',
+    'topLevelAwait',
+    'optionalChaining',
+    'nullishCoalescingOperator',
+    'logicalAssignment',
+    'numericSeparator',
+    'bigInt',
+    ['importAttributes', { deprecatedAssertSyntax: true }],
   ];
 
   // Add TypeScript plugin for TS files
@@ -667,7 +683,3 @@ export function chunkToSearchableText(chunk: CodeChunk): string {
   }
 }
 
-/**
- * @deprecated Use parseSourceFile instead. This alias is kept for backward compatibility.
- */
-export const parseTypeScriptFile = parseSourceFile;

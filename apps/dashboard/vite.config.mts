@@ -3,8 +3,15 @@
 import { nxCopyAssetsPlugin } from '@nx/vite/plugins/nx-copy-assets.plugin';
 import { nxViteTsPaths } from '@nx/vite/plugins/nx-tsconfig-paths.plugin';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, type PluginOption } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
+
+const plugins = [
+  react(),
+  tailwindcss(),
+  nxViteTsPaths(),
+  nxCopyAssetsPlugin(['*.md']),
+] as unknown as PluginOption[];
 
 export default defineConfig(() => ({
   root: import.meta.dirname,
@@ -33,12 +40,7 @@ export default defineConfig(() => ({
     host: 'localhost',
   },
 
-  plugins: [
-    react(),
-    tailwindcss(),
-    nxViteTsPaths(),
-    nxCopyAssetsPlugin(['*.md']),
-  ],
+  plugins,
 
   build: {
     outDir: '../../dist/apps/dashboard',

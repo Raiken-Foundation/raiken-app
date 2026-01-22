@@ -60,7 +60,14 @@ export class CodeGraphDB {
       this.db = new Database(this.dbPath);
       
       // ✅ Load sqlite-vec extension for vector similarity search
+      try {
       loadSqliteVec(this.db);
+      } catch (error) {
+        throw new DatabaseError(
+          'Failed to load sqlite-vec extension. Ensure dependencies are installed for your platform and reinstall after Node upgrades.',
+          error as Error
+        );
+      }
       
       // ✅ Enable WAL mode for better concurrency
       this.db.pragma('journal_mode = WAL');
@@ -75,6 +82,9 @@ export class CodeGraphDB {
       this.ensureGitignore();
       
     } catch (error) {
+      if (error instanceof DatabaseError) {
+        throw error;
+      }
       throw new DatabaseError(
         `Failed to initialize CodeGraphDB at ${this.dbPath}: ${(error as Error).message}`,
         error as Error
@@ -695,6 +705,17 @@ export class CodeGraphDB {
   }
 
   /**
+   * Get a file by its relative path.
+   */
+  getFileByRelativePath(relativePath: string): DBFileNode | null {
+    const file = this.db.prepare(`
+      SELECT * FROM files WHERE project_path = ? AND relative_path = ?
+    `).get(this.projectPath, relativePath);
+
+    return file as DBFileNode | null;
+  }
+
+  /**
    * Get dependencies for a specific file.
    */
   getDependencies(filePath: string): DBDependency[] {
@@ -868,8 +889,8 @@ export class CodeGraphDB {
         `);
 
         const insertVecStmt = this.db.prepare(`
-          INSERT INTO vec_embeddings (embedding)
-          VALUES (?)
+          INSERT INTO vec_embeddings (rowid, embedding)
+          VALUES (?, ?)
         `);
 
         for (const chunk of chunks) {
@@ -887,8 +908,8 @@ export class CodeGraphDB {
           );
 
           // Insert into vector search table
-          // sqlite-vec virtual tables auto-assign rowid
-          insertVecStmt.run(embeddingBuffer);
+          // Keep rowid aligned with embeddings.id for reliable joins
+          insertVecStmt.run(result.lastInsertRowid, embeddingBuffer);
         }
       });
 

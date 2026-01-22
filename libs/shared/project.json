@@ -1,7 +1,7 @@
 {
-    "name": "api",
+    "name": "shared",
     "$schema": "../../node_modules/nx/schemas/project-schema.json",
-    "sourceRoot": "libs/api/src",
+    "sourceRoot": "libs/shared/src",
     "projectType": "library",
     "tags": [],
     "targets": {
@@ -9,10 +9,10 @@
             "executor": "@nx/esbuild:esbuild",
             "outputs": ["{options.outputPath}"],
             "options": {
-                "outputPath": "dist/libs/api",
-                "main": "libs/api/src/index.ts",
-                "tsConfig": "libs/api/tsconfig.lib.json",
-                "assets": ["libs/api/*.md"],
+                "outputPath": "dist/libs/shared",
+                "main": "libs/shared/src/index.ts",
+                "tsConfig": "libs/shared/tsconfig.lib.json",
+                "assets": ["libs/shared/*.md"],
                 "format": ["cjs"],
                 "generatePackageJson": true
             }

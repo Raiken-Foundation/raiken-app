@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
-import path from "path";
+import path from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
 import { startServer } from "./server";
@@ -29,7 +29,7 @@ program
     .option("-p, --port <number>", "Port to run on", "7101")
     .action((options) => {
         console.log(chalk.cyan("Initializing Raiken..."));
-        startServer(parseInt(options.port));
+        startServer(parseInt(options.port, 10));
     });
 
 program

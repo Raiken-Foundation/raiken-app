@@ -64,13 +64,14 @@ export function LandingPage({ onStart }: LandingPageProps) {
         <p className="landing-subtitle">AI Test Engineer</p>
 
         {/* Project Selector */}
-        <button className="project-selector">
+        <button type="button" className="project-selector">
           <svg 
             className="project-icon" 
             viewBox="0 0 24 24" 
             fill="none" 
             stroke="currentColor" 
             strokeWidth="1.5"
+            aria-hidden="true"
           >
             <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
           </svg>
@@ -84,6 +85,7 @@ export function LandingPage({ onStart }: LandingPageProps) {
               className="command-icon" 
               viewBox="0 0 24 24" 
               fill="none"
+              aria-hidden="true"
             >
               <path 
                 d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" 
@@ -119,7 +121,7 @@ export function LandingPage({ onStart }: LandingPageProps) {
               className="command-submit"
               disabled={!prompt.trim() || !isReady}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M5 12h14M12 5l7 7-7 7" />
               </svg>
             </button>

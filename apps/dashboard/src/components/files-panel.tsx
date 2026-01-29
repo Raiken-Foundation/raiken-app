@@ -17,19 +17,19 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
     switch (status) {
       case 'fresh':
         return (
-          <svg className="status-icon fresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="status-icon fresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M5 13l4 4L19 7" />
           </svg>
         );
       case 'stale':
         return (
-          <svg className="status-icon stale" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="status-icon stale" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         );
       case 'broken':
         return (
-          <svg className="status-icon broken" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="status-icon broken" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
         );
@@ -42,7 +42,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
       <div className="files-panel">
         {/* Header */}
         <div className="files-header">
-          <svg className="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <svg className="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
           </svg>
           <div className="header-info">
@@ -53,7 +53,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
 
         {/* Empty State */}
         <div className="empty-state">
-          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
           <h3 className="empty-title">No test files yet</h3>
@@ -114,7 +114,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
     <div className="files-panel">
       {/* Header */}
       <div className="files-header">
-        <svg className="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <svg className="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
           <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
         </svg>
         <div className="header-info">
@@ -128,7 +128,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
         {Object.entries(groupedFiles).map(([directory, dirFiles]) => (
           <div key={directory} className="directory-group">
             <div className="directory-header">
-              <svg className="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <svg className="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
                 <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
               <span>{directory}</span>
@@ -136,11 +136,12 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
             
             {dirFiles.map((file) => (
               <button
+                type="button"
                 key={file.path}
                 className={`file-item ${file.status} ${activeFilePath === file.path ? 'active' : ''}`}
                 onClick={() => onFileSelect?.(file.path)}
               >
-                <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
                   <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
                 <span className="file-name">{file.name}</span>

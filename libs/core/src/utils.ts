@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import * as t from '@babel/types';
 import type { NodePath } from '@babel/traverse';
-import * as fs from 'fs/promises';
+import * as fs from 'node:fs/promises';
 
 export function getParamName(param: t.Node): string {
     if (t.isIdentifier(param)) {
@@ -44,7 +44,7 @@ export function formatBytes(bytes: number): string {
   const sizes = ['Bytes', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   
-  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+  return `${Math.round((bytes / k ** i) * 100) / 100} ${sizes[i]}`;
 }
 
 export function isTestDirectory(dirName: string): boolean {

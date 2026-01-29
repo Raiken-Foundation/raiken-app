@@ -13,7 +13,7 @@ Raiken is built as an **Nx Integrated Monorepo**. It separates the "Runner" (CLI
 | **CLI (The Runner)**   | `apps/cli`       | The Node.js binary. Spawns the server and orchestrates the agent. | Fastify, Commander, Node.js           |
 | **Dashboard (The UI)** | `apps/dashboard` | The visual interface. Communicates with CLI via tRPC.             | React, Vite, Tailwind, TanStack Query |
 | **Core (The Logic)**   | `libs/core`      | The "Brain". Handles DB, AST parsing, and Embeddings.             | SQLite-vec, Transformers.js, Babel    |
-| **API (The Contract)** | `libs/api`       | Shared tRPC Router & Types. Ensures Type Safety between CLI & UI. | tRPC, Zod                             |
+| **Shared (The Contract)** | `libs/shared` | Shared tRPC Router & Types. Ensures Type Safety between CLI & UI. | tRPC, Zod                             |
 
 ### Data Flow Diagram
 
@@ -31,8 +31,8 @@ graph TD
         Server -->|Serves Static HTML| DashboardBuild[dist/public]
     end
 
-    Server -->|Imports| API[libs/api]
-    API -->|Calls| Core[libs/core]
+    Server -->|Imports| Shared[libs/shared]
+    Shared -->|Calls| Core[libs/core]
     Core -->|Reads/Writes| DB[(.raiken/raiken.db)]
 ```
 
@@ -99,9 +99,14 @@ nx serve dashboard
    nx build cli
    ```
 
-3. **Run the built CLI**
+3. **Install runtime deps for the built CLI**
    ```bash
-   node dist/apps/cli/bin.js start
+   cd dist/apps/cli && npm install --legacy-peer-deps && cd ../../..
+   ```
+
+4. **Run the built CLI**
+   ```bash
+   node dist/apps/cli/bin.cjs start
    ```
    - Serves both API and dashboard on `http://localhost:7101`
 
@@ -118,6 +123,38 @@ nx serve dashboard        # Run React dashboard (Vite on :4200)
 nx build cli              # Build CLI (includes dashboard as static assets)
 nx build dashboard        # Build dashboard only
 nx run-many -t build      # Build all projects
+```
+
+### Testing
+
+#### Integration Test (Playground)
+```bash
+# Build the CLI
+nx build cli
+
+# Install runtime deps for the built CLI
+cd dist/apps/cli && npm install --legacy-peer-deps && cd ../../..
+
+# Start the CLI in the playground
+cd tools/playground
+node ../../dist/apps/cli/bin.cjs start -p 7101
+```
+
+Verify the server is healthy:
+```bash
+curl -s http://localhost:7101/api/trpc/getHealth
+```
+
+Build the code graph (full scan):
+```bash
+curl -X POST http://localhost:7101/api/trpc/buildCodeGraph \
+  -H "Content-Type: application/json" \
+  -d '{"path":"."}'
+```
+
+Run Playwright tests from the playground if needed:
+```bash
+npx playwright test
 ```
 
 #### Code Quality

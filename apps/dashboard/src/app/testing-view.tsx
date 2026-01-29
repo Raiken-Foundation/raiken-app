@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Header } from '../components/header';
 import { Sidebar } from '../components/sidebar';
-import { CodeEditor, TestFile } from '../components/code-editor';
-import { TestResults, TestResult, TestSummary } from '../components/test-results';
+import { CodeEditor, type TestFile } from '../components/code-editor';
+import { TestResults, type TestResult, type TestSummary } from '../components/test-results';
 import { trpc } from '../utils/trpc';
 
 // Empty initial state for test results
@@ -130,7 +130,7 @@ function parsePlaywrightOutput(output: string): { results: TestResult[]; summary
         name: passedMatch[1].trim(),
         suite: currentSuite,
     status: 'passed',
-        duration: passedMatch[2] ? parseInt(passedMatch[2]) : undefined
+        duration: passedMatch[2] ? parseInt(passedMatch[2], 10) : undefined
       });
     }
     
@@ -142,7 +142,7 @@ function parsePlaywrightOutput(output: string): { results: TestResult[]; summary
         name: failedMatch[1].trim(),
         suite: currentSuite,
     status: 'failed',
-        duration: failedMatch[2] ? parseInt(failedMatch[2]) : undefined
+        duration: failedMatch[2] ? parseInt(failedMatch[2], 10) : undefined
       });
     }
     
@@ -150,8 +150,8 @@ function parsePlaywrightOutput(output: string): { results: TestResult[]; summary
     const failedCount = line.match(/(\d+)\s+failed/);
     const timeMatch = line.match(/(\d+(?:\.\d+)?)\s*s(?:econds?)?/);
     
-    if (passedCount) summary.tests.passed = parseInt(passedCount[1]);
-    if (failedCount) summary.tests.failed = parseInt(failedCount[1]);
+    if (passedCount) summary.tests.passed = parseInt(passedCount[1], 10);
+    if (failedCount) summary.tests.failed = parseInt(failedCount[1], 10);
     if (timeMatch) summary.time = parseFloat(timeMatch[1]);
   }
   

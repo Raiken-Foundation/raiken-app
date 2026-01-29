@@ -204,7 +204,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('button', text.trim(), testId),
       });
     } catch {
-      continue;
+      // Silently skip elements that fail to process
     }
   }
   
@@ -222,7 +222,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('link', text.trim()),
       });
     } catch {
-      continue;
+      // Silently skip elements that fail to process
     }
   }
   
@@ -255,7 +255,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors(role, label || placeholder || name, testId),
       });
     } catch {
-      continue;
+      // Silently skip elements that fail to process
     }
   }
 
@@ -275,7 +275,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('textbox', label || text.trim(), testId),
       });
     } catch {
-      continue;
+      // Silently skip elements that fail to process
     }
   }
 
@@ -297,7 +297,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors(role || 'button', text.trim(), testId),
       });
     } catch {
-      continue;
+      // Silently skip elements that fail to process
     }
   }
   
@@ -329,7 +329,7 @@ async function extractFormFields(page: LocatorScope): Promise<FormField[]> {
         suggestedSelector: id ? `#${id}` : (name ? `[name="${name}"]` : `[placeholder="${placeholder}"]`),
       });
     } catch {
-      continue;
+      // Silently skip fields that fail to process
     }
   }
   

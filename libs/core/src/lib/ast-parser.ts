@@ -2,7 +2,7 @@ import * as parser from '@babel/parser';
 import type { ParserPlugin } from '@babel/parser';
 import traverse from '@babel/traverse';
 import * as t from '@babel/types';
-import { ParsedFile, CodeChunk, ParsedFunction, ParsedClass, ParsedType } from '../types';
+import type { ParsedFile, CodeChunk, ParsedFunction, ParsedClass, ParsedType } from '../types';
 import { getParamName, isExportedNode } from '../utils';
 
 /**
@@ -495,7 +495,7 @@ export function fullAstToSearchableText(ast: unknown, filePath: string, sourceCo
         lines.push(`${exported}interface ${node.id.name}`);
         
         // List interface members
-        if (node.body && node.body.body) {
+        if (node.body?.body) {
           node.body.body.slice(0, 5).forEach(member => {
             if (t.isTSPropertySignature(member) && t.isIdentifier(member.key)) {
               lines.push(`  ${member.key.name}: ${member.typeAnnotation ? 'type' : 'any'}`);

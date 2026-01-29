@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import Markdown from 'react-markdown';
-import { FilesPanel, TestFileItem } from './files-panel';
+import { FilesPanel, type TestFileItem } from './files-panel';
 import { trpc } from '../utils/trpc';
 
 interface Message {
@@ -48,7 +48,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [streamedContent, setStreamedContent] = useState('');
+  const [_streamedContent, setStreamedContent] = useState('');
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
   const [messagesLoaded, setMessagesLoaded] = useState(false);
   const [files, setFiles] = useState<TestFileItem[]>([]);
@@ -647,7 +647,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               if (data.done) {
                 console.log('✓ Test generation complete');
               }
-            } catch (parseError) {
+            } catch (_parseError) {
               // Ignore JSON parse errors for incomplete chunks
             }
           }
@@ -812,7 +812,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
                               <button
                                 key={option.id}
                                 className={`hitl-btn ${option.id === 'proceed' ? 'primary' : 'secondary'}`}
-                                onClick={() => handleHITLAction(option.id, msg.hitlData!.context)}
+                                onClick={() => handleHITLAction(option.id, msg.hitlData?.context ?? {})}
                                 disabled={isGenerating}
                               >
                                 {option.id === 'proceed' ? (
@@ -888,8 +888,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
 
           {/* Files Panel */}
           {activeTab === 'files' && (
-            <>
-              {filesLoading ? (
+            filesLoading ? (
                 <div className="loading-panel">
                   <div className="loading-spinner"></div>
                   <span>Loading files...</span>
@@ -900,8 +899,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               activeFilePath={activeFilePath}
               onFileSelect={onFileSelect}
             />
-              )}
-            </>
+              )
           )}
 
           {/* Settings Panel */}

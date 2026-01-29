@@ -1,4 +1,4 @@
-import { useState } from 'react';
+
 
 interface HeaderProps {
   projectName: string;
@@ -20,7 +20,7 @@ export function Header({
       {/* Left Section - Logo & Project */}
       <div className="header-left">
         <div className="logo">
-          <svg className="logo-icon" viewBox="0 0 24 24" fill="none">
+          <svg className="logo-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path 
               d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" 
               stroke="currentColor" 
@@ -35,8 +35,8 @@ export function Header({
         
         <div className="divider" />
         
-        <button className="project-selector">
-          <svg className="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <button type="button" className="project-selector">
+          <svg className="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
           </svg>
           <span>{projectName}</span>
@@ -54,14 +54,14 @@ export function Header({
           )}
           {failedCount > 0 && (
             <span className="status-pill failed">
-              <svg className="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg className="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               {failedCount} Failed
             </span>
           )}
-          <button className="heal-sync-btn" onClick={onHealSync}>
-            <svg className="sync-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <button type="button" className="heal-sync-btn" onClick={onHealSync}>
+            <svg className="sync-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
             Heal & Sync
@@ -76,7 +76,7 @@ export function Header({
             {userName.split(' ').map(n => n[0]).join('').slice(0, 2)}
           </div>
           <span className="user-name">{userName}</span>
-          <svg className="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M19 9l-7 7-7-7" />
           </svg>
         </div>

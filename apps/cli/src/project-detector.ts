@@ -1,5 +1,5 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 // ============================================================================
 // Type Definitions
@@ -62,10 +62,10 @@ export async function detectProject(projectPath: string): Promise<ProjectInfo> {
   const testDir = getDefaultTestDirectory(projectType);
 
   // Detect test frameworks from dependencies
-  let hasPlaywright = !!(allDeps['playwright'] || allDeps['@playwright/test']);
-  const hasJest = !!(allDeps['jest'] || allDeps['@types/jest']);
-  const hasVitest = !!(allDeps['vitest']);
-  const hasCypress = !!(allDeps['cypress']);
+  let hasPlaywright = !!(allDeps.playwright || allDeps['@playwright/test']);
+  const hasJest = !!(allDeps.jest || allDeps['@types/jest']);
+  const hasVitest = !!(allDeps.vitest);
+  const hasCypress = !!(allDeps.cypress);
 
   // Also check for config files (even if package not installed)
   if (!hasPlaywright) {
@@ -102,11 +102,11 @@ function detectProjectType(dependencies: Record<string, string>, isMonorepo: boo
   if (isMonorepo) return 'monorepo';
 
   // Check for specific frameworks (order matters)
-  if (dependencies['next']) return 'nextjs';
-  if (dependencies['@sveltejs/kit'] || dependencies['svelte']) return 'svelte';
-  if (dependencies['vue']) return 'vue';
-  if (dependencies['react'] || dependencies['react-dom']) return 'react';
-  if (dependencies['vite']) return 'vite';
+  if (dependencies.next) return 'nextjs';
+  if (dependencies['@sveltejs/kit'] || dependencies.svelte) return 'svelte';
+  if (dependencies.vue) return 'vue';
+  if (dependencies.react || dependencies['react-dom']) return 'react';
+  if (dependencies.vite) return 'vite';
 
   return 'generic';
 }

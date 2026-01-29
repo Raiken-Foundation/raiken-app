@@ -203,7 +203,7 @@ export const appRouter = t.router({
             const fullPath = path.join(projectPath, input.filePath);
             
             try {
-                const fs = await import('fs/promises');
+                const fs = await import('node:fs/promises');
                 const content = await fs.readFile(fullPath, 'utf-8');
                 return {
                     filePath: input.filePath,

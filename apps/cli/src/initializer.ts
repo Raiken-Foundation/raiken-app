@@ -1,6 +1,6 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { spawn } from 'child_process';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { select, confirm, input } from '@inquirer/prompts';
 import { createConfig } from '@raiken/shared';
@@ -470,7 +470,7 @@ export default defineConfig({
 
 async function updatePackageScripts(
   projectPath: string, 
-  projectInfo: ProjectInfo,
+  _projectInfo: ProjectInfo,
   testFramework: TestFramework
 ): Promise<void> {
   const packageJsonPath = path.join(projectPath, 'package.json');

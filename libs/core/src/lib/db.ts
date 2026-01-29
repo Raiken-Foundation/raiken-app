@@ -1,10 +1,10 @@
 import Database from 'better-sqlite3';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as crypto from 'crypto';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
 import { load as loadSqliteVec } from 'sqlite-vec';
-import { CodeNode, ParsedFile } from '../types';
-import { DBEntryPoint, DBFileNode, DBDependency, DBStats } from '../types';
+import type { CodeNode, ParsedFile } from '../types';
+import type { DBEntryPoint, DBFileNode, DBDependency, DBStats } from '../types';
 
 // ============================================================================
 // Custom Errors

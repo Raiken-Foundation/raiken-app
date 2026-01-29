@@ -282,7 +282,7 @@ export const appRouter = t.router({
             const fullPath = path.join(projectPath, input.filePath);
             
             try {
-                const fs = await import('fs/promises');
+                const fs = await import('node:fs/promises');
                 const content = await fs.readFile(fullPath, 'utf-8');
                 return {
                     filePath: input.filePath,
@@ -334,7 +334,7 @@ export const appRouter = t.router({
                     }
 
                     // Parse stored full AST
-                    let ast;
+                    let ast: unknown;
                     try {
                         ast = JSON.parse(file.ast);
                     } catch {
@@ -809,7 +809,7 @@ export const appRouter = t.router({
                     testResults: input.testResults,
                     testCode: input.testCode,
                     sourceCode: input.sourceCode,
-                    domContext: input.domContext as any,
+                    domContext: input.domContext as any, // eslint-disable-line @typescript-eslint/no-explicit-any
                     projectPath: ctx.projectPath,
                 };
 

@@ -38,14 +38,14 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
     return (
       <div className="code-editor">
         <div className="empty-state">
-          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
           <h3>No file selected</h3>
           <p>Select a test file from the sidebar or create a new one</p>
           {onNewFile && (
-            <button className="new-file-btn" onClick={onNewFile}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <button type="button" className="new-file-btn" onClick={onNewFile}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" />
               </svg>
               New File
@@ -116,19 +116,19 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
     switch (status) {
       case 'passed':
         return (
-          <svg className="tab-status passed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="tab-status passed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M5 13l4 4L19 7" />
           </svg>
         );
       case 'failed':
         return (
-          <svg className="tab-status failed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="tab-status failed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M6 18L18 6M6 6l12 12" />
           </svg>
         );
       case 'running':
         return (
-          <svg className="tab-status running" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className="tab-status running" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
             <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         );
@@ -167,7 +167,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
               className="tab-content"
             onClick={() => onFileSelect(file.id)}
           >
-            <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
               <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
               <span className="tab-name">{file.name}</span>
@@ -175,6 +175,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
           </button>
             {onFileClose && (
               <button
+                type="button"
                 className="tab-close"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -182,7 +183,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
                 }}
                 title="Close file"
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                   <path d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
@@ -195,7 +196,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
       {activeFile && (
         <div className="file-header">
           <div className="file-path">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
               <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <span>{activeFile.path}</span>
@@ -203,11 +204,12 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
           <div className="header-actions">
             {onNewFile && (
               <button
+                type="button"
                 className="new-file-header-btn"
                 onClick={onNewFile}
                 title="Create new file"
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                   <path d="M12 5v14M5 12h14" />
                 </svg>
                 New
@@ -215,6 +217,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
             )}
             {onRunTests && (
               <button
+                type="button"
                 className={`run-tests-btn ${isRunningTests ? 'running' : ''}`}
                 onClick={() => onRunTests(activeFile.id)}
                 disabled={isRunningTests}
@@ -222,14 +225,14 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
               >
                 {isRunningTests ? (
                   <>
-                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                       <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
                     Running...
                   </>
                 ) : (
                   <>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                       <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                       <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
@@ -241,7 +244,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
           <div className={`status-badge ${activeFile.status}`}>
             {activeFile.status === 'failed' && (
               <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                   <path d="M6 18L18 6M6 6l12 12" />
                 </svg>
                 Tests failed
@@ -249,7 +252,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
             )}
             {activeFile.status === 'passed' && (
               <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                   <path d="M5 13l4 4L19 7" />
                 </svg>
                 Tests passed
@@ -257,7 +260,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
             )}
             {activeFile.status === 'running' && (
               <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                   <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
                 Running...
@@ -297,7 +300,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
               }
             });
           }}
-          onMount={(editor, monaco) => {
+          onMount={(_editor, monaco) => {
             monaco.editor.setTheme('raiken-dark');
             setIsEditorReady(true);
           }}
@@ -335,7 +338,7 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
         <div className="results-bar">
           {activeFile.failedCount !== undefined && activeFile.failedCount > 0 && (
             <span className="result-count failed">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M6 18L18 6M6 6l12 12" />
               </svg>
               {activeFile.failedCount} failed
@@ -343,14 +346,14 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
           )}
           {activeFile.passedCount !== undefined && (
             <span className="result-count passed">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M5 13l4 4L19 7" />
               </svg>
               {activeFile.passedCount} passed
             </span>
           )}
           <span className="result-time">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             1.323s

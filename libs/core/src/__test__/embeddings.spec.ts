@@ -56,7 +56,7 @@ describe('Embeddings Generator', () => {
     });
 
     it('should handle very long text by truncating', async () => {
-      const longText = 'function test() { '.repeat(1000) + ' }';
+      const longText = `${'function test() { '.repeat(1000)} }`;
       const embedding = await generator.generateEmbedding(longText);
       
       expect(embedding).toHaveLength(384);

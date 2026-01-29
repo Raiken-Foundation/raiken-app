@@ -5,7 +5,7 @@ interface HeaderProps {
   staleCount?: number;
   failedCount?: number;
   userName?: string;
-  onHealSync?: () => void;
+  onMonitorSync?: () => void;
 }
 
 export function Header({ 
@@ -13,7 +13,7 @@ export function Header({
   staleCount = 0, 
   failedCount = 0, 
   userName = 'User',
-  onHealSync 
+  onMonitorSync 
 }: HeaderProps) {
   return (
     <header className="header">
@@ -60,11 +60,11 @@ export function Header({
               {failedCount} Failed
             </span>
           )}
-          <button type="button" className="heal-sync-btn" onClick={onHealSync}>
+          <button type="button" className="monitor-sync-btn" onClick={onMonitorSync}>
             <svg className="sync-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            Heal & Sync
+            Monitor & Sync
           </button>
         </div>
       </div>
@@ -191,7 +191,7 @@ export function Header({
           height: 1rem;
         }
 
-        .heal-sync-btn {
+        .monitor-sync-btn {
           display: flex;
           align-items: center;
           gap: 0.375rem;
@@ -206,7 +206,7 @@ export function Header({
           transition: all 0.15s;
         }
 
-        .heal-sync-btn:hover {
+        .monitor-sync-btn:hover {
           background: rgba(34, 197, 94, 0.1);
         }
 

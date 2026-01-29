@@ -285,7 +285,7 @@ export function TestingView() {
   
   const activeFile = files.find(f => f.id === activeFileId);
 
-  const handleHealSync = () => {
+  const handleMonitorSync = () => {
     console.log('🔄 Rebuilding code graph...');
     setIsBuilding(true);
     buildGraphMutation.mutate({ path: '.', persist: true });
@@ -637,7 +637,7 @@ export function TestingView() {
         staleCount={0}
         failedCount={0}
         userName="Developer"
-        onHealSync={handleHealSync}
+        onMonitorSync={handleMonitorSync}
       />
       
       <div className="main-content">

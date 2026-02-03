@@ -1,0 +1,7 @@
+{
+    "name": "@raiken/playground",
+    "$schema": "../../node_modules/nx/schemas/project-schema.json",
+    "sourceRoot": "tools/playground/src",
+    "projectType": "application",
+    "tags": []
+}

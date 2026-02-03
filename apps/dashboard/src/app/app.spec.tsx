@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render } from "../test/test-utils";
 
 import App from "./app";
 
@@ -8,8 +8,8 @@ describe("App", () => {
         expect(baseElement).toBeTruthy();
     });
 
-    it("should have a greeting as the title", () => {
-        const { getAllByText } = render(<App />);
-        expect(getAllByText(/Welcome dashboard/gi).length > 0).toBeTruthy();
+    it("should render the app container", () => {
+        const { container } = render(<App />);
+        expect(container.querySelector(".app-container")).toBeTruthy();
     });
 });

@@ -28,7 +28,9 @@ export function ProjectOverview() {
     }
 
     // At this point, projectQuery.data is guaranteed to be defined
-    const { cwd, nodeVersion } = projectQuery.data!;
+    const data = projectQuery.data;
+    if (!data) return null; // Type guard - should never happen after isLoading/isError checks
+    const { path: cwd, nodeVersion } = data;
 
     return (
         <div className="p-6 bg-white rounded-lg shadow-sm border border-gray-200">
@@ -62,6 +64,7 @@ export function ProjectOverview() {
             {/* Example Button for a mutation */}
             <div className="mt-4 pt-4 border-t border-gray-100">
                 <button
+                    type="button"
                     className="px-4 py-2 bg-black text-white rounded hover:bg-gray-800 text-sm font-medium"
                     onClick={() => {
                         // scanMutation.mutate({ path: cwd });

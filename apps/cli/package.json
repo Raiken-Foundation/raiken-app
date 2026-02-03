@@ -1,12 +1,43 @@
 {
-    "name": "cli",
-    "version": "0.0.1",
+    "name": "raiken",
+    "version": "0.1.1",
+    "description": "AI-powered E2E test generation, execution, and repair CLI",
+    "author": "Raiken Foundation",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Raiken-Foundation/raiken-app.git"
+    },
+    "homepage": "https://github.com/Raiken-Foundation/raiken-app#readme",
+    "bugs": {
+        "url": "https://github.com/Raiken-Foundation/raiken-app/issues"
+    },
+    "keywords": [
+        "e2e",
+        "testing",
+        "playwright",
+        "ai",
+        "test-generation",
+        "automation",
+        "cli"
+    ],
+    "bin": {
+        "raiken": "./bin.cjs"
+    },
+    "main": "./index.cjs",
+    "type": "commonjs",
+    "engines": {
+        "node": ">=18.0.0"
+    },
     "dependencies": {
         "@fastify/static": "^8.3.0",
+        "@inquirer/prompts": "^7.2.0",
         "@trpc/server": "^11.7.2",
         "chalk": "^5.6.2",
         "commander": "^14.0.2",
+        "dotenv": "^16.0.0",
         "fastify": "^5.6.2",
+        "glob": "^11.0.0",
         "zod": "^4.1.13"
     }
 }

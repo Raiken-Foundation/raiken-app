@@ -1,1 +1,1 @@
-export * from "@raiken/config";
+export * from "@raiken/shared";

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { EmbeddingsGenerator } from '../lib/embeddings';
+import { EmbeddingsGenerator } from '../database/embeddings';
 
 describe('Embeddings Generator', () => {
   let generator: EmbeddingsGenerator;

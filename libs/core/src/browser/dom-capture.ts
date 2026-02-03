@@ -95,9 +95,6 @@ export async function captureDOMContext(
     await browser.close();
     browser = null;
 
-    console.log(`✓ Found ${interactiveElements.length} interactive elements`);
-    console.log(`✓ Found ${formFields.length} form fields`);
-
     return {
       url,
       title,
@@ -204,7 +201,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('button', text.trim(), testId),
       });
     } catch {
-      // Silently skip elements that fail to process
+      // Element inaccessible
     }
   }
   
@@ -222,7 +219,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('link', text.trim()),
       });
     } catch {
-      // Silently skip elements that fail to process
+      // Element inaccessible
     }
   }
   
@@ -255,7 +252,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors(role, label || placeholder || name, testId),
       });
     } catch {
-      // Silently skip elements that fail to process
+      // Element inaccessible
     }
   }
 
@@ -275,7 +272,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors('textbox', label || text.trim(), testId),
       });
     } catch {
-      // Silently skip elements that fail to process
+      // Element inaccessible
     }
   }
 
@@ -297,7 +294,7 @@ async function extractInteractiveElements(page: LocatorScope): Promise<Interacti
         suggestedSelectors: buildSelectors(role || 'button', text.trim(), testId),
       });
     } catch {
-      // Silently skip elements that fail to process
+      // Element inaccessible
     }
   }
   
@@ -329,7 +326,7 @@ async function extractFormFields(page: LocatorScope): Promise<FormField[]> {
         suggestedSelector: id ? `#${id}` : (name ? `[name="${name}"]` : `[placeholder="${placeholder}"]`),
       });
     } catch {
-      // Silently skip fields that fail to process
+      // Field inaccessible
     }
   }
   

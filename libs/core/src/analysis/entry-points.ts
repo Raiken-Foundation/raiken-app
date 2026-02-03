@@ -31,6 +31,9 @@ export class EntryPointDetector {
   
   // Performance optimization: Deduplication with O(1) lookups
   private seenFiles = new Map<string, EntryPointResult>();
+  
+  // Cache size limit to prevent unbounded memory growth
+  private static readonly CACHE_MAX_SIZE = 2000;
 
   constructor(projectRoot: string, options: EntryPointDetectorOptions = {}) {
     this.projectRoot = path.resolve(projectRoot);
@@ -48,6 +51,17 @@ export class EntryPointDetector {
     const cached = this.fileCache.get(filePath);
     if (cached !== undefined) {
       return cached;
+    }
+    
+    // Enforce cache size limit
+    if (this.fileCache.size >= EntryPointDetector.CACHE_MAX_SIZE) {
+      const evictCount = Math.floor(EntryPointDetector.CACHE_MAX_SIZE * 0.1);
+      let count = 0;
+      for (const k of this.fileCache.keys()) {
+        if (count >= evictCount) break;
+        this.fileCache.delete(k);
+        count++;
+      }
     }
     
     const exists = fs.existsSync(filePath);

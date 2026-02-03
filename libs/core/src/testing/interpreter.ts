@@ -7,7 +7,7 @@
 
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { streamText } from 'ai';
-import type { DOMContext } from './dom-capture';
+import type { DOMContext } from '../browser/dom-capture';
 
 export interface TestResultForInterpretation {
   name: string;

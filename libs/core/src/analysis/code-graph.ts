@@ -20,6 +20,9 @@ export class CodeGraph {
   // Performance optimization: Cache resolved import paths and existing file checks
   private importCache = new Map<string, string[]>();
   private fileExistsCache = new Map<string, boolean>();
+  
+  // Cache size limits to prevent unbounded memory growth
+  private static readonly CACHE_MAX_SIZE = 5000;
 
   constructor(rootPath: string, options: CodeGraphOptions = {}) {
     this.rootPath = path.resolve(rootPath);
@@ -119,7 +122,7 @@ export class CodeGraph {
         }
       }
     } catch {
-      // File doesn't exist or can't be read - silently skip
+      // Config file not found
     }
   }
   
@@ -477,7 +480,7 @@ export class CodeGraph {
         await this.traverseDirectory(dir, { ...options, currentDepth: options.currentDepth + 1 });
       }
     } catch {
-      // Ignore errors
+      // Directory read failed
     }
   }
 
@@ -737,13 +740,13 @@ export class CodeGraph {
       for (const possiblePath of possiblePaths) {
         if (await this.fileExists(possiblePath)) {
           const result = [possiblePath];
-          this.importCache.set(cacheKey, result);
+          this.setCacheWithLimit(this.importCache, cacheKey, result);
           return result;
         }
       }
       
       // Cache empty result
-      this.importCache.set(cacheKey, []);
+      this.setCacheWithLimit(this.importCache, cacheKey, []);
       return [];
     });
 
@@ -772,10 +775,10 @@ export class CodeGraph {
     
     try {
       await fs.access(filePath);
-      this.fileExistsCache.set(filePath, true);
+      this.setCacheWithLimit(this.fileExistsCache, filePath, true);
       return true;
     } catch {
-      this.fileExistsCache.set(filePath, false);
+      this.setCacheWithLimit(this.fileExistsCache, filePath, false);
       return false;
     }
   }
@@ -873,6 +876,24 @@ export class CodeGraph {
   clearCaches(): void {
     this.importCache.clear();
     this.fileExistsCache.clear();
+  }
+  
+  /**
+   * Set cache value with size limit enforcement.
+   * Evicts oldest entries when limit is reached.
+   */
+  private setCacheWithLimit<T>(cache: Map<string, T>, key: string, value: T): void {
+    if (cache.size >= CodeGraph.CACHE_MAX_SIZE) {
+      // Evict oldest 10% of entries (Map preserves insertion order)
+      const evictCount = Math.floor(CodeGraph.CACHE_MAX_SIZE * 0.1);
+      let count = 0;
+      for (const k of cache.keys()) {
+        if (count >= evictCount) break;
+        cache.delete(k);
+        count++;
+      }
+    }
+    cache.set(key, value);
   }
 
   // ============================================================================
@@ -1231,5 +1252,146 @@ export class CodeGraph {
     this.stopWatching();
     this.nodes.clear();
     this.clearCaches();
+  }
+
+  // ============================================================================
+  // Project Understanding (Semantic Context)
+  // ============================================================================
+
+  /**
+   * Build a keyword index for semantic search across the codebase.
+   * Returns a map of keyword -> file paths for quick lookup.
+   */
+  buildKeywordIndex(): Map<string, string[]> {
+    const index = new Map<string, string[]>();
+    
+    for (const [filePath, node] of this.nodes) {
+      const keywords = this.extractKeywordsFromPath(node.relativePath);
+      
+      // Add keywords from function/class names
+      for (const fn of node.parsed.functions) {
+        keywords.push(...this.splitIdentifier(fn.name));
+      }
+      for (const cls of node.parsed.classes) {
+        keywords.push(...this.splitIdentifier(cls.name));
+      }
+      
+      // Index each keyword
+      for (const keyword of keywords) {
+        const existing = index.get(keyword) || [];
+        if (!existing.includes(node.relativePath)) {
+          existing.push(node.relativePath);
+        }
+        index.set(keyword, existing);
+      }
+    }
+    
+    return index;
+  }
+
+  /**
+   * Find files relevant to a query using keyword matching.
+   */
+  findRelevantFiles(query: string, limit = 10): string[] {
+    const index = this.buildKeywordIndex();
+    const queryWords = this.extractKeywords(query);
+    const scores = new Map<string, number>();
+    
+    for (const word of queryWords) {
+      const matchingFiles = index.get(word.toLowerCase());
+      if (matchingFiles) {
+        for (const file of matchingFiles) {
+          scores.set(file, (scores.get(file) || 0) + 1);
+        }
+      }
+    }
+    
+    return Array.from(scores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([file]) => file);
+  }
+
+  /**
+   * Get discovered modules (directories with meaningful groupings).
+   */
+  getModules(): Array<{ name: string; files: string[]; weight: number }> {
+    const moduleMap = new Map<string, string[]>();
+    
+    for (const node of this.nodes.values()) {
+      const moduleName = this.getModuleName(node.relativePath);
+      if (!moduleMap.has(moduleName)) {
+        moduleMap.set(moduleName, []);
+      }
+      moduleMap.get(moduleName)?.push(node.relativePath);
+    }
+    
+    const totalFiles = this.nodes.size || 1;
+    return Array.from(moduleMap.entries())
+      .map(([name, files]) => ({
+        name,
+        files,
+        weight: files.length / totalFiles,
+      }))
+      .sort((a, b) => b.weight - a.weight);
+  }
+
+  /**
+   * Extract module name from file path.
+   */
+  private getModuleName(filePath: string): string {
+    const parts = filePath.split('/').filter(p => !p.includes('.'));
+    const skipDirs = new Set(['src', 'app', 'lib', 'libs', 'packages', 'modules']);
+    
+    for (const part of parts) {
+      if (!skipDirs.has(part)) {
+        return part;
+      }
+    }
+    
+    return parts[0] || 'root';
+  }
+
+  /**
+   * Extract keywords from a file path.
+   */
+  private extractKeywordsFromPath(filePath: string): string[] {
+    const keywords: string[] = [];
+    const basename = path.basename(filePath, path.extname(filePath));
+    
+    keywords.push(...this.splitIdentifier(basename));
+    keywords.push(basename.toLowerCase());
+    
+    const dirs = filePath.split('/').slice(0, -1);
+    for (const dir of dirs) {
+      if (dir.length > 2 && !['src', 'lib', 'app'].includes(dir)) {
+        keywords.push(dir.toLowerCase());
+      }
+    }
+    
+    return [...new Set(keywords)];
+  }
+
+  /**
+   * Split an identifier into words (handles camelCase, PascalCase, etc.).
+   */
+  private splitIdentifier(identifier: string): string[] {
+    return identifier
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/[-_]/g, ' ')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(w => w.length > 2);
+  }
+
+  /**
+   * Extract keywords from a query string.
+   */
+  private extractKeywords(query: string): string[] {
+    return query
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2);
   }
 }

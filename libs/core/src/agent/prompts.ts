@@ -5,6 +5,7 @@
 // ============================================================================
 
 import type { ParsedFunction, ParsedClass, ParsedImport } from '../types';
+import type { AgentIntent } from './graph/utils';
 
 export interface ContextData {
   files: Array<{
@@ -20,6 +21,18 @@ export interface ContextData {
   totalTokens: number;
 }
 
+/**
+ * Memory context from AgentMemory for prompt building
+ */
+export interface MemoryContext {
+  /** Preferred selector strategy (e.g., 'data-testid', 'role') */
+  selectorStrategy: string | null;
+  /** Selectors that have worked in the past */
+  successfulSelectors: Array<{ element: string; selector: string; type: string }>;
+  /** Recent test failures to avoid */
+  recentFailures: Array<{ testName: string; error: string }>;
+}
+
 export interface PromptTemplate {
   version: string;
   name: string;
@@ -31,6 +44,15 @@ export interface PromptTemplate {
     avgTokens?: number;
     avgGenerationTime?: number;
   };
+}
+
+export interface AgentClassifierResult {
+  intent: "explore" | "generateTests" | "explain";
+  goal: string | null;
+  targetFeature: string | null;
+  targetUrl: string | null;
+  nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "none" | null;
+  missingContext: string[];
 }
 
 /**
@@ -264,10 +286,136 @@ export function getPromptTemplate(version = 'golden-v1'): PromptTemplate {
 export function buildSystemPrompt(
   context: ContextData,
   userPrompt: string,
-  templateVersion = 'golden-v1'
+  templateVersion = 'golden-v1',
+  memoryContext?: MemoryContext
 ): string {
   const template = getPromptTemplate(templateVersion);
-  return template.buildPrompt(context, userPrompt);
+  let prompt = template.buildPrompt(context, userPrompt);
+  
+  // Append memory context if available
+  if (memoryContext) {
+    prompt += buildMemoryContextSection(memoryContext);
+  }
+  
+  return prompt;
+}
+
+/**
+ * Build a prompt for exploratory Q&A and multi-question handling
+ */
+export function buildExplorationPrompt(
+  context: ContextData,
+  userPrompt: string,
+  memoryContext?: MemoryContext,
+  intent: AgentIntent = "explore",
+  goalState?: {
+    activeGoal?: string | null;
+    targetFeature?: string | null;
+    targetUrl?: string | null;
+    missingContext?: string[];
+    nextTool?: string | null;
+  }
+): string {
+  let prompt = `
+[ROLE]
+You are a senior software engineer and QA engineer helping a teammate understand the product and how to test it.
+
+[GOAL]
+Answer the user's questions directly. If there are multiple questions or tasks, handle each in order.
+If a question or task cannot be answered from the provided context, say so and explain what would help.
+
+[INTENT]
+${intent}
+
+[GOAL STATE]
+Active Goal: ${goalState?.activeGoal ?? "none"}
+Target Feature: ${goalState?.targetFeature ?? "none"}
+Target URL: ${goalState?.targetUrl ?? "none"}
+Missing Context: ${(goalState?.missingContext || []).join(", ") || "none"}
+Next Tool: ${goalState?.nextTool ?? "none"}
+
+[BEHAVIOR]
+- Treat the user's request as a task even if it's not phrased as a question.
+- Default to the most likely interpretation; only ask a follow-up if a missing input blocks progress.
+- Assume the user is not a domain expert; use simple, concrete language.
+- If the request has multiple parts, answer in numbered steps under "Answers".
+- If intent is "explain", focus on how the code works and describe the flow clearly.
+- If intent is "explore", focus on mapping features to relevant files/components.
+
+[CONSTRAINTS]
+- Use only the codebase context and DOM summary provided.
+- Do not claim actions you did not take.
+- Be concise and actionable.
+
+[CONTEXT - PROJECT STRUCTURE]
+Project Type: ${context.projectType}
+Test Directory: ${context.testDirectory}
+
+[CONTEXT - RELEVANT SOURCE FILES]
+${context.files.map(f => `
+File: ${f.path}
+Functions: ${f.functions.map(fn => `${fn.name}(${fn.params.join(', ')})`).join(', ') || 'none'}
+Classes: ${f.classes.map(c => c.name).join(', ') || 'none'}
+Key Imports: ${f.imports.slice(0, 5).map(i => i.source).join(', ') || 'none'}
+---
+${f.fullContext}
+`).join('\n')}
+
+[TASK - USER REQUEST]
+${userPrompt}
+
+[OUTPUT]
+Provide a short response with these sections:
+Answers:
+- Answer each question or task directly
+- When asked to map functionality, format as "Feature -> components/files"
+Evidence:
+- Cite relevant file paths or DOM observations used
+Unknowns / Next checks:
+- Note any uncertainties and what to verify next
+If there are no unknowns, write "None".
+`;
+
+  if (memoryContext) {
+    prompt += buildMemoryContextSection(memoryContext);
+  }
+
+  return prompt;
+}
+
+/**
+ * Build a prompt section from memory context
+ */
+function buildMemoryContextSection(memory: MemoryContext): string {
+  const sections: string[] = [];
+  
+  // Selector preference
+  if (memory.selectorStrategy) {
+    sections.push(`
+[USER PREFERENCES]
+Preferred selector strategy: ${memory.selectorStrategy}
+Always prioritize ${memory.selectorStrategy} selectors when available.`);
+  }
+  
+  // Known-good selectors
+  if (memory.successfulSelectors.length > 0) {
+    sections.push(`
+[KNOWN-GOOD SELECTORS]
+These selectors have worked reliably in this project:
+${memory.successfulSelectors.map(s => `- ${s.element}: ${s.selector} (${s.type})`).join('\n')}
+
+Use these as reference for similar elements.`);
+  }
+  
+  // Recent failures to avoid
+  if (memory.recentFailures.length > 0) {
+    sections.push(`
+[AVOID THESE PATTERNS]
+Recent test failures - avoid similar mistakes:
+${memory.recentFailures.map(f => `- ${f.testName}: ${f.error}`).join('\n')}`);
+  }
+  
+  return sections.join('\n');
 }
 
 // ============================================================================
@@ -285,6 +433,74 @@ Here's how to get started:
 3. Or I can search for relevant files based on your description
 
 Try something like: "Generate a test for @src/components/LoginForm.tsx"`;
+
+/**
+ * Help message when exploration context is missing
+ */
+export const NO_EXPLORATION_CONTEXT_MESSAGE = `I can help answer questions about the app, but I need more context first.
+
+Please:
+1. Build the code graph (so I can read project files), or
+2. Tell me which page or feature you want analyzed (I will locate the files), or
+3. Point me to a specific file with @.`;
+
+/**
+ * Build strict JSON classifier prompt for agent intent and goal extraction
+ */
+export function buildAgentClassifierPrompt(input: {
+  userPrompt: string;
+  conversationHistory?: Array<{ role: string; content: string }>;
+  storedGoal?: {
+    activeGoal?: string | null;
+    targetFeature?: string | null;
+    targetUrl?: string | null;
+    missingContext?: string[];
+    nextTool?: string | null;
+  };
+}): string {
+  const historyText =
+    input.conversationHistory && input.conversationHistory.length > 0
+      ? input.conversationHistory
+          .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
+          .join("\n")
+      : "None";
+  const storedGoal = input.storedGoal || {};
+  return `You are a strict JSON-only classifier for a QA agent.
+
+Your job: identify the user's current intent and extract a concise goal state.
+
+Rules:
+- Output ONLY valid JSON. No prose.
+- Use double quotes for all keys/strings.
+- If a value is unknown, use null.
+- missingContext must be an array of strings (empty array if none).
+- intent MUST be one of: "explore", "generateTests", "explain".
+- nextTool MUST be one of: "domCapture", "codeSearch", "testGen", "explain", "none", or null.
+
+Context:
+ConversationHistory:
+${historyText}
+
+StoredGoal:
+activeGoal: ${storedGoal.activeGoal ?? "null"}
+targetFeature: ${storedGoal.targetFeature ?? "null"}
+targetUrl: ${storedGoal.targetUrl ?? "null"}
+missingContext: ${(storedGoal.missingContext || []).join(", ") || "none"}
+nextTool: ${storedGoal.nextTool ?? "null"}
+
+CurrentUserPrompt:
+${input.userPrompt}
+
+Output JSON schema:
+{
+  "intent": "explore|generateTests|explain",
+  "goal": string|null,
+  "targetFeature": string|null,
+  "targetUrl": string|null,
+  "nextTool": "domCapture|codeSearch|testGen|explain|none"|null,
+  "missingContext": string[]
+}`;
+}
 
 /**
  * Build intent classification prompt for the orchestrator
@@ -317,7 +533,7 @@ If control is **refine**, combine the new request with the prior task to form an
 
 1. **test-generation** - The user's primary goal is to create, generate, or write test files
    - They want actual test code produced and saved
-   - Examples: "test this component", "generate tests", "write e2e tests for the login flow"
+   - Examples: "test this component", "generate tests", "write e2e tests for the login flow", "test the authentication"
 
 2. **chat** - The user wants to have a conversation about code, ask questions, or get explanations
    - Code explanations, architecture discussions, "how does this work" questions
@@ -328,10 +544,25 @@ If control is **refine**, combine the new request with the prior task to form an
    - Questions about Raiken's features, capabilities, or how to operate it
    - Examples: "how do I use Raiken", "what can you do", "how to generate tests"
 
-**Your Task:**
-Understand the user's underlying intent using natural language comprehension. Don't rely on keyword matching - understand what they actually want to accomplish. Consider context from conversation history if available.
+**Next Tool Selection:**
 
-For test generation: identify which files should be tested (use resolved files if available).
+- **domCapture**: Capture the live DOM from a running application to get accurate, real selectors for test generation. Useful when testing UI interactions.
+  
+- **codeSearch**: Search the codebase to find relevant files and context for the user's request.
+  
+- **testGen**: Proceed directly to test generation when sufficient context is already available.
+  
+- **explain**: Explain code, answer questions, or discuss architecture.
+  
+- **none**: No tool needed (help requests, simple responses).
+
+**Your Task:**
+Use natural language understanding to comprehend what the user wants. Consider:
+- The conversation history and what was discussed before
+- Whether they're asking about testing, explaining, or getting help
+- What context would be most helpful (live DOM, code files, or both)
+
+Think about what a skilled QA engineer would do: if testing a web application, they might want to see the live page. If testing a utility function, they'd want the source code. Use your judgment based on the full context.
 
 Respond with clear reasoning for your decision.`;
 }
@@ -416,3 +647,12 @@ ${resolvedFiles.length > 0
 
 Respond as a helpful colleague who genuinely wants to help.`;
 }
+
+// ============================================================================
+// Tool-Based Agent System Prompt
+// ============================================================================
+
+/**
+ * Build the system prompt for the tool-based agent.
+ * This prompt instructs the LLM on how to use tools effectively.
+ */

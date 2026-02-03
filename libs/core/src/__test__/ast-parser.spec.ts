@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseSourceFile, astToSearchableText, generateCodeChunks, chunkToSearchableText } from '../lib/ast-parser';
+import { parseSourceFile, astToSearchableText, generateCodeChunks, chunkToSearchableText } from '../analysis/ast-parser';
 
 describe('AST Parser', () => {
   describe('Function Extraction', () => {

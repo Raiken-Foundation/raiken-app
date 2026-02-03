@@ -32,14 +32,14 @@ export class DatabaseError extends Error {
  * - Retry logic for busy database
  * - Streaming for large datasets
  * 
- * SCHEMA VERSION: 2
+ * SCHEMA VERSION: 1
  */
 export class CodeGraphDB {
   private db: Database.Database;
   private projectPath: string;
   private readonly dbPath: string;
   
-  private static readonly SCHEMA_VERSION = 3;
+  private static readonly SCHEMA_VERSION = 1;
   private static readonly RETRY_ATTEMPTS = 3;
   private static readonly RETRY_DELAY_MS = 100;
 
@@ -75,8 +75,8 @@ export class CodeGraphDB {
       this.db.pragma('synchronous = NORMAL'); 
       this.db.pragma('wal_autocheckpoint = 5000');
 
-      // ✅ Run migrations
-      this.migrateSchema();
+      // ✅ Ensure schema is present (single version)
+      this.ensureSchema();
       
       // ✅ Ensure .gitignore includes .raiken/
       this.ensureGitignore();
@@ -96,36 +96,48 @@ export class CodeGraphDB {
   // Schema Management
   // ==========================================================================
 
-  private getUserVersion(): number {
-    return this.db.pragma('user_version', { simple: true }) as number;
-  }
-
   private setUserVersion(version: number): void {
     this.db.pragma(`user_version = ${version}`);
   }
 
   /**
-   * Run schema migrations based on current version.
+   * Ensure schema exists (single version, no migrations).
    */
-  private migrateSchema(): void {
-    const currentVersion = this.getUserVersion();
-    
-    if (currentVersion === 0) {
-      this.createV1Schema();
-      this.setUserVersion(1);
+  private ensureSchema(): void {
+    this.createV1Schema();
+    this.ensureEmbeddingsSchema();
+    this.ensureKeywordIndexSchema();
+    this.ensureMemorySchema();
+    this.ensureDependencyColumns();
+    this.ensureFileColumns();
+    this.setUserVersion(CodeGraphDB.SCHEMA_VERSION);
+  }
+
+  private ensureFileColumns(): void {
+    const tableInfo = this.db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
+    const columnNames = tableInfo.map(col => col.name);
+
+    this.db.transaction(() => {
+      if (!columnNames.includes('parsed_ast')) {
+        this.db.exec(`ALTER TABLE files ADD COLUMN parsed_ast TEXT DEFAULT '{}'`);
+      }
+      if (!columnNames.includes('ast')) {
+        this.db.exec(`ALTER TABLE files ADD COLUMN ast TEXT DEFAULT NULL`);
+      }
+      if (!columnNames.includes('indexed_via')) {
+        this.db.exec(`ALTER TABLE files ADD COLUMN indexed_via TEXT DEFAULT 'scan'`);
+      }
+      if (!columnNames.includes('last_modified')) {
+        this.db.exec(`ALTER TABLE files ADD COLUMN last_modified INTEGER DEFAULT 0`);
+      }
+    })();
+  }
+
+  private ensureDependencyColumns(): void {
+    const depsInfo = this.db.prepare(`PRAGMA table_info(dependencies)`).all() as Array<{ name: string }>;
+    if (!depsInfo.some(col => col.name === 'import_type')) {
+      this.db.exec(`ALTER TABLE dependencies ADD COLUMN import_type TEXT DEFAULT 'static'`);
     }
-    
-    if (this.getUserVersion() === 1) {
-      this.migrateToV2();
-      this.setUserVersion(2);
-    }
-    
-    if (this.getUserVersion() === 2) {
-      this.migrateToV3();
-      this.setUserVersion(3);
-    }
-    
-    // Future migrations go here...
   }
 
   /**
@@ -205,42 +217,7 @@ export class CodeGraphDB {
     `);
   }
 
-  /**
-   * Migration from v1 to v2
-   */
-  private migrateToV2(): void {
-    // Check if columns already exist (in case of partial migration)
-    const tableInfo = this.db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
-    const columnNames = tableInfo.map(col => col.name);
-    
-    this.db.transaction(() => {
-      // Add parsed_ast column if missing
-      if (!columnNames.includes('parsed_ast')) {
-        this.db.exec(`ALTER TABLE files ADD COLUMN parsed_ast TEXT DEFAULT '{}'`);
-      }
-      
-      // Add indexed_via column if missing
-      if (!columnNames.includes('indexed_via')) {
-        this.db.exec(`ALTER TABLE files ADD COLUMN indexed_via TEXT DEFAULT 'scan'`);
-      }
-      
-      // Add import_type to dependencies if missing
-      const depsInfo = this.db.prepare(`PRAGMA table_info(dependencies)`).all() as Array<{ name: string }>;
-      if (!depsInfo.some(col => col.name === 'import_type')) {
-        this.db.exec(`ALTER TABLE dependencies ADD COLUMN import_type TEXT DEFAULT 'static'`);
-      }
-      
-      // Update stats schema_version
-      this.db.exec(`
-        UPDATE stats SET schema_version = 2 WHERE schema_version IS NULL OR schema_version < 2
-      `);
-    })();
-  }
-
-  /**
-   * Migration from v2 to v3 - Add embeddings support
-   */
-  private migrateToV3(): void {
+  private ensureEmbeddingsSchema(): void {
     this.db.transaction(() => {
       // Create embeddings table
       this.db.exec(`
@@ -266,10 +243,83 @@ export class CodeGraphDB {
           embedding float[384]
         );
       `);
+    })();
+  }
 
-      // Update stats schema_version
+  private ensureKeywordIndexSchema(): void {
+    this.db.transaction(() => {
+      // Create keyword index table for fast semantic search
       this.db.exec(`
-        UPDATE stats SET schema_version = 3 WHERE schema_version < 3
+        CREATE TABLE IF NOT EXISTS keyword_index (
+          keyword TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          project_path TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (project_path, keyword, file_path)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_keyword_project ON keyword_index(project_path);
+        CREATE INDEX IF NOT EXISTS idx_keyword_keyword ON keyword_index(keyword);
+        CREATE INDEX IF NOT EXISTS idx_keyword_updated ON keyword_index(updated_at);
+      `);
+    })();
+  }
+
+  private ensureMemorySchema(): void {
+    this.db.transaction(() => {
+      // User preferences (project-level settings)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS preferences (
+          project_path TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (project_path, key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_preferences_project ON preferences(project_path);
+      `);
+
+      // Selector history (track what worked/failed)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS selector_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          element_description TEXT NOT NULL,
+          selector TEXT NOT NULL,
+          selector_type TEXT NOT NULL CHECK(selector_type IN ('data-testid', 'role', 'text', 'css', 'xpath', 'other')),
+          success_count INTEGER DEFAULT 0,
+          failure_count INTEGER DEFAULT 0,
+          last_used INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_selector_project ON selector_history(project_path);
+        CREATE INDEX IF NOT EXISTS idx_selector_element ON selector_history(element_description);
+        CREATE INDEX IF NOT EXISTS idx_selector_last_used ON selector_history(last_used);
+      `);
+
+      // Test outcomes (generated tests and their results)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS test_outcomes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          test_file TEXT NOT NULL,
+          test_name TEXT NOT NULL,
+          source_prompt TEXT NOT NULL,
+          generated_code TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'passed', 'failed', 'error', 'timeout')),
+          error_message TEXT,
+          failing_selector TEXT,
+          execution_time_ms INTEGER,
+          retry_count INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          last_run INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_outcomes_project ON test_outcomes(project_path);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_status ON test_outcomes(status);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_file ON test_outcomes(test_file);
       `);
     })();
   }
@@ -306,11 +356,10 @@ export class CodeGraphDB {
     } catch (error: unknown) {
       const sqliteError = error as { code?: string };
       if (sqliteError.code === 'SQLITE_BUSY' && retries > 0) {
-        // Synchronous delay (better-sqlite3 is sync)
-        const start = Date.now();
-        while (Date.now() - start < CodeGraphDB.RETRY_DELAY_MS) {
-          // Busy wait
-        }
+        // Synchronous sleep using Atomics.wait (doesn't burn CPU like busy-wait)
+        const sharedBuffer = new SharedArrayBuffer(4);
+        const int32 = new Int32Array(sharedBuffer);
+        Atomics.wait(int32, 0, 0, CodeGraphDB.RETRY_DELAY_MS);
         return this.runWithRetry(fn, retries - 1);
       }
       throw new DatabaseError(
@@ -1072,6 +1121,363 @@ export class CodeGraphDB {
     return result !== undefined;
   }
 
+  // ==========================================================================
+  // Keyword Index Operations
+  // ==========================================================================
+
+  /**
+   * Save keyword index to database.
+   * 
+   * @param index - Map of keyword -> file paths
+   */
+  saveKeywordIndex(index: Map<string, string[]>): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        const now = Date.now();
+
+        // Clear existing index for this project
+        this.db.prepare(`
+          DELETE FROM keyword_index WHERE project_path = ?
+        `).run(this.projectPath);
+
+        // Insert new index
+        const insertStmt = this.db.prepare(`
+          INSERT INTO keyword_index (keyword, file_path, project_path, updated_at)
+          VALUES (?, ?, ?, ?)
+        `);
+
+        for (const [keyword, files] of index) {
+          for (const filePath of files) {
+            insertStmt.run(keyword, filePath, this.projectPath, now);
+          }
+        }
+      });
+
+      transaction();
+    });
+  }
+
+  /**
+   * Load keyword index from database.
+   * 
+   * @returns Map of keyword -> file paths, or null if not found
+   */
+  loadKeywordIndex(): Map<string, string[]> | null {
+    const rows = this.db.prepare(`
+      SELECT keyword, file_path FROM keyword_index WHERE project_path = ?
+    `).all(this.projectPath) as Array<{ keyword: string; file_path: string }>;
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const index = new Map<string, string[]>();
+    for (const row of rows) {
+      const existing = index.get(row.keyword) || [];
+      existing.push(row.file_path);
+      index.set(row.keyword, existing);
+    }
+
+    return index;
+  }
+
+  /**
+   * Get files that have been modified since a given timestamp.
+   * Used by orchestrator for change detection.
+   * 
+   * @param sinceTimestamp - Unix timestamp in milliseconds
+   * @returns Array of changed files with their change info
+   */
+  getChangedFilesSince(sinceTimestamp: number): Array<{
+    path: string;
+    lastIndexed: number;
+    contentChanged: boolean;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT relative_path, last_indexed, content_hash
+      FROM files 
+      WHERE project_path = ? AND last_indexed > ?
+      ORDER BY last_indexed DESC
+    `).all(this.projectPath, sinceTimestamp) as Array<{
+      relative_path: string;
+      last_indexed: number;
+      content_hash: string;
+    }>;
+
+    return rows.map(row => ({
+      path: row.relative_path,
+      lastIndexed: row.last_indexed,
+      contentChanged: true, // If it's in the result, content changed
+    }));
+  }
+
+  /**
+   * Get the last scan time for this project.
+   */
+  getLastScanTime(): number {
+    const stats = this.getStats();
+    return stats?.last_scan || 0;
+  }
+
+  // ==========================================================================
+  // Preferences Operations
+  // ==========================================================================
+
+  /**
+   * Set a preference value.
+   */
+  setPreference(key: string, value: string): void {
+    this.runWithRetry(() => {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO preferences (project_path, key, value, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(this.projectPath, key, value, Date.now());
+    });
+  }
+
+  /**
+   * Get a preference value.
+   */
+  getPreference(key: string): string | null {
+    const result = this.db.prepare(`
+      SELECT value FROM preferences WHERE project_path = ? AND key = ?
+    `).get(this.projectPath, key) as { value: string } | undefined;
+    return result?.value ?? null;
+  }
+
+  /**
+   * Get all preferences for this project.
+   */
+  getAllPreferences(): Record<string, string> {
+    const rows = this.db.prepare(`
+      SELECT key, value FROM preferences WHERE project_path = ?
+    `).all(this.projectPath) as Array<{ key: string; value: string }>;
+    
+    const prefs: Record<string, string> = {};
+    for (const row of rows) {
+      prefs[row.key] = row.value;
+    }
+    return prefs;
+  }
+
+  // ==========================================================================
+  // Selector History Operations
+  // ==========================================================================
+
+  /**
+   * Record a successful selector usage.
+   */
+  recordSelectorSuccess(elementDescription: string, selector: string, selectorType: string): void {
+    this.runWithRetry(() => {
+      const now = Date.now();
+      const existing = this.db.prepare(`
+        SELECT id, success_count FROM selector_history 
+        WHERE project_path = ? AND element_description = ? AND selector = ?
+      `).get(this.projectPath, elementDescription, selector) as { id: number; success_count: number } | undefined;
+
+      if (existing) {
+        this.db.prepare(`
+          UPDATE selector_history 
+          SET success_count = ?, last_used = ?
+          WHERE id = ?
+        `).run(existing.success_count + 1, now, existing.id);
+      } else {
+        this.db.prepare(`
+          INSERT INTO selector_history (project_path, element_description, selector, selector_type, success_count, last_used, created_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?)
+        `).run(this.projectPath, elementDescription, selector, selectorType, now, now);
+      }
+    });
+  }
+
+  /**
+   * Record a failed selector usage.
+   */
+  recordSelectorFailure(elementDescription: string, selector: string): void {
+    this.runWithRetry(() => {
+      const now = Date.now();
+      const existing = this.db.prepare(`
+        SELECT id, failure_count FROM selector_history 
+        WHERE project_path = ? AND element_description = ? AND selector = ?
+      `).get(this.projectPath, elementDescription, selector) as { id: number; failure_count: number } | undefined;
+
+      if (existing) {
+        this.db.prepare(`
+          UPDATE selector_history 
+          SET failure_count = ?, last_used = ?
+          WHERE id = ?
+        `).run(existing.failure_count + 1, now, existing.id);
+      }
+      // If selector doesn't exist, we don't create a failure-only record
+    });
+  }
+
+  /**
+   * Get the best selector for an element based on success/failure ratio.
+   */
+  getBestSelector(elementDescription: string): { selector: string; selectorType: string; confidence: number } | null {
+    const result = this.db.prepare(`
+      SELECT selector, selector_type, success_count, failure_count
+      FROM selector_history
+      WHERE project_path = ? AND element_description = ?
+      ORDER BY (success_count - failure_count) DESC, last_used DESC
+      LIMIT 1
+    `).get(this.projectPath, elementDescription) as { 
+      selector: string; 
+      selector_type: string; 
+      success_count: number; 
+      failure_count: number 
+    } | undefined;
+
+    if (!result) return null;
+
+    const total = result.success_count + result.failure_count;
+    const confidence = total > 0 ? result.success_count / total : 0;
+
+    return {
+      selector: result.selector,
+      selectorType: result.selector_type,
+      confidence,
+    };
+  }
+
+  /**
+   * Get all successful selectors (for prompt context).
+   */
+  getSuccessfulSelectors(limit = 20): Array<{ element: string; selector: string; type: string; confidence: number }> {
+    const rows = this.db.prepare(`
+      SELECT element_description, selector, selector_type, success_count, failure_count
+      FROM selector_history
+      WHERE project_path = ? AND success_count > failure_count
+      ORDER BY (success_count - failure_count) DESC, last_used DESC
+      LIMIT ?
+    `).all(this.projectPath, limit) as Array<{
+      element_description: string;
+      selector: string;
+      selector_type: string;
+      success_count: number;
+      failure_count: number;
+    }>;
+
+    return rows.map(row => ({
+      element: row.element_description,
+      selector: row.selector,
+      type: row.selector_type,
+      confidence: row.success_count / (row.success_count + row.failure_count),
+    }));
+  }
+
+  // ==========================================================================
+  // Test Outcomes Operations
+  // ==========================================================================
+
+  /**
+   * Record a newly generated test.
+   */
+  recordTestGenerated(testFile: string, testName: string, sourcePrompt: string, generatedCode: string): number {
+    const result = this.runWithRetry(() => {
+      return this.db.prepare(`
+        INSERT INTO test_outcomes (project_path, test_file, test_name, source_prompt, generated_code, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      `).run(this.projectPath, testFile, testName, sourcePrompt, generatedCode, Date.now());
+    });
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Record the result of running a test.
+   */
+  recordTestResult(
+    testId: number, 
+    status: 'passed' | 'failed' | 'error' | 'timeout', 
+    executionTimeMs?: number,
+    errorMessage?: string,
+    failingSelector?: string
+  ): void {
+    this.runWithRetry(() => {
+      this.db.prepare(`
+        UPDATE test_outcomes 
+        SET status = ?, execution_time_ms = ?, error_message = ?, failing_selector = ?, last_run = ?, retry_count = retry_count + 1
+        WHERE id = ?
+      `).run(status, executionTimeMs ?? null, errorMessage ?? null, failingSelector ?? null, Date.now(), testId);
+    });
+  }
+
+  /**
+   * Get recent test failures.
+   */
+  getRecentFailures(limit = 10): Array<{
+    id: number;
+    testFile: string;
+    testName: string;
+    errorMessage: string | null;
+    failingSelector: string | null;
+    lastRun: number;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT id, test_file, test_name, error_message, failing_selector, last_run
+      FROM test_outcomes
+      WHERE project_path = ? AND status IN ('failed', 'error')
+      ORDER BY last_run DESC
+      LIMIT ?
+    `).all(this.projectPath, limit) as Array<{
+      id: number;
+      test_file: string;
+      test_name: string;
+      error_message: string | null;
+      failing_selector: string | null;
+      last_run: number;
+    }>;
+
+    return rows.map(row => ({
+      id: row.id,
+      testFile: row.test_file,
+      testName: row.test_name,
+      errorMessage: row.error_message,
+      failingSelector: row.failing_selector,
+      lastRun: row.last_run,
+    }));
+  }
+
+  /**
+   * Get a test outcome by ID.
+   */
+  getTestOutcome(testId: number): {
+    id: number;
+    testFile: string;
+    testName: string;
+    sourcePrompt: string;
+    generatedCode: string;
+    status: string;
+    errorMessage: string | null;
+  } | null {
+    const result = this.db.prepare(`
+      SELECT id, test_file, test_name, source_prompt, generated_code, status, error_message
+      FROM test_outcomes
+      WHERE id = ?
+    `).get(testId) as {
+      id: number;
+      test_file: string;
+      test_name: string;
+      source_prompt: string;
+      generated_code: string;
+      status: string;
+      error_message: string | null;
+    } | undefined;
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      testFile: result.test_file,
+      testName: result.test_name,
+      sourcePrompt: result.source_prompt,
+      generatedCode: result.generated_code,
+      status: result.status,
+      errorMessage: result.error_message,
+    };
+  }
+
   /**
    * Close the database connection.
    */
@@ -1091,7 +1497,7 @@ export class CodeGraphDB {
   getInfo(): { path: string; version: number; projectPath: string } {
     return {
       path: this.dbPath,
-      version: this.getUserVersion(),
+      version: CodeGraphDB.SCHEMA_VERSION,
       projectPath: this.projectPath
     };
   }

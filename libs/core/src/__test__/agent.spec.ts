@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { buildSystemPrompt, type ContextData } from '../lib/prompt-templates';
+import { buildSystemPrompt, type ContextData } from '../agent/prompts';
 import type { ParsedFunction, ParsedClass, ParsedImport } from '../types';
 
 describe('Agent - Prompt Engineering', () => {

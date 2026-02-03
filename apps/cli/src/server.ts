@@ -4,29 +4,32 @@ import { appRouter } from "@raiken/shared";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
 import { detectProject } from "./project-detector";
-import { runOrchestrator, CodeGraphDB, CodeGraph, EntryPointDetector } from "@raiken/core";
+import { runOrchestrator, ProjectContext, CodeGraphDB, EntryPointDetector, CodeGraph, AgentMemory } from "@raiken/core";
 
 export async function startServer(port = 7101) {
     const app = fastify({ logger: true });
     const projectPath = process.cwd();
     
+    // Initialize ProjectContext singleton at startup
+    // This caches project understanding and persists across requests
     try {
+        console.log('🧠 Initializing project context...');
+        
+        // First, ensure DB has the graph if it's empty
         const db = new CodeGraphDB(projectPath);
         const files = db.getFiles();
         
-        if (files.length === 0) {            
-            // Detect entry points
-            const detector = new EntryPointDetector(projectPath);
-            const entryPoints = await detector.detectEntryPoints();
-            
-            // Build code graph
+        if (files.length === 0) {
+            // Initial scan needed - build and save to DB
             const graph = new CodeGraph(projectPath, {
                 includeTests: false,
                 useGitignore: true,
                 maxDepth: 15
             });
             
-            // Use entry points if available, otherwise scan entire project
+            const detector = new EntryPointDetector(projectPath);
+            const entryPoints = await detector.detectEntryPoints();
+            
             if (entryPoints.length > 0) {
                 console.log(`📍 Found ${entryPoints.length} entry points`);
                 await graph.initialize(entryPoints.map(ep => ep.file));
@@ -36,8 +39,6 @@ export async function startServer(port = 7101) {
             }
             
             const allFiles = graph.getAllFiles();
-            
-            // Save to database
             const nodes = new Map();
             for (const node of allFiles) {
                 nodes.set(node.filePath, node);
@@ -51,14 +52,39 @@ export async function startServer(port = 7101) {
             }));
             
             db.saveGraph(nodes, dbEntryPoints);
-            console.log(`✅ Code graph built successfully: ${allFiles.length} files indexed`);
+            console.log(`✅ Code graph built: ${allFiles.length} files indexed`);
+            graph.destroy();
         } else {
-            console.log(`✅ Code graph already exists: ${files.length} files indexed`);
+            console.log(`✅ Code graph exists: ${files.length} files indexed`);
         }
         
         db.close();
+        
+        // Now initialize ProjectContext (uses DB + in-memory caching)
+        const projectContext = ProjectContext.getInstance(projectPath);
+        await projectContext.initialize();
+        
+        // Log project understanding stats
+        const modules = projectContext.getModules();
+        if (modules.length > 0) {
+            const topModules = modules.slice(0, 5).map(m => m.name);
+            console.log(`📁 Modules: ${topModules.join(', ')}`);
+        }
+        console.log(`🔑 Keywords: ${projectContext.getKeywordCount()}`);
+        console.log(`📄 Files: ${projectContext.getFileCount()}`);
+        
+        // Initialize AgentMemory for persistent learning
+        const agentMemory = AgentMemory.getInstance(projectPath);
+        agentMemory.initialize();
+        
+        const prefs = agentMemory.getAllPreferences();
+        const prefCount = Object.keys(prefs).length;
+        if (prefCount > 0) {
+            console.log(`🧠 Memory: ${prefCount} preferences loaded`);
+        }
+        
     } catch (error) {
-        console.warn('⚠️  Failed to initialize code graph:', error);
+        console.warn('⚠️  Failed to initialize project context:', error);
     }
 
     await app.register(fastifyTRPCPlugin, {
@@ -110,15 +136,13 @@ export async function startServer(port = 7101) {
             reply.raw.setHeader('Access-Control-Allow-Origin', '*');
 
             request.log.info(`🤖 Generating test for prompt: "${prompt.slice(0, 50)}..."`);
-            console.log('📥 File context:', fileContext?.length || 0, 'files');
             console.log('💬 Conversation history:', conversationHistory?.length || 0, 'messages');
 
             try {
-                // Route through orchestrator
+                // Route through orchestrator (LLM decides what tools to call)
                 const stream = runOrchestrator({
                     userPrompt: prompt,
                     projectPath: process.cwd(),
-                    fileContext,
                     conversationHistory,
                 });
 

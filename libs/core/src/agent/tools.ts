@@ -589,6 +589,9 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (): Promise<ToolResult<PageSnapshot>> => {
                 try {
                     const session = BrowserSession.getInstance(projectPath);
+                    if (!session.isActive()) {
+                        await session.start({ headless: false });
+                    }
                     const domContext = await session.captureCurrentPage();
                     const snapshot = buildPageSnapshot(domContext);
 
@@ -727,6 +730,9 @@ export function createAgentTools(ctx: ToolContext) {
                 const { includeExternal } = params as { includeExternal?: boolean };
                 try {
                     const session = BrowserSession.getInstance(projectPath);
+                    if (!session.isActive()) {
+                        await session.start({ headless: false });
+                    }
                     const allLinks = await session.discoverLinks();
                     
                     const links = includeExternal 

@@ -32,6 +32,10 @@ export interface RaikenConfig {
         tracing: boolean;
         network: boolean;
     };
+    indexing?: {
+        /** Force full project scan for AST/DB indexing */
+        fullScan: boolean;
+    };
     browser: {
         defaultBrowser: 'chromium' | 'firefox' | 'webkit';
         headless: boolean;
@@ -68,6 +72,9 @@ export const defaultConfig: RaikenConfig = {
         tracing: false,
         network: true
     },
+    indexing: {
+        fullScan: false
+    },
     browser: {
         defaultBrowser: 'chromium',
         headless: true,
@@ -90,6 +97,7 @@ export function createConfig(overrides: Partial<RaikenConfig> = {}): RaikenConfi
         ai: { ...defaultConfig.ai, ...overrides.ai },
         features: { ...defaultConfig.features, ...overrides.features },
         browser: { ...defaultConfig.browser, ...overrides.browser },
-        autonomy: { ...defaultConfig.autonomy!, ...(overrides.autonomy || {}) }
+        autonomy: { ...defaultConfig.autonomy!, ...(overrides.autonomy || {}) },
+        indexing: { fullScan: overrides.indexing?.fullScan ?? defaultConfig.indexing!.fullScan }
     };
 }

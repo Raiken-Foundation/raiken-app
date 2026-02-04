@@ -93,14 +93,14 @@ export const createAnswerQuestionsNode =
         } => {
             const lines = text.split("\n");
             let inEvidence = false;
-            let evidenceLines: string[] = [];
+            const evidenceLines: string[] = [];
             for (const rawLine of lines) {
                 const line = rawLine.trim();
-                if (/^Evidence:$/i.test(line)) {
+                if (/^#{0,6}\s*Evidence\s*:?\s*$/i.test(line)) {
                     inEvidence = true;
                     continue;
                 }
-                if (inEvidence && /^Unknowns/i.test(line)) {
+                if (inEvidence && /^#{0,6}\s*Unknowns/i.test(line)) {
                     break;
                 }
                 if (inEvidence) {

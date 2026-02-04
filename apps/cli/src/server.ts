@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import fastifyStatic from "@fastify/static";
 import { appRouter } from "@raiken/shared";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
@@ -14,12 +15,20 @@ export async function startServer(port = 7101) {
     // This caches project understanding and persists across requests
     try {
         console.log('🧠 Initializing project context...');
+        let fullScan = false;
+        try {
+            const configPath = path.join(projectPath, 'raiken.config.json');
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            fullScan = Boolean(config?.indexing?.fullScan);
+        } catch {
+            // Config not found or invalid
+        }
         
         // First, ensure DB has the graph if it's empty
         const db = new CodeGraphDB(projectPath);
         const files = db.getFiles();
         
-        if (files.length === 0) {
+        if (files.length === 0 || fullScan) {
             // Initial scan needed - build and save to DB
             const graph = new CodeGraph(projectPath, {
                 includeTests: false,
@@ -30,11 +39,15 @@ export async function startServer(port = 7101) {
             const detector = new EntryPointDetector(projectPath);
             const entryPoints = await detector.detectEntryPoints();
             
-            if (entryPoints.length > 0) {
+            if (!fullScan && entryPoints.length > 0) {
                 console.log(`📍 Found ${entryPoints.length} entry points`);
                 await graph.initialize(entryPoints.map(ep => ep.file));
             } else {
-                console.log('📂 Scanning entire project...');
+                if (fullScan) {
+                    console.log('📂 Full scan forced by config...');
+                } else {
+                    console.log('📂 Scanning entire project...');
+                }
                 await graph.scanProject();
             }
             

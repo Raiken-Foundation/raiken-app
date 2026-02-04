@@ -7,8 +7,13 @@ export const createDetectInterruptionNode =
     async (state: GraphStateType) => {
         let summary = state.domSummary;
         if (!summary) {
-            const capture = await callTool("captureCurrentPage", {});
-            summary = (capture.data as { summary?: string } | undefined)?.summary || null;
+            if (state.targetUrl) {
+                const nav = await callTool("navigateTo", { url: state.targetUrl });
+                summary = (nav.data as { summary?: string } | undefined)?.summary || null;
+            } else {
+                const capture = await callTool("captureCurrentPage", {});
+                summary = (capture.data as { summary?: string } | undefined)?.summary || null;
+            }
         }
         const elements = summary ? parseSummaryElements(summary) : [];
         const credentials = extractCredentials(state.userPrompt, state.conversationHistory);

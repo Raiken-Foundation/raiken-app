@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
 import path from "node:path";
+import fs from "node:fs";
 import chalk from "chalk";
 import { Command } from "commander";
 import { startServer } from "./server";
@@ -30,8 +31,22 @@ if (process.env.OPENROUTER_API_KEY) {
   console.log(chalk.dim('   Get a key at: https://openrouter.ai/keys'));
 }
 
+const resolveVersion = (): string => {
+  try {
+    const pkgPath = path.join(__dirname, "package.json");
+    const raw = fs.readFileSync(pkgPath, "utf-8");
+    const pkg = JSON.parse(raw) as { version?: string };
+    return pkg.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+};
+
 const program = new Command();
-program.name("raiken").description("AI QA Agent for Developers").version("0.0.1");
+program
+  .name("raiken")
+  .description("AI QA Agent for Developers")
+  .version(resolveVersion(), "-v, --version");
 
 program
     .command("start")

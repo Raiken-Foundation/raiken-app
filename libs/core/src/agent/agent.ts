@@ -146,10 +146,29 @@ export async function gatherContext(
     console.warn('ProjectContext search failed:', err);
   }
   
+  // Add entry points for baseline context
+  let entryPointFiles: string[] = [];
+  try {
+    const entryPoints = db.getEntryPoints();
+    entryPointFiles = entryPoints.map((ep) => path.relative(projectPath, ep.file_path));
+  } catch {
+    // Entry points unavailable
+  }
+
+  // Fallback baseline entry files
+  const baselineFiles = ["src/main.tsx", "src/App.tsx"];
+  for (const candidate of baselineFiles) {
+    const absolute = path.join(projectPath, candidate);
+    if (fs.existsSync(absolute)) {
+      entryPointFiles.push(candidate);
+    }
+  }
+
   // Merge intelligent suggestions with explicit file context
   const allFileContext = [
     ...(fileContext || []),
     ...intelligentFiles,
+    ...entryPointFiles
   ];
   
   // Process explicit file context and intelligent suggestions

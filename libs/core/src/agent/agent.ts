@@ -313,15 +313,30 @@ export async function gatherContext(
   // Detect project type using EntryPointDetector
   const detector = new EntryPointDetector(projectPath);
   const framework = detector.detectFramework();
-  const projectType = framework 
+  const projectType = framework
     ? framework.charAt(0).toUpperCase() + framework.slice(1) // Capitalize
     : 'Generic TypeScript/JavaScript';
+
+  // Load site discovery knowledge if available
+  let siteKnowledge = null;
+  try {
+    const { loadSiteKnowledge } = await import('../site-discovery');
+    siteKnowledge = await loadSiteKnowledge(projectPath);
+
+    if (siteKnowledge) {
+      console.log(`🗺️  Site knowledge loaded: ${siteKnowledge.pagesDiscovered} pages discovered`);
+    }
+  } catch (error) {
+    // Site discovery not available or failed - continue without it
+    console.debug('Site knowledge not available:', error);
+  }
 
   return {
     files,
     projectType,
     testDirectory,
     totalTokens,
+    siteKnowledge,
   };
 }
 

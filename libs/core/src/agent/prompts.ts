@@ -6,6 +6,7 @@
 
 import type { ParsedFunction, ParsedClass, ParsedImport } from '../types';
 import type { AgentIntent } from './graph/utils';
+import type { SiteKnowledge } from '../site-discovery';
 
 export interface ContextData {
   files: Array<{
@@ -19,6 +20,7 @@ export interface ContextData {
   projectType: string;
   testDirectory: string;
   totalTokens: number;
+  siteKnowledge?: SiteKnowledge | null;
 }
 
 /**
@@ -94,6 +96,8 @@ Key Imports: ${f.imports.slice(0, 5).map(i => i.source).join(', ') || 'none'}
 ---
 ${f.fullContext}
 `).join('\n')}
+
+${context.siteKnowledge ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ''}
 
 [TASK - USER REQUEST]
 ${userPrompt}
@@ -247,11 +251,16 @@ After generating the initial test:
 Now generate the test based on the user request above.
 `.trim();
   },
-  
+
+  formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge): string {
+    const { formatSiteKnowledge } = require('../site-discovery');
+    return '\n' + formatSiteKnowledge(siteKnowledge);
+  },
+
   changelog: [
     'v1.0.0: Initial implementation with GOLDEN framework structure',
   ],
-  
+
   performanceMetrics: {
     successRate: 0, // To be updated after testing
     avgTokens: 0,

@@ -3,6 +3,7 @@
     "version": "0.0.0",
     "license": "MIT",
     "scripts": {
+        "dev": "nx run-many -t serve -p cli dashboard",
         "lint": "biome lint .",
         "format": "biome format .",
         "check": "biome check ."

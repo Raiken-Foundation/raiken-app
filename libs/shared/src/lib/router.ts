@@ -817,9 +817,177 @@ export const appRouter = t.router({
                 return { interpretation, error: false };
             } catch (error) {
                 console.error('Interpretation error:', error);
-                return { 
+                return {
                     interpretation: `Error interpreting results: ${error instanceof Error ? error.message : String(error)}`,
-                    error: true 
+                    error: true
+                };
+            }
+        }),
+
+    // ============================================================================
+    // Site Discovery Endpoints
+    // ============================================================================
+
+    getDiscoveryStats: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+
+            try {
+                const { SiteKnowledgeDB } = await import('@raiken/core');
+                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                const stats = siteDb.getStats();
+                db.close();
+
+                return {
+                    ...stats,
+                    timestamp: new Date().toISOString(),
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    pagesCount: 0,
+                    linksCount: 0,
+                    verifiedLinksCount: 0,
+                    brokenLinksCount: 0,
+                    authBlockersCount: 0,
+                    unresolvedBlockersCount: 0,
+                    timestamp: new Date().toISOString(),
+                };
+            }
+        }),
+
+    getDiscoverySession: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+
+            try {
+                const { SiteKnowledgeDB } = await import('@raiken/core');
+                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                const session = siteDb.getLatestSession();
+                db.close();
+
+                if (!session) {
+                    return null;
+                }
+
+                return {
+                    id: session.id,
+                    startUrl: session.startUrl,
+                    status: session.status,
+                    pagesDiscovered: session.pagesDiscovered,
+                    linksFound: session.linksFound,
+                    startedAt: new Date(session.startedAt).toISOString(),
+                    completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : null,
+                    blockedAtUrl: session.blockedAtUrl,
+                };
+            } catch (error) {
+                db.close();
+                return null;
+            }
+        }),
+
+    getDiscoveredPages: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+            limit: z.number().default(50),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+
+            try {
+                const { SiteKnowledgeDB } = await import('@raiken/core');
+                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                const pages = siteDb.getAllPages();
+                db.close();
+
+                const limited = pages.slice(0, input.limit);
+
+                return {
+                    pages: limited.map(page => ({
+                        url: page.url,
+                        title: page.title,
+                        depth: page.depth,
+                        visitCount: page.visitCount,
+                        discoveredAt: new Date(page.discoveredAt).toISOString(),
+                        lastVisitedAt: new Date(page.lastVisitedAt).toISOString(),
+                    })),
+                    total: pages.length,
+                    hasMore: pages.length > input.limit,
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    pages: [],
+                    total: 0,
+                    hasMore: false,
+                };
+            }
+        }),
+
+    getAuthBlockers: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+
+            try {
+                const { SiteKnowledgeDB } = await import('@raiken/core');
+                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                const blockers = siteDb.getUnresolvedBlockers();
+                db.close();
+
+                return {
+                    blockers: blockers.map(blocker => ({
+                        id: blocker.id,
+                        url: blocker.url,
+                        blockerType: blocker.blockerType,
+                        discoveredAt: new Date(blocker.discoveredAt).toISOString(),
+                    })),
+                    total: blockers.length,
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    blockers: [],
+                    total: 0,
+                };
+            }
+        }),
+
+    clearDiscoveryData: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+        }))
+        .mutation(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+
+            try {
+                const { SiteKnowledgeDB } = await import('@raiken/core');
+                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                siteDb.clearDiscoveryData();
+                db.close();
+
+                return {
+                    success: true,
+                    message: 'Discovery data cleared successfully',
+                };
+            } catch (error) {
+                db.close();
+                return {
+                    success: false,
+                    message: error instanceof Error ? error.message : 'Unknown error',
                 };
             }
         }),

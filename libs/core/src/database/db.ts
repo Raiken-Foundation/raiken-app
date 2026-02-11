@@ -39,7 +39,7 @@ export class CodeGraphDB {
   private projectPath: string;
   private readonly dbPath: string;
   
-  private static readonly SCHEMA_VERSION = 1;
+  private static readonly SCHEMA_VERSION = 4;
   private static readonly RETRY_ATTEMPTS = 3;
   private static readonly RETRY_DELAY_MS = 100;
 
@@ -96,21 +96,156 @@ export class CodeGraphDB {
   // Schema Management
   // ==========================================================================
 
+  private getUserVersion(): number {
+    const result = this.db.pragma('user_version', { simple: true }) as number;
+    return result;
+  }
+
   private setUserVersion(version: number): void {
     this.db.pragma(`user_version = ${version}`);
   }
 
   /**
-   * Ensure schema exists (single version, no migrations).
+   * Ensure schema exists and run migrations if needed.
    */
   private ensureSchema(): void {
-    this.createV1Schema();
-    this.ensureEmbeddingsSchema();
-    this.ensureKeywordIndexSchema();
-    this.ensureMemorySchema();
-    this.ensureDependencyColumns();
-    this.ensureFileColumns();
-    this.setUserVersion(CodeGraphDB.SCHEMA_VERSION);
+    const currentVersion = this.getUserVersion();
+
+    // Fresh database - create v1 schema and migrate to latest
+    if (currentVersion === 0) {
+      this.createV1Schema();
+      this.ensureEmbeddingsSchema();
+      this.ensureKeywordIndexSchema();
+      this.ensureMemorySchema();
+      this.ensureDependencyColumns();
+      this.ensureFileColumns();
+      this.setUserVersion(1);
+    }
+
+    // Run migrations
+    this.runMigrations();
+  }
+
+  /**
+   * Run migrations from current version to latest.
+   */
+  private runMigrations(): void {
+    const currentVersion = this.getUserVersion();
+
+    if (currentVersion < 2) {
+      this.migrateToV2();
+      this.setUserVersion(2);
+    }
+
+    if (currentVersion < 3) {
+      this.migrateToV3();
+      this.setUserVersion(3);
+    }
+
+    if (currentVersion < 4) {
+      this.migrateToV4();
+      this.setUserVersion(4);
+    }
+  }
+
+  /**
+   * Migration to v2 (placeholder for future features).
+   */
+  private migrateToV2(): void {
+    // No schema changes in v2
+    // This version is reserved for future use
+  }
+
+  /**
+   * Migration to v3 (placeholder for future features).
+   */
+  private migrateToV3(): void {
+    // No schema changes in v3
+    // This version is reserved for future use
+  }
+
+  /**
+   * Migration to v4 - Autonomous DOM Traversal.
+   * Adds tables for site discovery: discovered_pages, discovered_links, auth_blockers, discovery_sessions.
+   */
+  private migrateToV4(): void {
+    this.db.transaction(() => {
+      // Discovered pages table
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS discovered_pages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          url TEXT NOT NULL,
+          normalized_url TEXT NOT NULL,
+          title TEXT,
+          snapshot_json TEXT,
+          parent_url TEXT,
+          navigation_action TEXT,
+          depth INTEGER DEFAULT 0,
+          discovered_at INTEGER NOT NULL,
+          last_visited_at INTEGER NOT NULL,
+          visit_count INTEGER DEFAULT 1,
+          UNIQUE(project_path, normalized_url)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pages_project ON discovered_pages(project_path);
+        CREATE INDEX IF NOT EXISTS idx_pages_normalized ON discovered_pages(normalized_url);
+      `);
+
+      // Discovered links table
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS discovered_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          from_url TEXT NOT NULL,
+          to_url TEXT NOT NULL,
+          selector TEXT NOT NULL,
+          link_text TEXT,
+          element_role TEXT,
+          status TEXT DEFAULT 'pending',
+          error_message TEXT,
+          discovered_at INTEGER NOT NULL,
+          verified_at INTEGER,
+          UNIQUE(project_path, from_url, to_url, selector)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_links_from ON discovered_links(from_url);
+        CREATE INDEX IF NOT EXISTS idx_links_status ON discovered_links(status);
+      `);
+
+      // Auth blockers table
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS auth_blockers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          url TEXT NOT NULL,
+          blocker_type TEXT NOT NULL,
+          detected_elements TEXT,
+          resolved_at INTEGER,
+          storage_state_path TEXT,
+          discovered_at INTEGER NOT NULL
+        );
+      `);
+
+      // Discovery sessions table
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS discovery_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          start_url TEXT NOT NULL,
+          status TEXT DEFAULT 'running',
+          pages_discovered INTEGER DEFAULT 0,
+          links_found INTEGER DEFAULT 0,
+          started_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          blocked_at_url TEXT,
+          queue_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_status ON discovery_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_sessions_project ON discovery_sessions(project_path);
+      `);
+    })();
   }
 
   private ensureFileColumns(): void {

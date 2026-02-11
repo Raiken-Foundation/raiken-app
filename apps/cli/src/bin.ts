@@ -71,4 +71,37 @@ program
         }
     });
 
+program
+    .command("discover [url]")
+    .description("Autonomously discover web application structure")
+    .option("--max-pages <number>", "Maximum pages to discover", "100")
+    .option("--max-depth <number>", "Maximum navigation depth", "5")
+    .option("--auth", "Prompt for authentication before discovery")
+    .option("--skip-auth", "Skip authentication-required routes")
+    .option("--continue", "Resume a paused discovery session")
+    .option("--status", "Show discovery statistics")
+    .action(async (url, options) => {
+        try {
+            const { discoverCommand } = await import("./commands/discover");
+            await discoverCommand(url, options);
+        } catch (error) {
+            console.error(chalk.red("\n ❌ Discovery failed:"), error);
+            process.exit(1);
+        }
+    });
+
+program
+    .command("auth")
+    .description("Authenticate to save browser session state")
+    .option("--url <url>", "URL to navigate to for authentication")
+    .action(async (options) => {
+        try {
+            const { authCommand } = await import("./commands/auth");
+            await authCommand(options);
+        } catch (error) {
+            console.error(chalk.red("\n ❌ Authentication failed:"), error);
+            process.exit(1);
+        }
+    });
+
 program.parse(process.argv);

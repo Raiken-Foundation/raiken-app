@@ -17,6 +17,7 @@
         "ai": "^6.0.35",
         "better-sqlite3": "^11.8.1",
         "chokidar": "^4.0.3",
+        "crawlee": "^3.16.0",
         "fast-glob": "^3.3.2",
         "ignore": "^5.3.1",
         "langchain": "^1.2.16",

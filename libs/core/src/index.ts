@@ -15,6 +15,12 @@ export * from "./database/index";
 // Testing module
 export * from "./testing/index";
 
+// Site Discovery module
+export * from "./site-discovery/index";
+
+// Configuration module
+export * from "./config/index";
+
 // Orchestrator
 export {
     runOrchestrator,

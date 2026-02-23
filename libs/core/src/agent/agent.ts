@@ -500,7 +500,7 @@ import { createAgentTools, type ToolResult, type HITLAction, type AutonomySettin
  */
 function loadAutonomySettings(projectPath: string): AutonomySettings {
   const defaults: AutonomySettings = {
-    autoSaveTests: false,
+    autoSaveTests: true,
     autoRunTests: false,
     autoCorrect: 'suggest',
     autoLearn: 'confirm',
@@ -611,6 +611,7 @@ export async function* runToolAgent(
       apiKey: config.apiKey,
       model: config.model || "anthropic/claude-sonnet-4.5",
       temperature: config.temperature ?? 0.7,
+      maxTokens: config.maxTokens ?? 4000,
       configuration: {
         baseURL: config.baseURL || "https://openrouter.ai/api/v1",
       },
@@ -719,19 +720,28 @@ export async function* runToolAgent(
       };
     }
 
+    // If a test was generated and saved, stream the test content so the
+    // dashboard can detect it as a complete test file and open it in the editor.
+    if (finalState.testDraft && finalState.savedTestPath) {
+      yield finalState.testDraft;
+      fullText += finalState.testDraft;
+    }
+
     const summary = finalState.summary || buildSummary(finalState);
     await callTool("done", {
       summary,
       pagesVisited: finalState.pagesVisited || [],
     });
 
-    yield `\n\n**Summary:**\n${summary}`;
-    fullText += `\n\n**Summary:**\n${summary}`;
+    if (!finalState.testDraft) {
+      yield `\n\n**Summary:**\n${summary}`;
+      fullText += `\n\n**Summary:**\n${summary}`;
 
-    if (finalState.pagesVisited && finalState.pagesVisited.length > 0) {
-      const pagesText = `\n\n**Pages Visited:**\n${finalState.pagesVisited.map((p) => `- ${p}`).join("\n")}`;
-      yield pagesText;
-      fullText += pagesText;
+      if (finalState.pagesVisited && finalState.pagesVisited.length > 0) {
+        const pagesText = `\n\n**Pages Visited:**\n${finalState.pagesVisited.map((p) => `- ${p}`).join("\n")}`;
+        yield pagesText;
+        fullText += pagesText;
+      }
     }
 
     console.log(`✅ Agent complete: ${toolCallsLog.length} tool calls, ${hitlActions.length} HITL actions`);

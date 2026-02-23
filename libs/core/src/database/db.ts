@@ -39,7 +39,7 @@ export class CodeGraphDB {
   private projectPath: string;
   private readonly dbPath: string;
   
-  private static readonly SCHEMA_VERSION = 4;
+  private static readonly SCHEMA_VERSION = 5;
   private static readonly RETRY_ATTEMPTS = 3;
   private static readonly RETRY_DELAY_MS = 100;
 
@@ -146,6 +146,11 @@ export class CodeGraphDB {
       this.migrateToV4();
       this.setUserVersion(4);
     }
+
+    if (currentVersion < 5) {
+      this.migrateToV5();
+      this.setUserVersion(5);
+    }
   }
 
   /**
@@ -246,6 +251,30 @@ export class CodeGraphDB {
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON discovery_sessions(project_path);
       `);
     })();
+  }
+
+  /**
+   * Migration to v5 - Discovery session metadata.
+   * Adds max_pages and max_depth columns to discovery_sessions.
+   */
+  private migrateToV5(): void {
+    const tableInfo = this.db
+      .prepare(`PRAGMA table_info(discovery_sessions)`)
+      .all() as Array<{ name: string }>;
+    const columnNames = tableInfo.map(col => col.name);
+
+    this.db.transaction(() => {
+      if (!columnNames.includes('max_pages')) {
+        this.db.exec(`ALTER TABLE discovery_sessions ADD COLUMN max_pages INTEGER`);
+      }
+      if (!columnNames.includes('max_depth')) {
+        this.db.exec(`ALTER TABLE discovery_sessions ADD COLUMN max_depth INTEGER`);
+      }
+    })();
+  }
+
+  getRawDatabase(): Database.Database {
+    return this.db;
   }
 
   private ensureFileColumns(): void {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 
 export interface TestFile {
@@ -20,12 +20,38 @@ interface CodeEditorProps {
   onContentChange?: (fileId: string, content: string) => void;
   onRunTests?: (fileId: string) => void;
   onNewFile?: () => void;
+  onSaveFile?: (fileId: string) => void;
+  onDeleteFile?: (fileId: string) => void;
   isRunningTests?: boolean;
+  isSaving?: boolean;
+  savedFileId?: string | null;
 }
 
-export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onContentChange, onRunTests, onNewFile, isRunningTests }: CodeEditorProps) {
+export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onContentChange, onRunTests, onNewFile, onSaveFile, onDeleteFile, isRunningTests, isSaving, savedFileId }: CodeEditorProps) {
   const activeFile = files.find(f => f.id === activeFileId);
   const [isEditorReady, setIsEditorReady] = useState(false);
+  const [showSavedFlash, setShowSavedFlash] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  useEffect(() => {
+    if (savedFileId === activeFileId && savedFileId) {
+      setShowSavedFlash(true);
+      const t = setTimeout(() => setShowSavedFlash(false), 1800);
+      return () => clearTimeout(t);
+    }
+  }, [savedFileId, activeFileId]);
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      if (onSaveFile && activeFileId) onSaveFile(activeFileId);
+    }
+  }, [onSaveFile, activeFileId]);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
 
   const handleEditorChange = (value: string | undefined) => {
     if (value !== undefined && onContentChange) {
@@ -215,6 +241,65 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
                 New
               </button>
             )}
+            {onSaveFile && (
+              <button
+                type="button"
+                className={`save-file-btn ${showSavedFlash ? 'saved' : ''}`}
+                onClick={() => onSaveFile(activeFileId)}
+                disabled={isSaving}
+                title="Save file (⌘S)"
+              >
+                {isSaving ? (
+                  <>
+                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    Saving…
+                  </>
+                ) : showSavedFlash ? (
+                  <>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M5 13l4 4L19 7" />
+                    </svg>
+                    Saved
+                  </>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                      <path d="M17 21H7a2 2 0 01-2-2V5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2z" />
+                      <polyline points="17 21 17 13 7 13 7 21" />
+                      <polyline points="7 3 7 8 15 8" />
+                    </svg>
+                    Save
+                  </>
+                )}
+              </button>
+            )}
+            {onDeleteFile && (
+              <>
+                <button
+                  type="button"
+                  className="delete-file-btn"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  title="Delete file"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                    <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+                {showDeleteConfirm && (
+                  <div className="delete-confirm-popover">
+                    <p>Delete <strong>{activeFile?.name}</strong>?</p>
+                    <span className="delete-confirm-hint">This will remove the file from disk.</span>
+                    <div className="delete-confirm-actions">
+                      <button type="button" className="dc-cancel" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
+                      <button type="button" className="dc-delete" onClick={() => { setShowDeleteConfirm(false); onDeleteFile(activeFileId); }}>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            <div className="header-divider" />
             {onRunTests && (
               <button
                 type="button"
@@ -576,6 +661,137 @@ export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onC
 
         .run-tests-btn .spin {
           animation: spin 1s linear infinite;
+        }
+
+        .header-divider {
+          width: 1px;
+          height: 1.25rem;
+          background: #2a2a2a;
+        }
+
+        .save-file-btn {
+          display: flex;
+          align-items: center;
+          gap: 0.375rem;
+          padding: 0.375rem 0.75rem;
+          background: transparent;
+          border: 1px solid #3a3a3a;
+          border-radius: 0.375rem;
+          color: #9ca3af;
+          font-size: 0.75rem;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+
+        .save-file-btn:hover:not(:disabled) {
+          background: #1f1f1f;
+          border-color: #4a4a4a;
+          color: #e5e7eb;
+        }
+
+        .save-file-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .save-file-btn.saved {
+          border-color: rgba(34, 197, 94, 0.4);
+          color: #22c55e;
+        }
+
+        .save-file-btn svg {
+          width: 0.875rem;
+          height: 0.875rem;
+        }
+
+        .save-file-btn .spin {
+          animation: spin 1s linear infinite;
+        }
+
+        .delete-file-btn {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0.375rem;
+          background: transparent;
+          border: 1px solid transparent;
+          border-radius: 0.375rem;
+          color: #6b7280;
+          cursor: pointer;
+          transition: all 0.15s;
+          position: relative;
+        }
+
+        .delete-file-btn:hover {
+          background: rgba(239, 68, 68, 0.1);
+          border-color: rgba(239, 68, 68, 0.3);
+          color: #ef4444;
+        }
+
+        .delete-file-btn svg {
+          width: 0.9375rem;
+          height: 0.9375rem;
+        }
+
+        .delete-confirm-popover {
+          position: absolute;
+          top: calc(100% + 0.5rem);
+          right: 0;
+          z-index: 200;
+          background: #1a1a1a;
+          border: 1px solid #2a2a2a;
+          border-radius: 0.5rem;
+          padding: 0.875rem 1rem;
+          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+          min-width: 220px;
+        }
+
+        .delete-confirm-popover p {
+          margin: 0 0 0.25rem 0;
+          font-size: 0.8125rem;
+          color: #e5e7eb;
+        }
+
+        .delete-confirm-hint {
+          display: block;
+          font-size: 0.6875rem;
+          color: #6b7280;
+          margin-bottom: 0.75rem;
+        }
+
+        .delete-confirm-actions {
+          display: flex;
+          gap: 0.5rem;
+          justify-content: flex-end;
+        }
+
+        .dc-cancel, .dc-delete {
+          padding: 0.3125rem 0.75rem;
+          border: none;
+          border-radius: 0.375rem;
+          font-size: 0.75rem;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+
+        .dc-cancel {
+          background: #2a2a2a;
+          color: #e5e7eb;
+        }
+
+        .dc-cancel:hover {
+          background: #3a3a3a;
+        }
+
+        .dc-delete {
+          background: #dc2626;
+          color: white;
+        }
+
+        .dc-delete:hover {
+          background: #b91c1c;
         }
 
         .status-badge {

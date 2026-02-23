@@ -294,17 +294,27 @@ export function detectInterruption(
     }
 
     const passwordSelector = findSelector(elements, /(password|passcode|pin)/i, ["textbox", "combobox"]);
-    const authSelector = findSelector(elements, /(email|username|user name|password)/i, [
+    const emailOrUserField = findSelector(elements, /(email|username|user name)/i, [
         "textbox",
         "combobox",
     ]);
-    if (/login|log in|sign in|password|username|email/.test(lowered) || authSelector) {
+
+    // Only treat as an auth wall if the page has actual credential input fields
+    // (a "Login" link in a navbar is NOT an auth wall)
+    const isAuthForm = Boolean(passwordSelector && emailOrUserField);
+
+    if (isAuthForm) {
         const needsUsernameOrEmail = !credentials.username && !credentials.email;
         const needsPassword = Boolean(passwordSelector && !credentials.password);
+        const requiresUser = (needsUsernameOrEmail || needsPassword) && !credentials.useDefaults;
         return {
             type: "auth",
-            message: "Authentication required.",
-            requiresUser: (needsUsernameOrEmail || needsPassword) && !credentials.useDefaults,
+            message: requiresUser
+                ? "This page requires authentication. You can provide credentials in the chat, e.g.:\n" +
+                  "  `email: you@example.com password: secret`\n" +
+                  "Or say `use default credentials` to try test defaults."
+                : "Authentication detected. Attempting to log in automatically.",
+            requiresUser,
             fieldSelectors: {
                 username: findSelector(elements, /(username|user name|name)/i, ["textbox", "combobox"]),
                 email: findSelector(elements, /email/i, ["textbox", "combobox"]),

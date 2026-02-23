@@ -76,6 +76,7 @@ program
     .description("Autonomously discover web application structure")
     .option("--max-pages <number>", "Maximum pages to discover", "100")
     .option("--max-depth <number>", "Maximum navigation depth", "5")
+    .option("--timeout <number>", "Timeout per page in milliseconds", "30000")
     .option("--auth", "Prompt for authentication before discovery")
     .option("--skip-auth", "Skip authentication-required routes")
     .option("--continue", "Resume a paused discovery session")

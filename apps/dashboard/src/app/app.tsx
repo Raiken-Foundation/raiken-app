@@ -1,13 +1,13 @@
 import { useState, Suspense, lazy } from 'react';
+import { NavRail } from '../components/nav-rail';
 
-// Lazy load views for code-splitting
-const LandingPage = lazy(() => import('./landing-page').then(m => ({ default: m.LandingPage })));
-const ProjectOverview = lazy(() => import('./project-overview').then(m => ({ default: m.ProjectOverview })));
 const TestingView = lazy(() => import('./testing-view').then(m => ({ default: m.TestingView })));
+const DiscoveryView = lazy(() => import('./discovery-view').then(m => ({ default: m.DiscoveryView })));
+const SettingsView = lazy(() => import('./settings-view').then(m => ({ default: m.SettingsView })));
 
-type View = 'landing' | 'overview' | 'testing';
+type View = 'testing' | 'discovery' | 'settings';
+type SidebarTab = 'chat' | 'files';
 
-// Loading fallback component
 function ViewLoader() {
   return (
     <div className="view-loader">
@@ -17,7 +17,7 @@ function ViewLoader() {
           display: flex;
           align-items: center;
           justify-content: center;
-          min-height: 100vh;
+          flex: 1;
           background: #0a0a0a;
         }
         .loader-spinner {
@@ -38,32 +38,59 @@ function ViewLoader() {
 
 export function App() {
   const [currentView, setCurrentView] = useState<View>('testing');
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chat');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [pendingTestPrompt, setPendingTestPrompt] = useState<string | undefined>();
 
-  const handleStart = (prompt: string) => {
+  const handleNavigate = (view: View, tab?: SidebarTab) => {
+    if (view === 'testing' && tab) {
+      setSidebarTab(tab);
+      if (sidebarCollapsed) setSidebarCollapsed(false);
+    }
+    setCurrentView(view);
+  };
+
+  const handleGenerateTest = (pageUrl: string) => {
+    setPendingTestPrompt(`Generate E2E tests for ${pageUrl}`);
+    setSidebarTab('chat');
+    if (sidebarCollapsed) setSidebarCollapsed(false);
     setCurrentView('testing');
-    console.log('Starting test generation with prompt:', prompt);
   };
 
   return (
-    <div className="app-container">
+    <div className="app-shell">
+      <NavRail
+        activeView={currentView}
+        activeSidebarTab={sidebarTab}
+        sidebarCollapsed={sidebarCollapsed}
+        onNavigate={handleNavigate}
+        onToggleCollapse={() => setSidebarCollapsed(prev => !prev)}
+      />
+
       <Suspense fallback={<ViewLoader />}>
-        {currentView === 'landing' && (
-          <LandingPage onStart={handleStart} />
-        )}
-        
-        {currentView === 'overview' && (
-          <ProjectOverview />
+        {currentView === 'testing' && (
+          <TestingView
+            sidebarTab={sidebarTab}
+            sidebarCollapsed={sidebarCollapsed}
+            onSidebarTabChange={setSidebarTab}
+            pendingPrompt={pendingTestPrompt}
+            onPromptConsumed={() => setPendingTestPrompt(undefined)}
+          />
         )}
 
-        {currentView === 'testing' && (
-          <TestingView />
+        {currentView === 'discovery' && (
+          <DiscoveryView onGenerateTest={handleGenerateTest} />
         )}
+
+        {currentView === 'settings' && <SettingsView />}
       </Suspense>
 
       <style>{`
-        .app-container {
-          min-height: 100vh;
+        .app-shell {
+          display: flex;
+          height: 100vh;
           background: #0a0a0a;
+          overflow: hidden;
         }
       `}</style>
     </div>

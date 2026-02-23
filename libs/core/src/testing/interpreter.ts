@@ -170,6 +170,7 @@ Be concise but thorough. Focus on actionable insights.`;
       model: openrouter.chat(config.model || 'anthropic/claude-sonnet-4.5'),
       prompt,
       temperature: 0.5,
+      maxOutputTokens: 4096,
     });
 
     for await (const chunk of result.textStream) {

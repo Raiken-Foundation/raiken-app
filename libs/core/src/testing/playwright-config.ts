@@ -4,7 +4,6 @@
  */
 
 export interface PlaywrightConfigOptions {
-  baseURL: string;
   testDir?: string;           // default: './e2e'
   parallel?: boolean;         // default: true
   workers?: number | 'auto';  // default: 'auto'
@@ -15,11 +14,12 @@ export interface PlaywrightConfigOptions {
 }
 
 /**
- * Generate an optimized Playwright configuration file content
+ * Generate an optimized Playwright configuration file content.
+ * No baseURL is set — tests should always use full URLs so they
+ * work regardless of which application or port is being tested.
  */
 export function generatePlaywrightConfig(options: PlaywrightConfigOptions): string {
   const {
-    baseURL,
     testDir = './e2e',
     parallel = true,
     workers = 'auto',
@@ -29,12 +29,10 @@ export function generatePlaywrightConfig(options: PlaywrightConfigOptions): stri
     trace = 'retain-on-failure',
   } = options;
 
-  // Determine workers line - omit entirely for auto (Playwright auto-detects)
   const workersLine = workers === 'auto' 
     ? '/* workers: undefined - auto-detected */'
     : `workers: process.env.CI ? 2 : ${workers},`;
 
-  // Determine retries config
   const retriesConfig = retries !== undefined 
     ? retries 
     : 'process.env.CI ? 2 : 0';
@@ -69,9 +67,6 @@ export default defineConfig({
   
   /* Shared settings for all the projects below */
   use: {
-    /* Base URL to use in actions like await page.goto('/') */
-    baseURL: '${baseURL}',
-
     /* Collect trace when retrying the failed test */
     trace: '${trace}',
     
@@ -89,13 +84,6 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run dev',
-  //   url: '${baseURL}',
-  //   reuseExistingServer: !process.env.CI,
-  // },
 
   /* Global test timeout */
   timeout: ${timeout},

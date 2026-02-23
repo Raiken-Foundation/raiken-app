@@ -98,6 +98,28 @@ function parsePlaywrightOutput(output: string): { results: TestResult[]; summary
       if (jsonData.suites) {
         parseSuites(jsonData.suites);
       }
+
+      // Parse top-level errors (syntax errors, missing imports, etc.)
+      if (jsonData.errors && Array.isArray(jsonData.errors)) {
+        for (const err of jsonData.errors) {
+          testId++;
+          results.push({
+            id: `error-${testId}`,
+            name: err.location
+              ? `Compilation Error in ${err.location.file?.split('/').pop() || 'unknown'}`
+              : 'Compilation Error',
+            suite: 'Build Errors',
+            status: 'failed',
+            error: {
+              message: err.message,
+              snippet: err.snippet,
+              location: err.location,
+            },
+          });
+          summary.tests.failed++;
+          summary.tests.total++;
+        }
+      }
       
       // Calculate suite stats
       const suiteNames = new Set(results.map(r => r.suite));
@@ -168,8 +190,8 @@ const loadingStyles = `
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-center;
-    height: 100vh;
+    justify-content: center;
+    flex: 1;
     gap: 1rem;
     color: #9ca3af;
   }
@@ -188,7 +210,15 @@ const loadingStyles = `
   }
 `;
 
-export function TestingView() {
+interface TestingViewProps {
+  sidebarTab?: 'chat' | 'files';
+  sidebarCollapsed?: boolean;
+  onSidebarTabChange?: (tab: 'chat' | 'files') => void;
+  pendingPrompt?: string;
+  onPromptConsumed?: () => void;
+}
+
+export function TestingView({ sidebarTab = 'chat', sidebarCollapsed = false, onSidebarTabChange, pendingPrompt, onPromptConsumed }: TestingViewProps) {
   const [activeFileId, setActiveFileId] = useState<string>('');
   const [files, setFiles] = useState<TestFile[]>([]);
   const [isBuilding, setIsBuilding] = useState(false);
@@ -216,8 +246,7 @@ export function TestingView() {
   
   // Build code graph mutation
   const buildGraphMutation = trpc.buildCodeGraph.useMutation({
-    onSuccess: (data) => {
-      console.log('✅ Code graph built:', data);
+    onSuccess: () => {
       setIsBuilding(false);
       // Refetch stats after building
       window.location.reload(); // Simple refresh to update everything
@@ -243,7 +272,6 @@ export function TestingView() {
   // Build graph on first load if no files exist
   useEffect(() => {
     if (statsData && statsData.totalFiles === 0 && !isBuilding) {
-      console.log('📊 No files found, building code graph...');
       setIsBuilding(true);
       buildGraphMutation.mutate({ path: '.', persist: true });
     }
@@ -286,7 +314,6 @@ export function TestingView() {
   const activeFile = files.find(f => f.id === activeFileId);
 
   const handleMonitorSync = () => {
-    console.log('🔄 Rebuilding code graph...');
     setIsBuilding(true);
     buildGraphMutation.mutate({ path: '.', persist: true });
   };
@@ -294,7 +321,6 @@ export function TestingView() {
   // Save test mutation
   const saveTestMutation = trpc.saveGeneratedTest.useMutation({
     onSuccess: (data) => {
-      console.log('✅ Test saved:', data.filePath);
       setShowSaveDialog(false);
       
       // Add the saved file to the files list
@@ -324,23 +350,31 @@ export function TestingView() {
   });
 
   const handleSendMessage = (generatedContent: string) => {
-    console.log('💬 Generated test received');
-    
-    if (generatedContent && generatedContent.trim().length > 0) {
-      // Store the generated test and show save dialog
-      setGeneratedTest(generatedContent);
-      setShowSaveDialog(true);
-      
-      // Suggest a filename based on content
-      const match = generatedContent.match(/test\.describe\(['"](.+?)['"]/);
-      if (match) {
-        const testName = match[1]
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
-        setSaveFileName(`${testName}.spec.ts`);
-      }
+    if (!generatedContent || generatedContent.trim().length === 0) return;
+
+    // Extract code from markdown fences if present
+    let cleanContent = generatedContent;
+    const fenceMatch = generatedContent.match(/```(?:typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/i);
+    if (fenceMatch) {
+      cleanContent = fenceMatch[1].trim();
     }
+
+    // Only save if the content looks like valid test code
+    if (!cleanContent.includes('import') && !cleanContent.includes('test')) return;
+
+    let fileName = 'generated-test.spec.ts';
+    const match = cleanContent.match(/test\.describe\(['"](.+?)['"]/);
+    if (match) {
+      const testName = match[1]
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      fileName = `${testName}.spec.ts`;
+    }
+
+    setGeneratedTest(cleanContent);
+    setSaveFileName(fileName);
+    saveTestMutation.mutate({ fileName, content: cleanContent });
   };
 
   const handleSaveTest = () => {
@@ -350,6 +384,60 @@ export function TestingView() {
       fileName: saveFileName,
       content: generatedTest,
     });
+  };
+
+  const [isSavingFile, setIsSavingFile] = useState(false);
+  const [savedFileId, setSavedFileId] = useState<string | null>(null);
+
+  // Save file content to disk
+  const saveFileMutation = trpc.saveFileContent.useMutation({
+    onSuccess: (_data, variables) => {
+      setIsSavingFile(false);
+      // Flash "Saved" for the file that was saved
+      const file = files.find(f => f.path === variables.filePath);
+      if (file) setSavedFileId(file.id);
+      setTimeout(() => setSavedFileId(null), 2000);
+    },
+    onError: (error) => {
+      console.error('❌ Failed to save file:', error);
+      setIsSavingFile(false);
+      alert(`Failed to save: ${error.message}`);
+    },
+  });
+
+  // Delete file from disk
+  const deleteFileMutation = trpc.deleteTestFile.useMutation({
+    onSuccess: () => {
+      utils.listTestFiles.invalidate();
+    },
+    onError: (error) => {
+      console.error('❌ Failed to delete file:', error);
+      alert(`Failed to delete: ${error.message}`);
+    },
+  });
+
+  const handleSaveFile = (fileId: string) => {
+    const file = files.find(f => f.id === fileId);
+    if (!file || !file.path) return;
+    // Don't save scratch files that haven't been persisted
+    if (file.path.startsWith('scratch:')) {
+      alert('Save this file first using the save dialog.');
+      return;
+    }
+    setIsSavingFile(true);
+    saveFileMutation.mutate({ filePath: file.path, content: file.content });
+  };
+
+  const handleDeleteFile = (fileId: string) => {
+    const file = files.find(f => f.id === fileId);
+    if (!file || !file.path) return;
+    if (file.path.startsWith('scratch:')) {
+      // Just remove from state
+      handleFileClose(fileId);
+      return;
+    }
+    deleteFileMutation.mutate({ filePath: file.path });
+    handleFileClose(fileId);
   };
 
   const handleContentChange = (fileId: string, content: string) => {
@@ -363,13 +451,10 @@ export function TestingView() {
   // Run tests mutation
   const runTestsMutation = trpc.runTests.useMutation({
     onSuccess: (data) => {
-      console.log('🧪 Test results:', data);
       setIsRunningTests(false);
       
-      // Cast the data to the expected shape
       const result = data as { success?: boolean; stdout?: string; stderr?: string };
       const output = result.stdout || result.stderr || '';
-      console.log('📝 Test output:', output);
       
       // Store raw output
       setRawTestOutput(output);
@@ -407,7 +492,6 @@ export function TestingView() {
   // Interpret test results mutation
   const interpretMutation = trpc.interpretTestResults.useMutation({
     onSuccess: (data) => {
-      console.log('🧠 Interpretation received');
       setInterpretation(data.interpretation);
       setIsInterpreting(false);
     },
@@ -419,7 +503,6 @@ export function TestingView() {
   });
 
   const handleRequestInterpretation = (results: TestResult[], testCode: string) => {
-    console.log('🧠 Requesting AI interpretation...');
     setIsInterpreting(true);
     setInterpretation('');
     
@@ -463,7 +546,6 @@ export function TestingView() {
     const file = files.find(f => f.id === fileId);
     if (!file) return;
     
-    console.log(`🧪 Running tests for: ${file.path}`);
     setIsRunningTests(true);
     
     // Update file status to running
@@ -591,7 +673,8 @@ export function TestingView() {
           .testing-view {
             display: flex;
             flex-direction: column;
-            height: 100vh;
+            flex: 1;
+            min-height: 0;
             background: #0a0a0a;
             overflow: hidden;
           }
@@ -601,7 +684,7 @@ export function TestingView() {
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            height: 100vh;
+            flex: 1;
             gap: 1rem;
             color: #9ca3af;
           }
@@ -646,6 +729,11 @@ export function TestingView() {
           onSendMessage={handleSendMessage}
           onFileSelect={handleFileSelectByPath}
           activeFilePath={activeFilePath}
+          activeTab={sidebarTab}
+          collapsed={sidebarCollapsed}
+          onTabChange={onSidebarTabChange}
+          initialPrompt={pendingPrompt}
+          onInitialPromptConsumed={onPromptConsumed}
         />
           <div 
             className={`resize-handle ${isResizing ? 'resizing' : ''}`}
@@ -658,11 +746,15 @@ export function TestingView() {
               files={displayFiles}
               activeFileId={activeFileId}
               onFileSelect={handleFileSelect}
-            onFileClose={handleFileClose}
+              onFileClose={handleFileClose}
               onContentChange={handleContentChange}
-            onRunTests={handleRunTests}
-            onNewFile={handleNewFile}
-            isRunningTests={isRunningTests}
+              onRunTests={handleRunTests}
+              onNewFile={handleNewFile}
+              onSaveFile={handleSaveFile}
+              onDeleteFile={handleDeleteFile}
+              isRunningTests={isRunningTests}
+              isSaving={isSavingFile}
+              savedFileId={savedFileId}
             />
           </div>
       </div>
@@ -733,7 +825,8 @@ export function TestingView() {
         .testing-view {
           display: flex;
           flex-direction: column;
-          height: 100vh;
+          flex: 1;
+          min-height: 0;
           background: #0a0a0a;
           overflow: hidden;
         }

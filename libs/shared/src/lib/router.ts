@@ -3,16 +3,21 @@ import { initTRPC } from "@trpc/server";
 import { z } from "zod";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
+import { loadDiscoveryConfig } from "./config";
 import {
     EntryPointDetector,
     CodeGraph,
     CodeGraphDB,
+    SiteKnowledgeDB,
     formatBytes,
     EmbeddingsGenerator,
     fullAstToSearchableText,
     writePlaywrightConfig,
     playwrightConfigExists,
     getQuickInterpretation,
+    SiteDiscovery,
+    DiscoveryQueryService,
 } from "@raiken/core";
 
 async function findPlaywrightConfigPath(projectPath: string): Promise<string | null> {
@@ -68,6 +73,429 @@ function clearMessages(projectPath: string): void {
   messageStore.set(projectPath, []);
 }
 
+type DiscoveryPhase = "idle" | "running" | "paused" | "completed" | "error";
+
+interface DiscoveryRuntimeEvent {
+    id: string;
+    timestamp: string;
+    type: "page_discovered" | "auth_blocked" | "session_completed" | "error" | "started" | "continued" | "cleared";
+    message: string;
+    data?: Record<string, unknown>;
+}
+
+interface DiscoveryRuntimeState {
+    phase: DiscoveryPhase;
+    startedAt: string | null;
+    updatedAt: string;
+    currentUrl: string | null;
+    currentDepth: number;
+    pagesDiscovered: number;
+    linksFound: number;
+    authBlockersFound: number;
+    blockedAtUrl: string | null;
+    requiresAuth: boolean;
+    lastError: string | null;
+    lastEvents: DiscoveryRuntimeEvent[];
+    maxPages: number | null;
+    maxDepth: number | null;
+    completionReason: string | null;
+}
+
+interface DiscoveryJob {
+    discovery: SiteDiscovery;
+    promise: Promise<void>;
+}
+
+const discoveryRuntimeStore: Map<string, DiscoveryRuntimeState> = new Map();
+const discoveryJobStore: Map<string, DiscoveryJob> = new Map();
+const MAX_DISCOVERY_EVENTS = 100;
+
+function createEmptyDiscoveryState(): DiscoveryRuntimeState {
+    return {
+        phase: "idle",
+        startedAt: null,
+        updatedAt: new Date().toISOString(),
+        currentUrl: null,
+        currentDepth: 0,
+        pagesDiscovered: 0,
+        linksFound: 0,
+        authBlockersFound: 0,
+        blockedAtUrl: null,
+        requiresAuth: false,
+        lastError: null,
+        lastEvents: [],
+        maxPages: null,
+        maxDepth: null,
+        completionReason: null,
+    };
+}
+
+function getDiscoveryState(projectPath: string): DiscoveryRuntimeState {
+    const existing = discoveryRuntimeStore.get(projectPath);
+    if (existing) {
+        return existing;
+    }
+    const created = createEmptyDiscoveryState();
+    discoveryRuntimeStore.set(projectPath, created);
+    return created;
+}
+
+function patchDiscoveryState(
+    projectPath: string,
+    patch: Partial<DiscoveryRuntimeState>
+): DiscoveryRuntimeState {
+    const current = getDiscoveryState(projectPath);
+    const next: DiscoveryRuntimeState = {
+        ...current,
+        ...patch,
+        updatedAt: new Date().toISOString(),
+    };
+    discoveryRuntimeStore.set(projectPath, next);
+    return next;
+}
+
+function pushDiscoveryEvent(
+    projectPath: string,
+    event: Omit<DiscoveryRuntimeEvent, "id" | "timestamp">
+): void {
+    const state = getDiscoveryState(projectPath);
+    const nextEvent: DiscoveryRuntimeEvent = {
+        ...event,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+    };
+    const events = [...state.lastEvents, nextEvent].slice(-MAX_DISCOVERY_EVENTS);
+    patchDiscoveryState(projectPath, { lastEvents: events });
+}
+
+// Discovery config is loaded via loadDiscoveryConfig from ./config
+
+function toDiscoveryPhase(status: string | undefined): DiscoveryPhase {
+    if (status === "running" || status === "paused" || status === "completed") {
+        return status;
+    }
+    if (status === "failed") {
+        return "error";
+    }
+    return "idle";
+}
+
+async function hydrateDiscoveryState(projectPath: string): Promise<DiscoveryRuntimeState> {
+    const current = getDiscoveryState(projectPath);
+    const queryService = new DiscoveryQueryService(projectPath);
+
+    try {
+        // On first hydration, recover sessions stuck as "running" from a previous crash.
+        // Only do this when there is no in-process job (i.e. the server restarted).
+        if (!discoveryJobStore.has(projectPath) && current.phase !== "running") {
+            const recovered = queryService.recoverStaleSessions();
+            if (recovered > 0) {
+                console.log(`⚠️  Recovered ${recovered} stale discovery session(s) for ${projectPath}`);
+            }
+        }
+
+        const stats = queryService.getStats();
+        const session = queryService.getLatestSession();
+
+        const next = patchDiscoveryState(projectPath, {
+            phase:
+                current.phase === "running"
+                    ? "running"
+                    : toDiscoveryPhase(session?.status),
+            startedAt:
+                typeof session?.startedAt === "number"
+                    ? new Date(session.startedAt).toISOString()
+                    : current.startedAt,
+            pagesDiscovered: stats.pagesCount,
+            linksFound: stats.linksCount,
+            authBlockersFound: stats.unresolvedBlockersCount,
+            blockedAtUrl: session?.blockedAtUrl ?? null,
+            requiresAuth: session?.status === "paused" && Boolean(session.blockedAtUrl),
+            currentUrl: current.currentUrl ?? session?.blockedAtUrl ?? null,
+            lastError: current.lastError,
+        });
+        return next;
+    } catch {
+        return current;
+    } finally {
+        queryService.close();
+    }
+}
+
+function toIsoDate(value: unknown): string | null {
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return new Date(value).toISOString();
+    }
+    if (typeof value === "string" && value.trim()) {
+        const asNumber = Number(value);
+        if (Number.isFinite(asNumber)) {
+            return new Date(asNumber).toISOString();
+        }
+        const asDate = new Date(value);
+        if (!Number.isNaN(asDate.getTime())) {
+            return asDate.toISOString();
+        }
+    }
+    return null;
+}
+
+function attachDiscoveryRuntimeListeners(projectPath: string, discovery: SiteDiscovery): void {
+    discovery.on("page_discovered", (event: unknown) => {
+        const payload = (event ?? {}) as {
+            data?: {
+                page?: {
+                    url?: string;
+                    depth?: number;
+                };
+            };
+        };
+        const page = payload.data?.page;
+        const state = getDiscoveryState(projectPath);
+        patchDiscoveryState(projectPath, {
+            phase: "running",
+            currentUrl: page?.url ?? state.currentUrl,
+            currentDepth: typeof page?.depth === "number" ? page.depth : state.currentDepth,
+            pagesDiscovered: state.pagesDiscovered + 1,
+            requiresAuth: false,
+        });
+        pushDiscoveryEvent(projectPath, {
+            type: "page_discovered",
+            message: page?.url ? `Discovered ${page.url}` : "Discovered a page",
+            data: {
+                url: page?.url ?? null,
+                depth: page?.depth ?? null,
+            },
+        });
+    });
+
+    discovery.on("auth_blocked", (event: unknown) => {
+        const payload = (event ?? {}) as {
+            data?: {
+                blocker?: {
+                    url?: string;
+                    blockerType?: string;
+                };
+            };
+        };
+        const blocker = payload.data?.blocker;
+        const state = getDiscoveryState(projectPath);
+        patchDiscoveryState(projectPath, {
+            phase: "paused",
+            blockedAtUrl: blocker?.url ?? state.currentUrl,
+            requiresAuth: true,
+            authBlockersFound: state.authBlockersFound + 1,
+            currentUrl: blocker?.url ?? state.currentUrl,
+        });
+        pushDiscoveryEvent(projectPath, {
+            type: "auth_blocked",
+            message: blocker?.url
+                ? `Authentication required at ${blocker.url}`
+                : "Authentication required",
+            data: {
+                url: blocker?.url ?? null,
+                blockerType: blocker?.blockerType ?? null,
+            },
+        });
+    });
+
+    discovery.on("session_paused", () => {
+        const state = getDiscoveryState(projectPath);
+        patchDiscoveryState(projectPath, {
+            phase: "paused",
+            requiresAuth: true,
+            blockedAtUrl: state.currentUrl ?? state.blockedAtUrl,
+        });
+    });
+
+    discovery.on("session_resumed", () => {
+        patchDiscoveryState(projectPath, {
+            phase: "running",
+            requiresAuth: false,
+            lastError: null,
+        });
+        pushDiscoveryEvent(projectPath, {
+            type: "continued",
+            message: "Discovery resumed",
+        });
+    });
+
+    discovery.on("session_completed", (event: unknown) => {
+        const payload = (event ?? {}) as {
+            data?: {
+                stats?: {
+                    pagesDiscovered?: number;
+                    linksFound?: number;
+                    currentUrl?: string | null;
+                    currentDepth?: number;
+                };
+            };
+        };
+        const stats = payload.data?.stats;
+        const prevState = getDiscoveryState(projectPath);
+        const finalPages = typeof stats?.pagesDiscovered === "number"
+            ? stats.pagesDiscovered
+            : prevState.pagesDiscovered;
+
+        let completionReason: string | null = null;
+        if (prevState.maxPages && finalPages >= prevState.maxPages) {
+            completionReason = `Reached page limit (${prevState.maxPages})`;
+        } else if (prevState.maxDepth && typeof stats?.currentDepth === "number" && stats.currentDepth >= prevState.maxDepth) {
+            completionReason = `Reached depth limit (${prevState.maxDepth})`;
+        } else {
+            completionReason = "All reachable pages crawled";
+        }
+
+        patchDiscoveryState(projectPath, {
+            phase: "completed",
+            currentUrl: stats?.currentUrl ?? null,
+            currentDepth:
+                typeof stats?.currentDepth === "number" ? stats.currentDepth : 0,
+            pagesDiscovered: finalPages,
+            linksFound:
+                typeof stats?.linksFound === "number"
+                    ? stats.linksFound
+                    : prevState.linksFound,
+            requiresAuth: false,
+            blockedAtUrl: null,
+            completionReason,
+        });
+        pushDiscoveryEvent(projectPath, {
+            type: "session_completed",
+            message: `Discovery completed: ${completionReason}`,
+        });
+    });
+
+    discovery.on("error", (event: unknown) => {
+        const payload = (event ?? {}) as {
+            data?: {
+                error?: Error;
+            };
+        };
+        const message = payload.data?.error?.message ?? "Discovery failed";
+        patchDiscoveryState(projectPath, {
+            phase: "error",
+            lastError: message,
+            requiresAuth: false,
+        });
+        pushDiscoveryEvent(projectPath, {
+            type: "error",
+            message,
+        });
+    });
+}
+
+function startDiscoveryJob(options: {
+    projectPath: string;
+    startUrl: string;
+    maxPages?: number;
+    maxDepth?: number;
+    timeout?: number;
+    skipAuth?: boolean;
+    excludePatterns?: string[];
+    continueSession?: boolean;
+}): void {
+    if (discoveryJobStore.has(options.projectPath)) {
+        throw new Error("Discovery is already running for this project");
+    }
+
+    const config = loadDiscoveryConfig(options.projectPath);
+    const discovery = new SiteDiscovery({
+        projectPath: options.projectPath,
+        startUrl: options.startUrl,
+        maxPages: options.maxPages ?? config.maxPages,
+        maxDepth: options.maxDepth ?? config.maxDepth,
+        maxConcurrency: config.maxConcurrency,
+        timeout: options.timeout ?? config.timeout,
+        excludePatterns: options.excludePatterns?.length
+            ? options.excludePatterns
+            : config.excludePatterns,
+        pauseOnAuth: options.skipAuth ? false : config.pauseOnAuth,
+        continueSession: options.continueSession ?? false,
+    });
+
+    attachDiscoveryRuntimeListeners(options.projectPath, discovery);
+
+    const resolvedMaxPages = options.maxPages ?? config.maxPages;
+    const resolvedMaxDepth = options.maxDepth ?? config.maxDepth;
+    const now = new Date().toISOString();
+    patchDiscoveryState(options.projectPath, {
+        phase: "running",
+        startedAt: now,
+        updatedAt: now,
+        currentUrl: options.startUrl,
+        currentDepth: 0,
+        lastError: null,
+        requiresAuth: false,
+        blockedAtUrl: null,
+        maxPages: resolvedMaxPages ?? null,
+        maxDepth: resolvedMaxDepth ?? null,
+        completionReason: null,
+    });
+    pushDiscoveryEvent(options.projectPath, {
+        type: options.continueSession ? "continued" : "started",
+        message: options.continueSession
+            ? `Resumed discovery at ${options.startUrl}`
+            : `Started discovery at ${options.startUrl}`,
+    });
+
+    const promise = (async () => {
+        try {
+            await discovery.start();
+            await hydrateDiscoveryState(options.projectPath);
+        } catch (error) {
+            const message =
+                error instanceof Error ? error.message : "Discovery failed unexpectedly";
+            patchDiscoveryState(options.projectPath, {
+                phase: "error",
+                lastError: message,
+                requiresAuth: false,
+            });
+            pushDiscoveryEvent(options.projectPath, {
+                type: "error",
+                message,
+            });
+        } finally {
+            try {
+                await discovery.close();
+            } finally {
+                discoveryJobStore.delete(options.projectPath);
+            }
+        }
+    })();
+
+    discoveryJobStore.set(options.projectPath, {
+        discovery,
+        promise,
+    });
+}
+
+function deepMerge(
+    target: Record<string, unknown>,
+    source: Record<string, unknown>,
+): Record<string, unknown> {
+    const result = { ...target };
+    for (const key of Object.keys(source)) {
+        const srcVal = source[key];
+        const tgtVal = target[key];
+        if (
+            srcVal !== null &&
+            typeof srcVal === "object" &&
+            !Array.isArray(srcVal) &&
+            tgtVal !== null &&
+            typeof tgtVal === "object" &&
+            !Array.isArray(tgtVal)
+        ) {
+            result[key] = deepMerge(
+                tgtVal as Record<string, unknown>,
+                srcVal as Record<string, unknown>,
+            );
+        } else {
+            result[key] = srcVal;
+        }
+    }
+    return result;
+}
+
 const t = initTRPC.context<Context>().create();
 
 export const appRouter = t.router({
@@ -75,7 +503,7 @@ export const appRouter = t.router({
         return { 
             status: "ok", 
             engine: "raiken",
-            version: "0.0.1"
+            version: "0.3.0"
         };
     }),
 
@@ -85,6 +513,37 @@ export const appRouter = t.router({
             nodeVersion: process.version,
         };
     }),
+
+    getConfig: t.procedure.query(async ({ ctx }) => {
+        const configPath = path.join(ctx.projectPath, "raiken.config.json");
+        try {
+            const raw = await fs.readFile(configPath, "utf-8");
+            return JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+            return {} as Record<string, unknown>;
+        }
+    }),
+
+    updateConfig: t.procedure
+        .input(
+            z.object({
+                config: z.record(z.string(), z.unknown()),
+            })
+        )
+        .mutation(async ({ input, ctx }) => {
+            const configPath = path.join(ctx.projectPath, "raiken.config.json");
+            let existing: Record<string, unknown> = {};
+            try {
+                const raw = await fs.readFile(configPath, "utf-8");
+                existing = JSON.parse(raw) as Record<string, unknown>;
+            } catch {
+                // file doesn't exist yet — start fresh
+            }
+
+            const merged = deepMerge(existing, input.config);
+            await fs.writeFile(configPath, JSON.stringify(merged, null, 4), "utf-8");
+            return { success: true };
+        }),
 
     // Chat message persistence endpoints
     getChatMessages: t.procedure.query(({ ctx }) => {
@@ -500,10 +959,19 @@ export const appRouter = t.router({
             const { fileName, testDir: customTestDir } = input;
             let { content } = input;
 
-            // Strip markdown code fences if present
-            // Matches ```typescript, ```ts, ```javascript, ```js, or just ```
-            content = content.replace(/^```(?:typescript|ts|javascript|js)?\s*\n?/i, '');
-            content = content.replace(/\n?```\s*$/i, '');
+            // Extract code from markdown fences if present
+            const fenceMatch = content.match(/```(?:typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/i);
+            if (fenceMatch) {
+                content = fenceMatch[1];
+            } else {
+                // Fallback: strip opening fence from start
+                content = content.replace(/^```(?:typescript|ts|javascript|js)?\s*\n?/i, '');
+                // Strip closing fence and anything after it
+                const closingIdx = content.lastIndexOf('\n```');
+                if (closingIdx !== -1) {
+                    content = content.substring(0, closingIdx);
+                }
+            }
             content = content.trim();
 
             // Load test directory from raiken.config.json if exists
@@ -542,6 +1010,63 @@ export const appRouter = t.router({
                 success: true,
                 filePath: path.relative(ctx.projectPath, filePath),
                 absolutePath: filePath,
+            };
+        }),
+
+    saveFileContent: t.procedure
+        .input(
+            z.object({
+                filePath: z.string(),
+                content: z.string(),
+            })
+        )
+        .mutation(async ({ input, ctx }) => {
+            const resolved = path.isAbsolute(input.filePath)
+                ? input.filePath
+                : path.join(ctx.projectPath, input.filePath);
+
+            // Prevent writes outside project
+            if (!resolved.startsWith(ctx.projectPath)) {
+                throw new Error('Cannot write files outside the project directory');
+            }
+
+            await fs.mkdir(path.dirname(resolved), { recursive: true });
+            await fs.writeFile(resolved, input.content, 'utf-8');
+            console.log(`✓ Saved file: ${path.relative(ctx.projectPath, resolved)}`);
+
+            return {
+                success: true,
+                filePath: path.relative(ctx.projectPath, resolved),
+            };
+        }),
+
+    deleteTestFile: t.procedure
+        .input(
+            z.object({
+                filePath: z.string(),
+            })
+        )
+        .mutation(async ({ input, ctx }) => {
+            const resolved = path.isAbsolute(input.filePath)
+                ? input.filePath
+                : path.join(ctx.projectPath, input.filePath);
+
+            if (!resolved.startsWith(ctx.projectPath)) {
+                throw new Error('Cannot delete files outside the project directory');
+            }
+
+            try {
+                await fs.access(resolved);
+            } catch {
+                throw new Error(`File not found: ${input.filePath}`);
+            }
+
+            await fs.unlink(resolved);
+            console.log(`🗑️  Deleted file: ${path.relative(ctx.projectPath, resolved)}`);
+
+            return {
+                success: true,
+                filePath: path.relative(ctx.projectPath, resolved),
             };
         }),
 
@@ -620,10 +1145,21 @@ export const appRouter = t.router({
         )
         .mutation(async ({ input, ctx }) => {
             const { spawn } = await import('node:child_process');
+
+            // Auto-create playwright.config.ts if one doesn't exist
+            let configPath = await findPlaywrightConfigPath(ctx.projectPath);
+            if (!configPath) {
+                const result = await writePlaywrightConfig(ctx.projectPath, {
+                    testDir: './e2e',
+                });
+                if (result.success) {
+                    configPath = result.path;
+                    console.log('🧪 Auto-created playwright.config.ts');
+                }
+            }
             
             return new Promise((resolve) => {
                 const args = ['test'];
-                const configPathPromise = findPlaywrightConfigPath(ctx.projectPath);
                 
                 // Add specific test file if provided
                 if (input.testFile) {
@@ -640,25 +1176,22 @@ export const appRouter = t.router({
                 if (input.workers !== undefined && typeof input.workers === 'number') {
                     args.push(`--workers=${input.workers}`);
                 }
-                // Note: for auto detection, we don't pass --workers at all
                 
                 // Add reporter for structured output
                 args.push('--reporter=json');
+
+                if (configPath) {
+                    args.push('--config', configPath);
+                }
                 
                 console.log(`🧪 Running tests: npx playwright ${args.join(' ')}`);
-                
-                void configPathPromise.then(configPath => {
-                    if (configPath) {
-                        args.push('--config', configPath);
-                    }
+                console.log(`🧪 Using config: ${configPath || 'default'}`);
 
-                    console.log(`🧪 Using config: ${configPath || 'default (playwright.config.* if present)'}`);
-
-                    const testProcess = spawn('npx', ['playwright', ...args], {
-                        cwd: ctx.projectPath,
-                        shell: true,
-                        env: { ...process.env, FORCE_COLOR: '0' },
-                    });
+                const testProcess = spawn('npx', ['playwright', ...args], {
+                    cwd: ctx.projectPath,
+                    shell: true,
+                    env: { ...process.env, FORCE_COLOR: '0' },
+                });
                 
                     let stdout = '';
                     let stderr = '';
@@ -705,7 +1238,6 @@ export const appRouter = t.router({
                             results: null,
                         });
                     });
-                });
             });
         }),
 
@@ -713,7 +1245,6 @@ export const appRouter = t.router({
     generatePlaywrightConfig: t.procedure
         .input(
             z.object({
-                baseURL: z.string(),
                 testDir: z.string().optional(),
                 parallel: z.boolean().optional(),
                 workers: z.union([z.number(), z.literal('auto')]).optional(),
@@ -734,7 +1265,6 @@ export const appRouter = t.router({
             }
             
             const result = await writePlaywrightConfig(ctx.projectPath, {
-                baseURL: input.baseURL,
                 testDir: input.testDir,
                 parallel: input.parallel,
                 workers: input.workers,
@@ -817,10 +1347,12 @@ export const appRouter = t.router({
                 return { interpretation, error: false };
             } catch (error) {
                 console.error('Interpretation error:', error);
-                return {
-                    interpretation: `Error interpreting results: ${error instanceof Error ? error.message : String(error)}`,
-                    error: true
-                };
+                const raw = error instanceof Error ? error.message : String(error);
+                let interpretation = `Error interpreting results: ${raw}`;
+                if (raw.includes('402') || raw.includes('credits')) {
+                    interpretation = 'Insufficient OpenRouter credits for AI analysis. Please add credits at https://openrouter.ai/settings/credits and try again.';
+                }
+                return { interpretation, error: true };
             }
         }),
 
@@ -828,26 +1360,167 @@ export const appRouter = t.router({
     // Site Discovery Endpoints
     // ============================================================================
 
+    startDiscovery: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+                url: z.string().url(),
+                maxPages: z.number().int().positive().optional(),
+                maxDepth: z.number().int().positive().optional(),
+                timeout: z.number().int().positive().optional(),
+                skipAuth: z.boolean().default(false),
+                excludePatterns: z.array(z.string()).optional(),
+            })
+        )
+        .mutation(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const runtime = getDiscoveryState(projectPath);
+            if (runtime.phase === "running" && discoveryJobStore.has(projectPath)) {
+                return {
+                    success: false,
+                    message: "Discovery is already running",
+                    runtime,
+                };
+            }
+
+            startDiscoveryJob({
+                projectPath,
+                startUrl: input.url,
+                maxPages: input.maxPages,
+                maxDepth: input.maxDepth,
+                timeout: input.timeout,
+                skipAuth: input.skipAuth,
+                excludePatterns: input.excludePatterns,
+                continueSession: false,
+            });
+
+            return {
+                success: true,
+                message: "Discovery started",
+                runtime: getDiscoveryState(projectPath),
+            };
+        }),
+
+    continueDiscovery: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+                skipAuth: z.boolean().default(false),
+            })
+        )
+        .mutation(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            if (discoveryJobStore.has(projectPath)) {
+                return {
+                    success: false,
+                    message: "Discovery is already running",
+                    runtime: getDiscoveryState(projectPath),
+                };
+            }
+
+            const db = new CodeGraphDB(projectPath);
+            try {
+                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                const activeSession = siteDb.getActiveSession();
+
+                if (!activeSession || activeSession.status !== "paused") {
+                    return {
+                        success: false,
+                        message: "No paused discovery session found",
+                        runtime: await hydrateDiscoveryState(projectPath),
+                    };
+                }
+
+                const resumeUrl = activeSession.blockedAtUrl || activeSession.startUrl;
+                startDiscoveryJob({
+                    projectPath,
+                    startUrl: resumeUrl,
+                    maxPages: activeSession.maxPages ?? undefined,
+                    maxDepth: activeSession.maxDepth ?? undefined,
+                    skipAuth: input.skipAuth,
+                    continueSession: true,
+                });
+
+                return {
+                    success: true,
+                    message: "Discovery resumed",
+                    runtime: getDiscoveryState(projectPath),
+                };
+            } finally {
+                db.close();
+            }
+        }),
+
+    getDiscoveryRuntime: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+            })
+        )
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const hydrated = await hydrateDiscoveryState(projectPath);
+            return {
+                ...hydrated,
+                isRunningInProcess: discoveryJobStore.has(projectPath),
+            };
+        }),
+
+    getDiscoveryTimeline: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+                limit: z.number().int().positive().max(MAX_DISCOVERY_EVENTS).default(50),
+            })
+        )
+        .query(({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const state = getDiscoveryState(projectPath);
+            return {
+                events: state.lastEvents.slice(-input.limit).reverse(),
+                total: state.lastEvents.length,
+            };
+        }),
+
+    authAssist: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+            })
+        )
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const discovery = new DiscoveryQueryService(projectPath);
+            try {
+                return discovery.getAuthAssist();
+            } catch {
+                return {
+                    hasUnresolvedBlockers: false,
+                    unresolvedCount: 0,
+                    suggestedUrl: null,
+                    command: "raiken auth --url <login-url>",
+                    message: "Unable to inspect auth blockers right now.",
+                };
+            } finally {
+                discovery.close();
+            }
+        }),
+
     getDiscoveryStats: t.procedure
         .input(z.object({
             path: z.string().optional(),
         }))
         .query(async ({ input, ctx }) => {
             const projectPath = input.path || ctx.projectPath;
-            const db = new CodeGraphDB(projectPath);
-
+            const discovery = new DiscoveryQueryService(projectPath);
             try {
-                const { SiteKnowledgeDB } = await import('@raiken/core');
-                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
-                const stats = siteDb.getStats();
-                db.close();
+                const stats = discovery.getStats();
 
                 return {
                     ...stats,
                     timestamp: new Date().toISOString(),
                 };
-            } catch (error) {
-                db.close();
+            } catch {
                 return {
                     pagesCount: 0,
                     linksCount: 0,
@@ -857,6 +1530,8 @@ export const appRouter = t.router({
                     unresolvedBlockersCount: 0,
                     timestamp: new Date().toISOString(),
                 };
+            } finally {
+                discovery.close();
             }
         }),
 
@@ -866,13 +1541,10 @@ export const appRouter = t.router({
         }))
         .query(async ({ input, ctx }) => {
             const projectPath = input.path || ctx.projectPath;
-            const db = new CodeGraphDB(projectPath);
+            const discovery = new DiscoveryQueryService(projectPath);
 
             try {
-                const { SiteKnowledgeDB } = await import('@raiken/core');
-                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
-                const session = siteDb.getLatestSession();
-                db.close();
+                const session = discovery.getLatestSession();
 
                 if (!session) {
                     return null;
@@ -884,13 +1556,14 @@ export const appRouter = t.router({
                     status: session.status,
                     pagesDiscovered: session.pagesDiscovered,
                     linksFound: session.linksFound,
-                    startedAt: new Date(session.startedAt).toISOString(),
-                    completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : null,
+                    startedAt: toIsoDate(session.startedAt),
+                    completedAt: toIsoDate(session.completedAt),
                     blockedAtUrl: session.blockedAtUrl,
                 };
-            } catch (error) {
-                db.close();
+            } catch {
                 return null;
+            } finally {
+                discovery.close();
             }
         }),
 
@@ -898,38 +1571,109 @@ export const appRouter = t.router({
         .input(z.object({
             path: z.string().optional(),
             limit: z.number().default(50),
+            offset: z.number().default(0),
         }))
         .query(async ({ input, ctx }) => {
             const projectPath = input.path || ctx.projectPath;
-            const db = new CodeGraphDB(projectPath);
-
+            const discovery = new DiscoveryQueryService(projectPath);
             try {
-                const { SiteKnowledgeDB } = await import('@raiken/core');
-                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
-                const pages = siteDb.getAllPages();
-                db.close();
-
-                const limited = pages.slice(0, input.limit);
+                const result = discovery.listPages({ limit: input.limit, offset: input.offset });
 
                 return {
-                    pages: limited.map(page => ({
+                    pages: result.pages.map(page => ({
                         url: page.url,
                         title: page.title,
                         depth: page.depth,
                         visitCount: page.visitCount,
-                        discoveredAt: new Date(page.discoveredAt).toISOString(),
-                        lastVisitedAt: new Date(page.lastVisitedAt).toISOString(),
+                        parentUrl: page.parentUrl,
+                        discoveredAt: toIsoDate(page.discoveredAt),
+                        lastVisitedAt: toIsoDate(page.lastVisitedAt),
                     })),
-                    total: pages.length,
-                    hasMore: pages.length > input.limit,
+                    total: result.total,
+                    hasMore: result.hasMore,
                 };
-            } catch (error) {
-                db.close();
+            } catch {
                 return {
                     pages: [],
                     total: 0,
                     hasMore: false,
                 };
+            } finally {
+                discovery.close();
+            }
+        }),
+
+    getVerifiedLinks: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+            limit: z.number().default(100),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const db = new CodeGraphDB(projectPath);
+            try {
+                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                const verified = siteDb.getVerifiedLinks();
+                const broken = siteDb.getBrokenLinks();
+
+                return {
+                    verifiedLinks: verified.slice(0, input.limit).map(link => ({
+                        fromUrl: link.fromUrl,
+                        toUrl: link.toUrl,
+                        selector: link.selector,
+                        linkText: link.linkText,
+                        elementRole: link.elementRole,
+                    })),
+                    brokenLinks: broken.slice(0, input.limit).map(link => ({
+                        fromUrl: link.fromUrl,
+                        toUrl: link.toUrl,
+                        selector: link.selector,
+                        errorMessage: link.errorMessage,
+                    })),
+                    verifiedCount: verified.length,
+                    brokenCount: broken.length,
+                };
+            } catch {
+                return {
+                    verifiedLinks: [],
+                    brokenLinks: [],
+                    verifiedCount: 0,
+                    brokenCount: 0,
+                };
+            } finally {
+                db.close();
+            }
+        }),
+
+    getDiscoveredPageSnapshot: t.procedure
+        .input(z.object({
+            path: z.string().optional(),
+            url: z.string().url(),
+        }))
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            const discovery = new DiscoveryQueryService(projectPath);
+
+            try {
+                const page = discovery.getPageSnapshot(input.url);
+
+                if (!page) {
+                    return null;
+                }
+
+                return {
+                    url: page.url,
+                    normalizedUrl: page.normalizedUrl,
+                    title: page.title,
+                    snapshotJson: page.snapshotJson,
+                    depth: page.depth,
+                    discoveredAt: toIsoDate(page.discoveredAt),
+                    lastVisitedAt: toIsoDate(page.lastVisitedAt),
+                };
+            } catch {
+                return null;
+            } finally {
+                discovery.close();
             }
         }),
 
@@ -939,29 +1683,26 @@ export const appRouter = t.router({
         }))
         .query(async ({ input, ctx }) => {
             const projectPath = input.path || ctx.projectPath;
-            const db = new CodeGraphDB(projectPath);
-
+            const discovery = new DiscoveryQueryService(projectPath);
             try {
-                const { SiteKnowledgeDB } = await import('@raiken/core');
-                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
-                const blockers = siteDb.getUnresolvedBlockers();
-                db.close();
+                const blockers = discovery.getUnresolvedBlockers();
 
                 return {
                     blockers: blockers.map(blocker => ({
                         id: blocker.id,
                         url: blocker.url,
                         blockerType: blocker.blockerType,
-                        discoveredAt: new Date(blocker.discoveredAt).toISOString(),
+                        discoveredAt: toIsoDate(blocker.discoveredAt),
                     })),
                     total: blockers.length,
                 };
-            } catch (error) {
-                db.close();
+            } catch {
                 return {
                     blockers: [],
                     total: 0,
                 };
+            } finally {
+                discovery.close();
             }
         }),
 
@@ -971,17 +1712,35 @@ export const appRouter = t.router({
         }))
         .mutation(async ({ input, ctx }) => {
             const projectPath = input.path || ctx.projectPath;
+
+            const runningJob = discoveryJobStore.get(projectPath);
+            if (runningJob) {
+                try {
+                    await runningJob.discovery.close();
+                } catch {
+                    // ignore cleanup errors
+                } finally {
+                    discoveryJobStore.delete(projectPath);
+                }
+            }
+
             const db = new CodeGraphDB(projectPath);
 
             try {
-                const { SiteKnowledgeDB } = await import('@raiken/core');
-                const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
                 siteDb.clearDiscoveryData();
                 db.close();
+
+                discoveryRuntimeStore.set(projectPath, createEmptyDiscoveryState());
+                pushDiscoveryEvent(projectPath, {
+                    type: "cleared",
+                    message: "Discovery data cleared",
+                });
 
                 return {
                     success: true,
                     message: 'Discovery data cleared successfully',
+                    runtime: getDiscoveryState(projectPath),
                 };
             } catch (error) {
                 db.close();

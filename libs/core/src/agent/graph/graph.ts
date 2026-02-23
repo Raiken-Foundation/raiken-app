@@ -33,6 +33,9 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             "classifyGoal",
             (state: GraphStateType) => {
                 if (state.awaitUserMessage) return "awaitUser";
+                if (state.nextTool === "discoveryRead") {
+                    return "answerQuestions";
+                }
                 if (
                     state.nextTool === "codeSearch" ||
                     state.nextTool === "testGen" ||
@@ -46,7 +49,7 @@ export function createAgentGraph(deps: AgentNodeDeps) {
                 }
                 return "navigate";
             },
-            ["awaitUser", "gatherContext", "detectInterruption", "navigate"]
+            ["awaitUser", "answerQuestions", "gatherContext", "detectInterruption", "navigate"]
         )
         .addEdge("navigate", "detectInterruption")
         .addConditionalEdges(

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import Markdown from 'react-markdown';
 
 // Helper function to strip ANSI codes from error messages
 function stripAnsiCodes(str: string): string {
@@ -78,6 +79,14 @@ export function TestResults({
   const failedTests = results.filter(r => r.status === 'failed');
   const passedTests = results.filter(r => r.status === 'passed');
   const hasResults = results.length > 0;
+
+  // Auto-select first failed test and expand when results arrive
+  useEffect(() => {
+    if (failedTests.length > 0) {
+      setSelectedTest(failedTests[0].id);
+      setIsExpanded(true);
+    }
+  }, [results.length]);
 
   // Switch to insights view when interpretation is available
   const handleAnalyzeClick = () => {
@@ -410,35 +419,38 @@ export function TestResults({
                     <h3>AI Analysis</h3>
                   </div>
                   <div className="interpretation-body">
-                    {interpretation.split('\n').map((line, i) => {
-                      // Handle headers
-                      if (line.startsWith('### ')) {
-                        return <h4 key={i} className="int-h4">{line.replace('### ', '')}</h4>;
-                      }
-                      if (line.startsWith('## ')) {
-                        return <h3 key={i} className="int-h3">{line.replace('## ', '')}</h3>;
-                      }
-                      if (line.startsWith('# ')) {
-                        return <h2 key={i} className="int-h2">{line.replace('# ', '')}</h2>;
-                      }
-                      // Handle bold
-                      if (line.startsWith('**') && line.endsWith('**')) {
-                        return <p key={i} className="int-bold">{line.replace(/\*\*/g, '')}</p>;
-                      }
-                      // Handle bullet points
-                      if (line.startsWith('- ')) {
-                        return <li key={i}>{line.replace('- ', '')}</li>;
-                      }
-                      // Handle code blocks (simple)
-                      if (line.startsWith('```')) {
-                        return null;
-                      }
-                      // Empty lines
-                      if (line.trim() === '') {
-                        return <br key={i} />;
-                      }
-                      return <p key={i}>{line}</p>;
-                    })}
+                    <Markdown
+                      components={{
+                        h1: ({ children }) => <h2 className="int-h2">{children}</h2>,
+                        h2: ({ children }) => <h3 className="int-h3">{children}</h3>,
+                        h3: ({ children }) => <h4 className="int-h4">{children}</h4>,
+                        h4: ({ children }) => <h4 className="int-h4">{children}</h4>,
+                        strong: ({ children }) => <strong className="int-bold">{children}</strong>,
+                        code: ({ className, children, ...props }) => {
+                          const isInline = !className;
+                          return isInline ? (
+                            <code className="int-inline-code" {...props}>{children}</code>
+                          ) : (
+                            <code className={`int-code-block ${className || ''}`} {...props}>{children}</code>
+                          );
+                        },
+                        pre: ({ children }) => {
+                          const preRef = useRef<HTMLPreElement>(null);
+                          return <pre ref={preRef} className="int-pre">{children}</pre>;
+                        },
+                        a: ({ href, children }) => (
+                          <a href={href} target="_blank" rel="noopener noreferrer" className="int-link">{children}</a>
+                        ),
+                        ul: ({ children }) => <ul className="int-list">{children}</ul>,
+                        ol: ({ children }) => <ol className="int-list int-list-ordered">{children}</ol>,
+                        blockquote: ({ children }) => <blockquote className="int-blockquote">{children}</blockquote>,
+                        table: ({ children }) => <div className="int-table-wrap"><table className="int-table">{children}</table></div>,
+                        th: ({ children }) => <th className="int-th">{children}</th>,
+                        td: ({ children }) => <td className="int-td">{children}</td>,
+                      }}
+                    >
+                      {interpretation}
+                    </Markdown>
                   </div>
                 </div>
               ) : (
@@ -1363,6 +1375,80 @@ export function TestResults({
           font-family: 'JetBrains Mono', monospace;
           font-size: 0.75rem;
           color: #a78bfa;
+        }
+
+        .int-inline-code {
+          background: #27272a;
+          padding: 0.125rem 0.375rem;
+          border-radius: 4px;
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 0.75rem;
+          color: #a78bfa;
+        }
+
+        .int-pre {
+          background: #0d0d0d;
+          padding: 0.75rem 1rem;
+          margin: 0.5rem 0;
+          border-radius: 6px;
+          border: 1px solid #27272a;
+          overflow-x: auto;
+          max-height: 300px;
+        }
+
+        .int-code-block {
+          font-family: 'JetBrains Mono', monospace;
+          font-size: 0.75rem;
+          color: #e5e7eb;
+          white-space: pre;
+        }
+
+        .int-link {
+          color: #60a5fa;
+          text-decoration: underline;
+        }
+
+        .int-link:hover {
+          color: #93c5fd;
+        }
+
+        .int-list {
+          margin: 0.5rem 0;
+          padding-left: 1.25rem;
+        }
+
+        .int-list-ordered {
+          list-style-type: decimal;
+        }
+
+        .int-blockquote {
+          border-left: 3px solid #4f46e5;
+          padding-left: 0.75rem;
+          margin: 0.5rem 0;
+          color: #9ca3af;
+          font-style: italic;
+        }
+
+        .int-table-wrap {
+          overflow-x: auto;
+          margin: 0.5rem 0;
+        }
+
+        .int-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 0.8rem;
+        }
+
+        .int-th, .int-td {
+          border: 1px solid #27272a;
+          padding: 0.375rem 0.5rem;
+          text-align: left;
+        }
+
+        .int-th {
+          background: #1a1a1a;
+          font-weight: 600;
         }
 
         .no-insights {

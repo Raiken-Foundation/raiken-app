@@ -40,6 +40,7 @@ export interface PromptTemplate {
   name: string;
   description: string;
   buildPrompt: (context: ContextData, userPrompt: string) => string;
+  formatSiteKnowledgeSection?: (siteKnowledge: SiteKnowledge) => string;
   changelog?: string[];
   performanceMetrics?: {
     successRate?: number;
@@ -53,7 +54,7 @@ export interface AgentClassifierResult {
   goal: string | null;
   targetFeature: string | null;
   targetUrl: string | null;
-  nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "none" | null;
+  nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "discoveryRead" | "none" | null;
   missingContext: string[];
 }
 
@@ -97,7 +98,7 @@ Key Imports: ${f.imports.slice(0, 5).map(i => i.source).join(', ') || 'none'}
 ${f.fullContext}
 `).join('\n')}
 
-${context.siteKnowledge ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ''}
+${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ''}
 
 [TASK - USER REQUEST]
 ${userPrompt}
@@ -137,6 +138,12 @@ IMPORTANT: If a [LIVE DOM CONTEXT] section is provided below, you MUST:
 - DO NOT guess or fabricate selectors that are not listed in the DOM context
 - Prefer selectors in the priority order listed above
 
+URLS — ALWAYS USE FULL URLS:
+- NEVER use relative paths like page.goto('/login'). There is NO baseURL configured.
+- ALWAYS use complete URLs like page.goto('http://localhost:3000/login').
+- Get the correct host + port from the user's prompt, from the [SITE DISCOVERY KNOWLEDGE] section, or from any URL context provided.
+- If no URL is provided, ask the user which URL to target.
+
 NAVIGATION & PREREQUISITES:
 If the [LIVE DOM CONTEXT] includes a [PREREQUISITES] section, you MUST:
 - Include beforeEach hooks that handle navigation prerequisites (login, cookie acceptance, etc.)
@@ -146,18 +153,18 @@ If the [LIVE DOM CONTEXT] includes a [PREREQUISITES] section, you MUST:
 
 Example of handling login prerequisite:
 \`\`\`typescript
+const BASE = 'http://localhost:3000';
+
 test.describe('Counter (requires auth)', () => {
   test.beforeEach(async ({ page }) => {
-    // Login prerequisite - Counter is behind authentication
-    await page.goto('/login');
+    await page.goto(\`\${BASE}/login\`);
     await page.getByLabel('Email').fill(process.env.TEST_USER || 'test@example.com');
     await page.getByLabel('Password').fill(process.env.TEST_PASSWORD || 'password123');
     await page.getByRole('button', { name: 'Login' }).click();
-    await page.waitForURL('/dashboard'); // Wait for successful redirect
+    await page.waitForURL(\`\${BASE}/dashboard\`);
   });
 
   test('should increment counter', async ({ page }) => {
-    // Now we're authenticated and can test the counter
     await page.getByRole('button', { name: 'Increment' }).click();
     await expect(page.getByTestId('counter-value')).toHaveText('1');
   });
@@ -182,10 +189,12 @@ Example 1 - Component Interaction Test:
 \`\`\`typescript
 import { test, expect } from '@playwright/test';
 
+const BASE = 'http://localhost:3000';
+
 test.describe('Login Component', () => {
   test('should successfully login with valid credentials', async ({ page }) => {
     // Arrange
-    await page.goto('/login');
+    await page.goto(\`\${BASE}/login\`);
     const email = 'user@example.com';
     const password = 'securePass123';
     
@@ -195,7 +204,7 @@ test.describe('Login Component', () => {
     await page.getByRole('button', { name: 'Sign In' }).click();
     
     // Assert
-    await expect(page).toHaveURL('/dashboard');
+    await expect(page).toHaveURL(\`\${BASE}/dashboard\`);
     await expect(page.getByText('Welcome back')).toBeVisible();
   });
 });
@@ -205,13 +214,15 @@ Example 2 - API Response Test:
 \`\`\`typescript
 import { test, expect } from '@playwright/test';
 
+const BASE = 'http://localhost:3000';
+
 test.describe('User API', () => {
   test('should create new user successfully', async ({ request }) => {
     // Arrange
     const userData = { name: 'Test User', email: 'test@example.com' };
     
     // Act
-    const response = await request.post('/api/users', { data: userData });
+    const response = await request.post(\`\${BASE}/api/users\`, { data: userData });
     
     // Assert
     expect(response.ok()).toBeTruthy();
@@ -484,7 +495,8 @@ Rules:
 - If a value is unknown, use null.
 - missingContext must be an array of strings (empty array if none).
 - intent MUST be one of: "explore", "generateTests", "explain".
-- nextTool MUST be one of: "domCapture", "codeSearch", "testGen", "explain", "none", or null.
+- nextTool MUST be one of: "domCapture", "codeSearch", "testGen", "explain", "discoveryRead", "none", or null.
+- Use "discoveryRead" when the user asks for persisted discovery results (discovered pages, snapshots, discovery stats/session, or auth blockers).
 
 Context:
 ConversationHistory:
@@ -506,7 +518,7 @@ Output JSON schema:
   "goal": string|null,
   "targetFeature": string|null,
   "targetUrl": string|null,
-  "nextTool": "domCapture|codeSearch|testGen|explain|none"|null,
+  "nextTool": "domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,
   "missingContext": string[]
 }`;
 }
@@ -520,7 +532,7 @@ export function buildIntentClassificationPrompt(context: string): string {
 Analyze the user's request and determine:
 1) The control intent (stop/go/retry/continue/refine/clarify/cancel/new).
 2) The primary task intent (test-generation/chat/help).
-3) The next tool that should be used (domCapture/codeSearch/testGen/explain/none).
+3) The next tool that should be used (domCapture/codeSearch/testGen/explain/discoveryRead/none).
 4) The effective prompt to use if this is a retry/continue/refine.
 
 ${context}

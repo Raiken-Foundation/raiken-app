@@ -58,8 +58,165 @@ export const createGenerateTestsNode =
     };
 
 export const createAnswerQuestionsNode =
-    ({ gatherContext, projectPath, model, buildExplorationPrompt, getMemoryContext }: AgentNodeDeps) =>
+    ({
+        callTool,
+        gatherContext,
+        projectPath,
+        model,
+        buildExplorationPrompt,
+        getMemoryContext,
+    }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
+        if (state.nextTool === "discoveryRead") {
+            const formatDate = (value: number | null | undefined): string => {
+                if (typeof value !== "number" || !Number.isFinite(value)) {
+                    return "n/a";
+                }
+                return new Date(value).toISOString();
+            };
+            const requestedUrl = state.targetUrl;
+            const shouldListPages = !requestedUrl;
+            const shouldFetchSnapshot = Boolean(requestedUrl);
+
+            const overviewResult = await callTool("getDiscoveryOverview", {});
+            if (!overviewResult.success || !overviewResult.data) {
+                return {
+                    summary:
+                        "Answers:\n- I could not load discovery data right now.\n\nEvidence:\n- getDiscoveryOverview returned an error.\n\nUnknowns / Next checks:\n- Verify discovery DB access and try again.",
+                };
+            }
+
+            const overview = overviewResult.data as {
+                stats: {
+                    pagesCount: number;
+                    linksCount: number;
+                    verifiedLinksCount: number;
+                    brokenLinksCount: number;
+                    unresolvedBlockersCount: number;
+                };
+                latestSession: {
+                    startUrl: string;
+                    status: string;
+                    startedAt: number;
+                    completedAt: number | null;
+                    blockedAtUrl: string | null;
+                } | null;
+            };
+
+            if (overview.stats.pagesCount === 0) {
+                return {
+                    summary:
+                        "Answers:\n- There are no discovered pages persisted yet.\n- Run site discovery first, then I can fetch pages and snapshots in chat.\n\nEvidence:\n- getDiscoveryOverview reports pagesCount = 0.\n\nUnknowns / Next checks:\n- Start a discovery run (for example `raiken discover <url>`), then ask me to list pages or show a snapshot URL.",
+                };
+            }
+
+            const lines: string[] = [];
+            lines.push("Answers:");
+            lines.push(
+                `- Discovery data is available: ${overview.stats.pagesCount} pages, ${overview.stats.linksCount} links, ${overview.stats.verifiedLinksCount} verified links.`
+            );
+            if (overview.latestSession) {
+                lines.push(
+                    `- Latest session is ${overview.latestSession.status} (start: ${overview.latestSession.startUrl}).`
+                );
+            }
+            if (overview.stats.unresolvedBlockersCount > 0) {
+                lines.push(
+                    `- There are ${overview.stats.unresolvedBlockersCount} unresolved auth blockers.`
+                );
+            }
+
+            if (shouldListPages) {
+                const pagesResult = await callTool("listDiscoveredPages", {
+                    limit: 15,
+                    offset: 0,
+                });
+                if (pagesResult.success && pagesResult.data) {
+                    const pagesData = pagesResult.data as {
+                        pages: Array<{
+                            url: string;
+                            title: string | null;
+                            depth: number;
+                            visitCount: number;
+                        }>;
+                        total: number;
+                        hasMore: boolean;
+                    };
+                    const listed = pagesData.pages.slice(0, 8);
+                    if (listed.length > 0) {
+                        lines.push(`- Top discovered pages (${listed.length}/${pagesData.total} shown):`);
+                        for (const page of listed) {
+                            lines.push(
+                                `  - ${page.url} (depth ${page.depth}, visits ${page.visitCount}, title: ${page.title || "Untitled"})`
+                            );
+                        }
+                        if (pagesData.hasMore) {
+                            lines.push("- More pages are available; ask for the next batch if needed.");
+                        }
+                    }
+                }
+            }
+
+            if (shouldFetchSnapshot) {
+                if (!requestedUrl) {
+                    return {
+                        summary:
+                            "Answers:\n- I can fetch a discovered snapshot, but I need the exact page URL.\n\nEvidence:\n- nextTool was set to discoveryRead without a targetUrl.\n\nUnknowns / Next checks:\n- Provide the full page URL from discovery and ask again.",
+                    };
+                }
+                const snapshotResult = await callTool("getDiscoveredPageSnapshot", {
+                    url: requestedUrl,
+                });
+                if (snapshotResult.success) {
+                    const snapshot = snapshotResult.data as
+                        | {
+                              url: string;
+                              title: string | null;
+                              depth: number;
+                              snapshotJson: string | null;
+                          }
+                        | null;
+                    if (!snapshot) {
+                        lines.push(`- No persisted snapshot was found for ${requestedUrl}.`);
+                    } else if (!snapshot.snapshotJson) {
+                        lines.push(`- Snapshot exists for ${requestedUrl}, but the stored payload is empty.`);
+                    } else {
+                        const preview =
+                            snapshot.snapshotJson.length > 700
+                                ? `${snapshot.snapshotJson.slice(0, 700)}...`
+                                : snapshot.snapshotJson;
+                        lines.push(
+                            `- Snapshot preview for ${snapshot.url} (depth ${snapshot.depth}, title: ${snapshot.title || "Untitled"}):`
+                        );
+                        lines.push(`  ${preview}`);
+                    }
+                }
+            }
+
+            lines.push("");
+            lines.push("Evidence:");
+            lines.push("- Tool: getDiscoveryOverview");
+            if (shouldListPages) {
+                lines.push("- Tool: listDiscoveredPages");
+            }
+            if (shouldFetchSnapshot && requestedUrl) {
+                lines.push("- Tool: getDiscoveredPageSnapshot");
+            }
+            if (overview.latestSession) {
+                lines.push(
+                    `- Session timestamps: started ${formatDate(overview.latestSession.startedAt)}, completed ${formatDate(overview.latestSession.completedAt)}`
+                );
+            }
+
+            lines.push("");
+            lines.push("Unknowns / Next checks:");
+            lines.push("- None.");
+
+            return {
+                summary: lines.join("\n"),
+            };
+        }
+
         const context = state.context || (await gatherContext(state.userPrompt, projectPath));
         if (context.files.length === 0 && !state.domSummary) {
             return {

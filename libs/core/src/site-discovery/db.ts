@@ -10,9 +10,11 @@ import type {
     DiscoveredLink,
     LinkStatus,
     AuthBlocker,
+    AuthBlockerType,
     DiscoverySession,
     SessionStatus,
 } from "./types";
+import { normalizeUrl } from "./url-utils";
 
 export class SiteKnowledgeDB {
     private db: Database.Database;
@@ -31,6 +33,7 @@ export class SiteKnowledgeDB {
      * Save a discovered page to the database.
      */
     savePage(page: Omit<DiscoveredPage, "id">): number {
+        const normalizedUrl = this.normalizeUrl(page.url);
         const result = this.db
             .prepare(
                 `
@@ -44,7 +47,7 @@ export class SiteKnowledgeDB {
             .run(
                 page.projectPath,
                 page.url,
-                page.normalizedUrl,
+                normalizedUrl,
                 page.title,
                 page.snapshotJson,
                 page.parentUrl,
@@ -70,16 +73,16 @@ export class SiteKnowledgeDB {
             WHERE project_path = ? AND normalized_url = ?
         `
             )
-            .get(this.projectPath, normalizedUrl) as DiscoveredPage | undefined;
+            .get(this.projectPath, normalizedUrl) as Record<string, unknown> | undefined;
 
-        return result || null;
+        return result ? this.mapPageRow(result) : null;
     }
 
     /**
      * Get all pages for this project.
      */
     getAllPages(): DiscoveredPage[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM discovered_pages
@@ -87,7 +90,27 @@ export class SiteKnowledgeDB {
             ORDER BY depth ASC, discovered_at ASC
         `
             )
-            .all(this.projectPath) as DiscoveredPage[];
+            .all(this.projectPath) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapPageRow(row));
+    }
+
+    /**
+     * Get pages with SQL-level LIMIT/OFFSET pagination.
+     */
+    getPagesPaginated(limit: number, offset: number): DiscoveredPage[] {
+        const rows = this.db
+            .prepare(
+                `
+            SELECT * FROM discovered_pages
+            WHERE project_path = ?
+            ORDER BY depth ASC, discovered_at ASC
+            LIMIT ? OFFSET ?
+        `
+            )
+            .all(this.projectPath, limit, offset) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapPageRow(row));
     }
 
     /**
@@ -106,20 +129,6 @@ export class SiteKnowledgeDB {
             .run(Date.now(), this.projectPath, normalizedUrl);
     }
 
-    /**
-     * Get pages at a specific depth.
-     */
-    getPagesByDepth(depth: number): DiscoveredPage[] {
-        return this.db
-            .prepare(
-                `
-            SELECT * FROM discovered_pages
-            WHERE project_path = ? AND depth = ?
-            ORDER BY discovered_at ASC
-        `
-            )
-            .all(this.projectPath, depth) as DiscoveredPage[];
-    }
 
     /**
      * Get the count of discovered pages.
@@ -172,7 +181,7 @@ export class SiteKnowledgeDB {
      * Get all links from a specific page.
      */
     getLinksFrom(url: string): DiscoveredLink[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM discovered_links
@@ -180,14 +189,33 @@ export class SiteKnowledgeDB {
             ORDER BY discovered_at ASC
         `
             )
-            .all(this.projectPath, url) as DiscoveredLink[];
+            .all(this.projectPath, url) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapLinkRow(row));
+    }
+
+    /**
+     * Get pending links to a specific URL.
+     */
+    getPendingLinksTo(url: string): DiscoveredLink[] {
+        const rows = this.db
+            .prepare(
+                `
+            SELECT * FROM discovered_links
+            WHERE project_path = ? AND to_url = ? AND status = 'pending'
+            ORDER BY discovered_at ASC
+        `
+            )
+            .all(this.projectPath, url) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapLinkRow(row));
     }
 
     /**
      * Get all links with a specific status.
      */
     getLinksByStatus(status: LinkStatus): DiscoveredLink[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM discovered_links
@@ -195,7 +223,9 @@ export class SiteKnowledgeDB {
             ORDER BY discovered_at ASC
         `
             )
-            .all(this.projectPath, status) as DiscoveredLink[];
+            .all(this.projectPath, status) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapLinkRow(row));
     }
 
     /**
@@ -291,7 +321,7 @@ export class SiteKnowledgeDB {
      * Get all unresolved auth blockers for this project.
      */
     getUnresolvedBlockers(): AuthBlocker[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM auth_blockers
@@ -299,14 +329,16 @@ export class SiteKnowledgeDB {
             ORDER BY discovered_at DESC
         `
             )
-            .all(this.projectPath) as AuthBlocker[];
+            .all(this.projectPath) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapBlockerRow(row));
     }
 
     /**
      * Get all auth blockers (resolved and unresolved).
      */
     getAllBlockers(): AuthBlocker[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM auth_blockers
@@ -314,7 +346,9 @@ export class SiteKnowledgeDB {
             ORDER BY discovered_at DESC
         `
             )
-            .all(this.projectPath) as AuthBlocker[];
+            .all(this.projectPath) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapBlockerRow(row));
     }
 
     /**
@@ -332,22 +366,6 @@ export class SiteKnowledgeDB {
             .run(Date.now(), storageStatePath, id);
     }
 
-    /**
-     * Check if a URL has an unresolved auth blocker.
-     */
-    hasAuthBlocker(url: string): boolean {
-        const result = this.db
-            .prepare(
-                `
-            SELECT 1 FROM auth_blockers
-            WHERE project_path = ? AND url = ? AND resolved_at IS NULL
-            LIMIT 1
-        `
-            )
-            .get(this.projectPath, url);
-
-        return result !== undefined;
-    }
 
     // ==========================================================================
     // Discovery Sessions Operations
@@ -362,8 +380,9 @@ export class SiteKnowledgeDB {
                 `
             INSERT INTO discovery_sessions (
                 project_path, start_url, status, pages_discovered,
-                links_found, started_at, completed_at, blocked_at_url, queue_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                links_found, started_at, completed_at, blocked_at_url, queue_json,
+                max_pages, max_depth
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
             )
             .run(
@@ -375,7 +394,9 @@ export class SiteKnowledgeDB {
                 session.startedAt,
                 session.completedAt,
                 session.blockedAtUrl,
-                session.queueJson
+                session.queueJson,
+                session.maxPages ?? null,
+                session.maxDepth ?? null
             );
 
         return Number(result.lastInsertRowid);
@@ -412,6 +433,14 @@ export class SiteKnowledgeDB {
             fields.push("queue_json = ?");
             values.push(updates.queueJson);
         }
+        if (updates.maxPages !== undefined) {
+            fields.push("max_pages = ?");
+            values.push(updates.maxPages);
+        }
+        if (updates.maxDepth !== undefined) {
+            fields.push("max_depth = ?");
+            values.push(updates.maxDepth);
+        }
 
         if (fields.length === 0) return;
 
@@ -434,9 +463,9 @@ export class SiteKnowledgeDB {
             LIMIT 1
         `
             )
-            .get(this.projectPath) as DiscoverySession | undefined;
+            .get(this.projectPath) as Record<string, unknown> | undefined;
 
-        return result || null;
+        return result ? this.mapSessionRow(result as Record<string, unknown>) : null;
     }
 
     /**
@@ -450,16 +479,16 @@ export class SiteKnowledgeDB {
             WHERE id = ?
         `
             )
-            .get(id) as DiscoverySession | undefined;
+            .get(id) as Record<string, unknown> | undefined;
 
-        return result || null;
+        return result ? this.mapSessionRow(result as Record<string, unknown>) : null;
     }
 
     /**
      * Get all sessions for this project.
      */
     getAllSessions(): DiscoverySession[] {
-        return this.db
+        const rows = this.db
             .prepare(
                 `
             SELECT * FROM discovery_sessions
@@ -467,7 +496,9 @@ export class SiteKnowledgeDB {
             ORDER BY started_at DESC
         `
             )
-            .all(this.projectPath) as DiscoverySession[];
+            .all(this.projectPath) as Array<Record<string, unknown>>;
+
+        return rows.map((row) => this.mapSessionRow(row));
     }
 
     /**
@@ -483,32 +514,98 @@ export class SiteKnowledgeDB {
             LIMIT 1
         `
             )
-            .get(this.projectPath) as DiscoverySession | undefined;
+            .get(this.projectPath) as Record<string, unknown> | undefined;
 
-        return result || null;
+        return result ? this.mapSessionRow(result as Record<string, unknown>) : null;
+    }
+
+    private mapSessionRow(row: Record<string, unknown>): DiscoverySession {
+        return {
+            id: row["id"] as number | undefined,
+            projectPath: row["project_path"] as string,
+            startUrl: row["start_url"] as string,
+            status: row["status"] as SessionStatus,
+            pagesDiscovered: row["pages_discovered"] as number,
+            linksFound: row["links_found"] as number,
+            startedAt: row["started_at"] as number,
+            completedAt: (row["completed_at"] as number | null) ?? null,
+            blockedAtUrl: (row["blocked_at_url"] as string | null) ?? null,
+            queueJson: (row["queue_json"] as string | null) ?? null,
+            maxPages: (row["max_pages"] as number | null) ?? null,
+            maxDepth: (row["max_depth"] as number | null) ?? null,
+        };
+    }
+
+    private mapPageRow(row: Record<string, unknown>): DiscoveredPage {
+        return {
+            id: row["id"] as number | undefined,
+            projectPath: row["project_path"] as string,
+            url: row["url"] as string,
+            normalizedUrl: row["normalized_url"] as string,
+            title: (row["title"] as string | null) ?? null,
+            snapshotJson: (row["snapshot_json"] as string | null) ?? null,
+            parentUrl: (row["parent_url"] as string | null) ?? null,
+            navigationAction: (row["navigation_action"] as string | null) ?? null,
+            depth: row["depth"] as number,
+            discoveredAt: row["discovered_at"] as number,
+            lastVisitedAt: row["last_visited_at"] as number,
+            visitCount: row["visit_count"] as number,
+        };
+    }
+
+    private mapBlockerRow(row: Record<string, unknown>): AuthBlocker {
+        return {
+            id: row["id"] as number | undefined,
+            projectPath: row["project_path"] as string,
+            url: row["url"] as string,
+            blockerType: row["blocker_type"] as AuthBlockerType,
+            detectedElements: row["detected_elements"] as string,
+            resolvedAt: (row["resolved_at"] as number | null) ?? null,
+            storageStatePath: (row["storage_state_path"] as string | null) ?? null,
+            discoveredAt: row["discovered_at"] as number,
+        };
+    }
+
+    private mapLinkRow(row: Record<string, unknown>): DiscoveredLink {
+        return {
+            id: row["id"] as number | undefined,
+            projectPath: row["project_path"] as string,
+            fromUrl: row["from_url"] as string,
+            toUrl: row["to_url"] as string,
+            selector: row["selector"] as string,
+            linkText: (row["link_text"] as string | null) ?? null,
+            elementRole: (row["element_role"] as string | null) ?? null,
+            status: row["status"] as LinkStatus,
+            errorMessage: (row["error_message"] as string | null) ?? null,
+            discoveredAt: row["discovered_at"] as number,
+            verifiedAt: (row["verified_at"] as number | null) ?? null,
+        };
+    }
+
+    /**
+     * Mark sessions stuck as "running" (from a previous crash) as "failed".
+     * Returns the number of sessions updated.
+     */
+    failStaleSessions(): number {
+        const result = this.db
+            .prepare(
+                `
+            UPDATE discovery_sessions
+            SET status = 'failed', completed_at = ?
+            WHERE project_path = ? AND status = 'running'
+        `
+            )
+            .run(Date.now(), this.projectPath);
+
+        return result.changes;
     }
 
     // ==========================================================================
     // Utility Methods
     // ==========================================================================
 
-    /**
-     * Normalize URL for consistent comparison.
-     * Removes trailing slashes, query parameters, and fragments.
-     */
     private normalizeUrl(url: string): string {
-        try {
-            const parsed = new URL(url);
-            // Remove trailing slash, query, and fragment
-            let normalized = `${parsed.origin}${parsed.pathname}`;
-            if (normalized.endsWith("/") && normalized !== `${parsed.origin}/`) {
-                normalized = normalized.slice(0, -1);
-            }
-            return normalized;
-        } catch {
-            // If URL parsing fails, return as-is
-            return url;
-        }
+        return normalizeUrl(url);
     }
 
     /**

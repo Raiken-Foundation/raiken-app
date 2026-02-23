@@ -4,7 +4,6 @@
  * Type definitions for autonomous DOM traversal and site discovery.
  */
 
-import type { Page, Response } from "playwright";
 
 /**
  * Discovered page information
@@ -84,6 +83,8 @@ export interface DiscoverySession {
     completedAt: number | null;
     blockedAtUrl: string | null;
     queueJson: string | null;
+    maxPages?: number | null;
+    maxDepth?: number | null;
 }
 
 /**
@@ -192,21 +193,3 @@ export interface AuthDetectorResult {
     blocker: AuthBlocker | null;
 }
 
-/**
- * Request handler context for Crawlee
- */
-export interface CrawlerContext {
-    page: Page;
-    request: {
-        url: string;
-        userData: {
-            depth: number;
-            parentUrl?: string;
-        };
-    };
-    enqueueLinks: (options: {
-        selector: string;
-        userData?: { depth: number; parentUrl: string };
-    }) => Promise<void>;
-    response?: Response;
-}

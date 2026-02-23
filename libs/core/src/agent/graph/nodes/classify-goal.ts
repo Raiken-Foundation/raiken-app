@@ -10,9 +10,34 @@ const classifierSchema = z.object({
     goal: z.string().nullable(),
     targetFeature: z.string().nullable(),
     targetUrl: z.string().nullable(),
-    nextTool: z.enum(["domCapture", "codeSearch", "testGen", "explain", "none"]).nullable(),
+    nextTool: z
+        .enum(["domCapture", "codeSearch", "testGen", "explain", "discoveryRead", "none"])
+        .nullable(),
     missingContext: z.array(z.string()),
 });
+
+const URL_RE = /https?:\/\/[^\s"'<>]+/i;
+const TEST_RE = /\b(?:generate|write|create|build)\b.*\b(?:tests?|e2e|spec|playwright)\b/i;
+const TEST_RE_ALT = /\b(?:tests?|e2e|spec|playwright)\b.*\b(?:for|of|on)\b/i;
+
+/**
+ * Regex-based fallback when the LLM fails to return parseable JSON.
+ * Returns null when the prompt is too ambiguous to guess.
+ */
+function heuristicClassify(userPrompt: string): AgentClassifierResult | null {
+    const looksLikeTestGen = TEST_RE.test(userPrompt) || TEST_RE_ALT.test(userPrompt);
+    if (!looksLikeTestGen) return null;
+
+    const urlMatch = userPrompt.match(URL_RE);
+    return {
+        intent: "generateTests",
+        goal: userPrompt,
+        targetFeature: null,
+        targetUrl: urlMatch?.[0] ?? null,
+        nextTool: urlMatch ? "domCapture" : "codeSearch",
+        missingContext: [],
+    };
+}
 
 const parseClassifierResult = (raw: string): AgentClassifierResult => {
     let cleaned = raw.trim();
@@ -111,6 +136,29 @@ export const createClassifyGoalNode =
                 console.warn("⚠️ Classifier parse failed with no output.");
             }
             console.warn("⚠️ Classifier error:", error instanceof Error ? error.message : error);
+
+            const fallback = heuristicClassify(state.userPrompt);
+            if (fallback) {
+                console.warn("⚠️ Using heuristic fallback classification:", fallback.intent);
+                deps.setActiveIntent?.(fallback.intent);
+                deps.setGoalState?.({
+                    goal: fallback.goal,
+                    targetFeature: fallback.targetFeature,
+                    targetUrl: fallback.targetUrl,
+                    missingContext: fallback.missingContext,
+                    nextTool: fallback.nextTool,
+                });
+                return {
+                    intent: fallback.intent,
+                    activeGoal: fallback.goal,
+                    targetFeature: fallback.targetFeature,
+                    targetUrl: fallback.targetUrl,
+                    missingContext: fallback.missingContext,
+                    nextTool: fallback.nextTool,
+                    shouldRunTests: shouldRunTests(state.userPrompt),
+                };
+            }
+
             return {
                 shouldPause: true,
                 awaitUserMessage:

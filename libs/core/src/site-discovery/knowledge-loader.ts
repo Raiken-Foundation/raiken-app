@@ -26,7 +26,7 @@ export async function loadSiteKnowledge(
 ): Promise<SiteKnowledge | null> {
     try {
         const db = new CodeGraphDB(projectPath);
-        const siteDb = new SiteKnowledgeDB((db as any).db, projectPath);
+        const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
 
         // Check if any discovery has been done
         const stats = siteDb.getStats();

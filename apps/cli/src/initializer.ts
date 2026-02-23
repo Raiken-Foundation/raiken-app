@@ -333,15 +333,24 @@ async function updateGitignore(projectPath: string): Promise<void> {
       // .gitignore doesn't exist, will create it
     }
     
-    // Check if .raiken is already in .gitignore
-    if (!gitignoreContent.includes('.raiken')) {
-      const raikenSection = '\n# Raiken local database\n.raiken/\n';
-      gitignoreContent += raikenSection;
+    const hasRaiken = gitignoreContent.includes(".raiken/");
+    const hasCrawleeStorage = gitignoreContent.includes("storage/");
+
+    if (!hasRaiken || !hasCrawleeStorage) {
+      let raikenSection = "\n# Raiken local database\n.raiken/\n";
+      if (!hasCrawleeStorage) {
+        raikenSection += "# Crawlee storage (site discovery)\nstorage/\n";
+      }
+      if (!hasRaiken) {
+        gitignoreContent += raikenSection;
+      } else if (!hasCrawleeStorage) {
+        gitignoreContent += `\n# Crawlee storage (site discovery)\nstorage/\n`;
+      }
       await fs.writeFile(gitignorePath, gitignoreContent);
-      console.log(chalk.green('✓ Updated .gitignore to exclude .raiken/'));
+      console.log(chalk.green("✓ Updated .gitignore to exclude Raiken artifacts"));
     } else {
-      console.log(chalk.gray('  .gitignore already excludes .raiken/'));
-  }
+      console.log(chalk.gray("  .gitignore already excludes Raiken artifacts"));
+    }
 }
 
 async function createTestDirectory(projectPath: string, projectInfo: ProjectInfo): Promise<void> {

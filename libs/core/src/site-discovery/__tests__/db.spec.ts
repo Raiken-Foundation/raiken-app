@@ -18,7 +18,7 @@ describe("SiteKnowledgeDB", () => {
         // Create a temporary directory for test database
         testDir = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-test-"));
         db = new CodeGraphDB(testDir);
-        siteDb = new SiteKnowledgeDB((db as any).db, testDir);
+        siteDb = new SiteKnowledgeDB(db.getRawDatabase(), testDir);
     });
 
     afterEach(() => {

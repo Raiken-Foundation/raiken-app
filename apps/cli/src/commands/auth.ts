@@ -8,7 +8,6 @@ import chalk from "chalk";
 import ora from "ora";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { chromium } from "playwright";
 import * as readline from "node:readline";
 
 interface AuthOptions {
@@ -43,6 +42,25 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             text: "Launching browser...",
             spinner: "dots",
         }).start();
+
+        // Dynamically import playwright (available via @raiken/core dependency)
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        let chromium: any;
+        try {
+            // Use require() to avoid TS module resolution at build time
+            const pw = require("playwright");
+            chromium = pw.chromium;
+        } catch {
+            try {
+                const pw = require("playwright-core");
+                chromium = pw.chromium;
+            } catch {
+                console.error(
+                    chalk.red("❌ Playwright is not installed. Run: npx playwright install")
+                );
+                process.exit(1);
+            }
+        }
 
         // Launch browser in non-headless mode
         const browser = await chromium.launch({
@@ -83,6 +101,28 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 
         // Save to file
         fs.writeFileSync(authStatePath, JSON.stringify(storageState, null, 2));
+
+        try {
+            const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
+            const db = new CodeGraphDB(projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const blockers = siteDb.getUnresolvedBlockers();
+            for (const blocker of blockers) {
+                if (blocker.id) {
+                    siteDb.markBlockerResolved(blocker.id, authStatePath);
+                }
+            }
+            if (blockers.length > 0) {
+                console.log(
+                    chalk.green(
+                        `✓ Resolved ${blockers.length} auth blocker${blockers.length === 1 ? "" : "s"}`
+                    )
+                );
+            }
+            db.close();
+        } catch {
+            // Ignore DB errors during auth flow
+        }
 
         spinner.succeed(chalk.green("Authentication state saved!"));
         console.log();

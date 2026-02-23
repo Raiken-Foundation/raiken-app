@@ -15,6 +15,7 @@ import { TestRunner, type TestRunResult } from "../testing/runner";
 import { captureDOMContext, formatDOMContext, type DOMContext } from "../browser/dom-capture";
 import { createSaveAction, createRunAction, shouldSkipHITL, type HITLAction } from "./hitl-types";
 import { BrowserSession } from "../browser/session";
+import { DiscoveryQueryService } from "../site-discovery/query-service";
 export type { HITLAction } from "./hitl-types";
 
 interface PageSnapshot {
@@ -395,6 +396,198 @@ export function createAgentTools(ctx: ToolContext) {
                     return {
                         success: false,
                         message: `Failed to get project overview: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    };
+                }
+            },
+        }),
+
+        /**
+         * Get site discovery overview from persisted discovery data.
+         */
+        getDiscoveryOverview: tool({
+            description:
+                "Get persisted site discovery overview including stats, latest session, and unresolved auth blockers.",
+            inputSchema: z.object({}),
+            execute: async (): Promise<
+                ToolResult<{
+                    stats: {
+                        pagesCount: number;
+                        linksCount: number;
+                        verifiedLinksCount: number;
+                        brokenLinksCount: number;
+                        authBlockersCount: number;
+                        unresolvedBlockersCount: number;
+                    };
+                    latestSession: {
+                        id: number | null;
+                        startUrl: string;
+                        status: string;
+                        pagesDiscovered: number;
+                        linksFound: number;
+                        startedAt: number;
+                        completedAt: number | null;
+                        blockedAtUrl: string | null;
+                        maxPages: number | null;
+                        maxDepth: number | null;
+                    } | null;
+                    unresolvedBlockers: Array<{
+                        id: number | null;
+                        url: string;
+                        blockerType: string;
+                        discoveredAt: number;
+                    }>;
+                }>
+            > => {
+                try {
+                    const discovery = new DiscoveryQueryService(projectPath);
+                    const overview = discovery.getOverview();
+                    return {
+                        success: true,
+                        data: {
+                            stats: overview.stats,
+                            latestSession: overview.latestSession
+                                ? {
+                                      id: overview.latestSession.id ?? null,
+                                      startUrl: overview.latestSession.startUrl,
+                                      status: overview.latestSession.status,
+                                      pagesDiscovered: overview.latestSession.pagesDiscovered,
+                                      linksFound: overview.latestSession.linksFound,
+                                      startedAt: overview.latestSession.startedAt,
+                                      completedAt: overview.latestSession.completedAt ?? null,
+                                      blockedAtUrl: overview.latestSession.blockedAtUrl ?? null,
+                                      maxPages: overview.latestSession.maxPages ?? null,
+                                      maxDepth: overview.latestSession.maxDepth ?? null,
+                                  }
+                                : null,
+                            unresolvedBlockers: overview.unresolvedBlockers.map((blocker) => ({
+                                id: blocker.id ?? null,
+                                url: blocker.url,
+                                blockerType: blocker.blockerType,
+                                discoveredAt: blocker.discoveredAt,
+                            })),
+                        },
+                        message:
+                            overview.stats.pagesCount > 0
+                                ? `Loaded discovery overview with ${overview.stats.pagesCount} pages`
+                                : "No discovery data found",
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: `Failed to load discovery overview: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    };
+                }
+            },
+        }),
+
+        /**
+         * List discovered pages from persisted discovery data.
+         */
+        listDiscoveredPages: tool({
+            description:
+                "List discovered pages from persisted site discovery data. Useful for chat-based review of discovered routes.",
+            inputSchema: z.object({
+                limit: z.number().optional().default(20).describe("Maximum pages to return"),
+                offset: z.number().optional().default(0).describe("Offset for pagination"),
+            }),
+            execute: async (params): Promise<
+                ToolResult<{
+                    pages: Array<{
+                        url: string;
+                        title: string | null;
+                        depth: number;
+                        visitCount: number;
+                        discoveredAt: number;
+                        lastVisitedAt: number;
+                    }>;
+                    total: number;
+                    hasMore: boolean;
+                    limit: number;
+                    offset: number;
+                }>
+            > => {
+                const { limit = 20, offset = 0 } = params as { limit?: number; offset?: number };
+                try {
+                    const discovery = new DiscoveryQueryService(projectPath);
+                    const result = discovery.listPages({ limit, offset });
+                    return {
+                        success: true,
+                        data: {
+                            pages: result.pages.map((page) => ({
+                                url: page.url,
+                                title: page.title,
+                                depth: page.depth,
+                                visitCount: page.visitCount,
+                                discoveredAt: page.discoveredAt,
+                                lastVisitedAt: page.lastVisitedAt,
+                            })),
+                            total: result.total,
+                            hasMore: result.hasMore,
+                            limit: result.limit,
+                            offset: result.offset,
+                        },
+                        message:
+                            result.total > 0
+                                ? `Returned ${result.pages.length} discovered pages (${result.total} total)`
+                                : "No discovered pages found",
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: `Failed to list discovered pages: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    };
+                }
+            },
+        }),
+
+        /**
+         * Get a persisted ARIA snapshot for a discovered page URL.
+         */
+        getDiscoveredPageSnapshot: tool({
+            description:
+                "Get the persisted discovered-page snapshot (ARIA snapshot JSON) for a specific URL.",
+            inputSchema: z.object({
+                url: z.string().url().describe("Discovered page URL"),
+            }),
+            execute: async (params): Promise<
+                ToolResult<{
+                    url: string;
+                    normalizedUrl: string;
+                    title: string | null;
+                    snapshotJson: string | null;
+                    depth: number;
+                    discoveredAt: number;
+                    lastVisitedAt: number;
+                } | null>
+            > => {
+                const { url } = params as { url: string };
+                try {
+                    const discovery = new DiscoveryQueryService(projectPath);
+                    const page = discovery.getPageSnapshot(url);
+                    if (!page) {
+                        return {
+                            success: true,
+                            data: null,
+                            message: `No discovered snapshot found for ${url}`,
+                        };
+                    }
+                    return {
+                        success: true,
+                        data: {
+                            url: page.url,
+                            normalizedUrl: page.normalizedUrl,
+                            title: page.title,
+                            snapshotJson: page.snapshotJson,
+                            depth: page.depth,
+                            discoveredAt: page.discoveredAt,
+                            lastVisitedAt: page.lastVisitedAt,
+                        },
+                        message: `Loaded discovered snapshot for ${url}`,
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: `Failed to get discovered snapshot: ${error instanceof Error ? error.message : "Unknown error"}`,
                     };
                 }
             },

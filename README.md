@@ -127,6 +127,69 @@ nx run-many -t build      # Build all projects
 
 ### Testing
 
+#### Manual Discovery Testing (Recommended)
+
+Use this runbook to manually validate discovery, auth pause/resume, and dashboard runtime behavior.
+
+Start the stack in three terminals:
+
+**Terminal 1 - CLI backend + embedded UI**
+```bash
+pnpm nx serve cli
+```
+- API/UI available at `http://localhost:7101`
+
+**Terminal 2 - Dashboard dev app**
+```bash
+pnpm nx serve dashboard
+```
+- Dashboard available at `http://localhost:4200`
+
+**Terminal 3 - Playground target app**
+```bash
+cd tools/playground
+npm run dev -- --port 5173
+```
+- Playground available at `http://localhost:5173`
+
+Quick health check:
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:7101
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4200
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173
+```
+All three should return `200`.
+
+Smoke-test sequence:
+```bash
+# From repo root
+cd tools/playground
+raiken init
+
+# Start discovery against the playground
+raiken discover http://localhost:5173 --max-pages 20 --max-depth 5
+```
+
+If discovery pauses on authentication:
+```bash
+cd tools/playground
+raiken auth --url http://localhost:5173/login
+raiken discover --continue
+```
+
+Useful verification commands:
+```bash
+cd tools/playground
+raiken discover --status
+```
+
+You can also validate runtime in the dashboard (`http://localhost:4200`) via:
+- Discovery view (Start / Continue / Clear)
+- Runtime phase and counters
+- Timeline and unresolved blocker panels
+
+Stop all servers with `Ctrl+C` in each terminal.
+
 #### Integration Test (Playground)
 ```bash
 # Build the CLI

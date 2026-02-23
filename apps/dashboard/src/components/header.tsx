@@ -41,32 +41,36 @@ export function Header({
 
       {/* Center: Status Indicators */}
       <div className="header-center">
-        <div className="status-pills">
-          {staleCount > 0 && (
-            <span className="status-pill stale">
-              <span className="status-dot" />
-              {staleCount} Stale
-            </span>
-          )}
-          {failedCount > 0 && (
-            <span className="status-pill failed">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              {failedCount} Failed
-            </span>
-          )}
+        {(staleCount > 0 || failedCount > 0) && (
+          <div className="status-pills">
+            {staleCount > 0 && (
+              <span className="status-pill stale">
+                <span className="status-dot" />
+                {staleCount} Stale
+              </span>
+            )}
+            {failedCount > 0 && (
+              <span className="status-pill failed">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                  <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {failedCount} Failed
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Right: Sync + User */}
+      <div className="header-right">
+        {onMonitorSync && (
           <button type="button" className="monitor-sync-btn" onClick={onMonitorSync}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            Monitor & Sync
+            Sync
           </button>
-        </div>
-      </div>
-
-      {/* Right: User */}
-      <div className="header-right">
+        )}
         <div className="user-menu">
           <div className="user-avatar">
             {userName.split(' ').map(n => n[0]).join('').toUpperCase()}
@@ -214,6 +218,7 @@ export function Header({
         .header-right {
           display: flex;
           align-items: center;
+          gap: 0.5rem;
         }
 
         .user-menu {

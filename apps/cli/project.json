@@ -38,7 +38,8 @@
             "options": {
                 "commands": [
                     "mkdir -p dist/apps/cli/public",
-                    "cp -r dist/apps/dashboard/* dist/apps/cli/public/"
+                    "cp -r dist/apps/dashboard/* dist/apps/cli/public/",
+                    "cp apps/cli/README.md dist/apps/cli/README.md"
                 ],
                 "parallel": false
             }
@@ -58,7 +59,7 @@
             "options": {
                 "commands": [
                     "echo '📦 Installing CLI dependencies for development...'",
-                    "cd dist/apps/cli && npm install --silent",
+                    "cd dist/apps/cli && npm install --silent --legacy-peer-deps",
                     "echo '✅ Dependencies installed!'"
                 ],
                 "parallel": false

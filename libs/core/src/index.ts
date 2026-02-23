@@ -1,16 +1,33 @@
-// Core exports
-export * from "./lib/ast-parser";
-export * from "./lib/entry-point-detector";
-export * from "./lib/code-graph";
-export * from "./lib/db";
-export * from "./lib/embeddings";
-export * from "./lib/agent";
-export * from "./lib/prompt-templates";
-// Export new XState-based orchestrator
-export { runOrchestrator, getSessionStats, clearSession, type RunOrchestratorOptions } from "./lib/orchestrator/index";
-export type { OrchestratorInput } from "./lib/orchestrator/types";
-export * from "./lib/dom-capture";
-export * from "./lib/test-interpreter";
-export * from "./lib/playwright-config-generator";
+// Core exports - organized by module
+
+// Agent module
+export * from "./agent/index";
+
+// Browser module
+export * from "./browser/index";
+
+// Analysis module
+export * from "./analysis/index";
+
+// Database module
+export * from "./database/index";
+
+// Testing module
+export * from "./testing/index";
+
+// Site Discovery module
+export * from "./site-discovery/index";
+
+// Configuration module
+export * from "./config/index";
+
+// Orchestrator
+export {
+    runOrchestrator,
+    type RunOrchestratorOptions,
+    type OrchestratorResult,
+} from "./orchestrator/index";
+
+// Types and utilities
 export * from "./utils";
 export * from "./types";

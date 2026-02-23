@@ -41,12 +41,18 @@ interface SidebarProps {
   onSendMessage?: (message: string) => void;
   onFileSelect?: (filePath: string) => void;
   activeFilePath?: string;
+  activeTab?: 'chat' | 'files';
+  collapsed?: boolean;
+  onTabChange?: (tab: 'chat' | 'files') => void;
+  initialPrompt?: string;
+  onInitialPromptConsumed?: () => void;
 }
 
-export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState<'chat' | 'files' | 'settings'>('chat');
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [inputValue, setInputValue] = useState('');
+export function Sidebar({ onSendMessage, onFileSelect, activeFilePath, activeTab: externalTab, collapsed: externalCollapsed, onTabChange, initialPrompt, onInitialPromptConsumed }: SidebarProps) {
+  const activeTab = externalTab ?? 'chat';
+  const isCollapsed = externalCollapsed ?? false;
+  void onTabChange;
+  const [inputValue, setInputValue] = useState(initialPrompt ?? '');
   const [isGenerating, setIsGenerating] = useState(false);
   const [_streamedContent, setStreamedContent] = useState('');
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
@@ -56,7 +62,27 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompletePosition, setAutocompletePosition] = useState(0);
   const [filteredFiles, setFilteredFiles] = useState<Array<{ path: string; name: string }>>([]);
+  const [pendingAutoSubmit, setPendingAutoSubmit] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+
+  useEffect(() => {
+    if (initialPrompt) {
+      setInputValue(initialPrompt);
+      onInitialPromptConsumed?.();
+      setPendingAutoSubmit(true);
+    }
+  }, [initialPrompt]);
+
+  useEffect(() => {
+    if (pendingAutoSubmit && inputValue && !isGenerating) {
+      setPendingAutoSubmit(false);
+      const timer = setTimeout(() => {
+        formRef.current?.requestSubmit();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [pendingAutoSubmit, inputValue, isGenerating]);
 
   // Load persisted chat messages
   const { data: chatData } = trpc.getChatMessages.useQuery(undefined, {
@@ -107,8 +133,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
 
   // Handle HITL (Human-in-the-Loop) button clicks
   const handleHITLAction = async (actionId: string, context: { url?: string; files?: string[] }) => {
-    console.log(`🎯 HITL Action: ${actionId}`, context);
-    
     // Send a special message that the backend will recognize
     const hitlMessage = `HITL_ACTION:${actionId}:${JSON.stringify(context)}`;
     
@@ -262,54 +286,41 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
         new Map(allFiles.map(f => [f.path, f])).values()
       );
       
-      console.log(`📂 Loaded ${uniqueFiles.length} files for autocomplete (${sourceFilesFromGraph.length} source + ${testFilesForAutocomplete.length} test)`);
       setSourceFiles(uniqueFiles);
     }
   }, [allFilesData, testFilesData]);
 
   const checkAndShowAutocomplete = (value: string, cursorPos: number) => {
-    console.log(`🔍 Autocomplete check: value="${value}", cursor=${cursorPos}, sourceFiles.length=${sourceFiles.length}`);
-    
     const textBeforeCursor = value.slice(0, cursorPos);
     const lastAtIndex = textBeforeCursor.lastIndexOf('@');
     
     if (lastAtIndex !== -1) {
-      // Check if we're within an @ mention (no space after @)
       const afterAt = textBeforeCursor.slice(lastAtIndex + 1);
       const hasSpaceAfterAt = afterAt.includes(' ');
       
-      console.log(`   @ found at index ${lastAtIndex}, afterAt="${afterAt}", hasSpace=${hasSpaceAfterAt}`);
-      
-      if (!hasSpaceAfterAt && cursorPos - lastAtIndex <= 50) { // Within 50 chars of @
+      if (!hasSpaceAfterAt && cursorPos - lastAtIndex <= 50) {
         if (sourceFiles.length === 0) {
-          console.warn('⚠️  No source files available for autocomplete');
           return;
         }
         
         if (lastAtIndex === cursorPos - 1) {
-          // Just typed @, show all files
-          console.log(`   ✓ Showing all ${sourceFiles.length} files`);
           setFilteredFiles(sourceFiles);
           setShowAutocomplete(true);
           setAutocompletePosition(0);
         } else {
-          // Typing/positioned after @, filter files
           const searchTerm = afterAt;
           const filtered = sourceFiles.filter(file => 
             file.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
             file.path.toLowerCase().includes(searchTerm.toLowerCase())
           );
-          console.log(`   ✓ Filtered to ${filtered.length} files matching "${searchTerm}"`);
           setFilteredFiles(filtered);
           setShowAutocomplete(filtered.length > 0);
           setAutocompletePosition(0);
         }
       } else {
-        console.log('   ✗ Outside @ mention range');
         setShowAutocomplete(false);
       }
     } else {
-      console.log('   ✗ No @ found');
       setShowAutocomplete(false);
     }
   };
@@ -570,11 +581,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
     setMessages(prev => [...prev, aiMessage]);
 
     try {
-      console.log('🔍 Sending request to /api/generate-test');
-      console.log('Prompt:', prompt);
-      console.log('File context:', allFileContext);
-      console.log('Conversation history:', conversationHistory.length, 'messages');
-      
       const response = await fetch('/api/generate-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -585,9 +591,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
         })
       });
       
-      console.log('📥 Response status:', response.status);
-      console.log('📥 Response headers:', response.headers);
-
       if (!response.ok) {
         throw new Error('Failed to generate test');
       }
@@ -619,8 +622,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               if (data.chunk) {
                 accumulated += data.chunk;
                 setStreamedContent(accumulated);
-                console.log('📦 Received chunk, total length:', accumulated.length);
-                
+
                 // Check for HITL marker
                 const hitlMatch = accumulated.match(/<!--HITL:(.+?)-->/);
                 let hitlData: HITLConfirmation | undefined;
@@ -645,7 +647,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               }
               
               if (data.done) {
-                console.log('✓ Test generation complete');
+                // stream complete
               }
             } catch (_parseError) {
               // Ignore JSON parse errors for incomplete chunks
@@ -674,14 +676,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
       const isCompleteTestFile = hasPlaywrightImport && hasTestStructure && hasMultipleTests && !isHITLConfirmation;
       
       if (isCompleteTestFile) {
-        console.log('✓ Detected complete test file, notifying parent');
         onSendMessage?.(accumulated);
-      } else {
-        console.log('ℹ️ Not a complete test file, skipping save dialog');
-        console.log(`  - hasPlaywrightImport: ${hasPlaywrightImport}`);
-        console.log(`  - hasTestStructure: ${hasTestStructure}`);
-        console.log(`  - hasMultipleTests: ${hasMultipleTests}`);
-        console.log(`  - isHITLConfirmation: ${isHITLConfirmation}`);
       }
     } catch (error) {
       console.error('Test generation failed:', error);
@@ -699,50 +694,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
 
   return (
     <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
-      {/* Navigation Icons */}
-      <nav className="sidebar-nav">
-        <button 
-          className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`}
-          onClick={() => { setActiveTab('chat'); if (isCollapsed) setIsCollapsed(false); }}
-        >
-          {/* Rounded rectangle chat bubble */}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <rect x="4" y="4" width="16" height="14" rx="3" />
-            <path d="M8 9h8M8 13h5" />
-          </svg>
-        </button>
-        <button 
-          className={`nav-btn ${activeTab === 'files' ? 'active' : ''}`}
-          onClick={() => { setActiveTab('files'); if (isCollapsed) setIsCollapsed(false); }}
-        >
-          {/* Folder icon */}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>
-        </button>
-        <button 
-          className={`nav-btn settings ${activeTab === 'settings' ? 'active' : ''}`}
-          onClick={() => { setActiveTab('settings'); if (isCollapsed) setIsCollapsed(false); }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
-
-        {/* Collapse Toggle */}
-        <button 
-          className="nav-btn collapse-btn"
-          onClick={() => setIsCollapsed(!isCollapsed)}
-          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d={isCollapsed ? "M9 5l7 7-7 7" : "M15 19l-7-7 7-7"} />
-          </svg>
-        </button>
-      </nav>
-
-      {/* Content Panels - Hidden when collapsed */}
       {!isCollapsed && (
         <>
           {/* Chat Panel */}
@@ -842,7 +793,7 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               </div>
 
               {/* Input */}
-              <form className="chat-input-container" onSubmit={handleSubmit}>
+              <form ref={formRef} className="chat-input-container" onSubmit={handleSubmit}>
                 {/* Autocomplete Dropdown */}
                 {showAutocomplete && (
                   <div className="autocomplete-dropdown">
@@ -902,13 +853,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
               )
           )}
 
-          {/* Settings Panel */}
-          {activeTab === 'settings' && (
-            <div className="settings-panel">
-              <span className="settings-title">Settings</span>
-              <span className="settings-subtitle">Coming soon...</span>
-            </div>
-          )}
         </>
       )}
 
@@ -917,67 +861,12 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
           display: flex;
           width: 100%;
           background: #0f0f0f;
-          border-right: 1px solid #1f1f1f;
           transition: width 0.2s ease;
         }
 
         .sidebar.collapsed {
-          width: 56px;
-        }
-
-        .sidebar.collapsed .sidebar-nav {
-          border-right: none;
-        }
-
-        .sidebar-nav {
-          display: flex;
-          flex-direction: column;
-          width: 56px;
-          padding: 0.75rem 0.5rem;
-          gap: 0.25rem;
-          border-right: 1px solid #1f1f1f;
-          flex-shrink: 0;
-        }
-
-        .nav-btn {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          width: 40px;
-          height: 40px;
-          background: transparent;
-          border: none;
-          border-radius: 4px;
-          color: #6b7280;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-
-        .nav-btn:hover {
-          background: #1f1f1f;
-          color: #9ca3af;
-        }
-
-        .nav-btn.active {
-          background: #1f1f1f;
-          color: #3b82f6;
-        }
-
-        .nav-btn.settings {
-          margin-top: auto;
-        }
-
-        .nav-btn.collapse-btn {
-          margin-top: 0.5rem;
-        }
-
-        .nav-btn.collapse-btn:hover {
-          color: #e5e7eb;
-        }
-
-        .nav-btn svg {
-          width: 1.25rem;
-          height: 1.25rem;
+          width: 0;
+          overflow: hidden;
         }
 
         .chat-panel {
@@ -989,27 +878,6 @@ export function Sidebar({ onSendMessage, onFileSelect, activeFilePath }: Sidebar
           background: linear-gradient(180deg, rgba(30, 58, 95, 0.3) 0%, rgba(15, 15, 15, 0) 50%);
           min-width: 0;
           overflow: hidden;
-        }
-
-        .settings-panel {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 0.5rem;
-          padding: 1rem;
-        }
-
-        .settings-title {
-          font-size: 0.875rem;
-          font-weight: 500;
-          color: #e5e7eb;
-        }
-
-        .settings-subtitle {
-          font-size: 0.75rem;
-          color: #6b7280;
         }
 
         .agent-header {

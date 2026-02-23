@@ -1,6 +1,6 @@
 {
     "name": "raiken",
-    "version": "0.1.1",
+    "version": "0.3.0",
     "description": "AI-powered E2E test generation, execution, and repair CLI",
     "author": "Raiken Foundation",
     "license": "MIT",
@@ -38,6 +38,7 @@
         "dotenv": "^16.0.0",
         "fastify": "^5.6.2",
         "glob": "^11.0.0",
+        "ora": "^8.2.0",
         "zod": "^4.1.13"
     }
 }

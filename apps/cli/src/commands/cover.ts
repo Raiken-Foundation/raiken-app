@@ -1,0 +1,156 @@
+/**
+ * `raiken cover <target>` — draft a Playwright test from an acceptance
+ * criterion (`AC-2`), a code symbol (`LoginForm`), or a free-text scenario.
+ *
+ * Triggered locally or by the `/raiken cover ...` GitHub workflow.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { type CoverEvent, type CoverResult, runCover } from "@raiken/core";
+import chalk from "chalk";
+
+interface CoverCommandOptions {
+    ticket?: string;
+    output?: string;
+    dir?: string;
+    dryRun?: boolean;
+    json?: boolean;
+}
+
+export async function coverCommand(target: string, options: CoverCommandOptions): Promise<void> {
+    const projectPath = process.cwd();
+
+    if (!target || !target.trim()) {
+        console.error(
+            chalk.red(
+                'Missing target. Usage: raiken cover <AC-N | symbolName | "free-text scenario">',
+            ),
+        );
+        process.exit(2);
+    }
+
+    const integrationConfig = loadIntegrationConfig(projectPath);
+    const ai = loadAiConfig(projectPath);
+
+    if (!options.dryRun && !ai.apiKey) {
+        console.warn(
+            chalk.yellow(
+                "⚠️  No AI API key found (OPENROUTER_API_KEY / raiken.config.json). " +
+                    "Falling back to scaffold mode (--dry-run).",
+            ),
+        );
+    }
+
+    if (!options.json) {
+        console.log(chalk.cyan(`\n✍️  raiken cover — drafting test for "${target}"\n`));
+    }
+
+    let result: CoverResult;
+    try {
+        result = await runCover({
+            projectPath,
+            target,
+            ticketId: options.ticket,
+            outputPath: options.output,
+            testDirectory: options.dir,
+            integrations: integrationConfig,
+            ai,
+            dryRun: options.dryRun === true,
+            onEvent: options.json ? undefined : (event) => logEvent(event),
+        });
+    } catch (err) {
+        console.error(
+            chalk.red(`\n❌ raiken cover failed: ${err instanceof Error ? err.message : err}`),
+        );
+        process.exit(2);
+    }
+
+    if (options.json) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+    }
+
+    console.log();
+    console.log(chalk.green(`✅ Wrote ${path.relative(projectPath, result.outputPath)}`));
+    if (result.usedModel) {
+        console.log(chalk.dim(`   model: ${result.usedModel}`));
+    } else {
+        console.log(chalk.dim("   mode:  scaffold (no LLM call)"));
+    }
+    if (result.ticket) {
+        console.log(chalk.dim(`   ticket: ${result.ticket.id} — ${result.ticket.title}`));
+    }
+    if (result.sourceFiles.length > 0) {
+        console.log(chalk.dim(`   context: ${result.sourceFiles.length} source file(s)`));
+    }
+    console.log();
+    console.log(
+        chalk.dim(
+            "Review the draft, replace TODOs, and run with " +
+                `${chalk.bold(`npx playwright test ${path.relative(projectPath, result.outputPath)}`)}.`,
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Event logging
+// ---------------------------------------------------------------------------
+
+function logEvent(event: CoverEvent): void {
+    switch (event.type) {
+        case "target_resolved":
+            console.log(chalk.dim(`  resolved: kind=${event.kind}`));
+            break;
+        case "ticket_loaded":
+            console.log(chalk.dim(`  ticket: ${event.ticketId} — ${event.title}`));
+            break;
+        case "symbols_resolved":
+            for (const m of event.matches) {
+                console.log(chalk.dim(`  symbol: ${m.name} — ${m.file}`));
+            }
+            break;
+        case "llm_started":
+            console.log(chalk.dim("  calling LLM…"));
+            break;
+        case "llm_finished":
+            console.log(chalk.dim(`  LLM returned ${event.bytes} bytes`));
+            break;
+        case "file_written":
+            // Final summary handles this; suppress the noisy mid-stream log.
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config loaders
+// ---------------------------------------------------------------------------
+
+function loadIntegrationConfig(projectPath: string) {
+    try {
+        const raw = JSON.parse(
+            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
+        );
+        return raw?.integrations;
+    } catch {
+        return undefined;
+    }
+}
+
+function loadAiConfig(projectPath: string) {
+    let fromFile: { apiKey?: string; model?: string; baseURL?: string } = {};
+    try {
+        const raw = JSON.parse(
+            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
+        );
+        if (raw?.ai) fromFile = raw.ai;
+    } catch {
+        // ignore
+    }
+
+    return {
+        apiKey: fromFile.apiKey || process.env.OPENROUTER_API_KEY,
+        model: fromFile.model,
+        baseURL: fromFile.baseURL,
+    };
+}

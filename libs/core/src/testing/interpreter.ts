@@ -57,113 +57,62 @@ export async function* interpretTestResults(
     apiKey: config.apiKey,
   });
 
-  // Build the interpretation prompt
   const failedTests = testResults.filter(t => t.status === 'failed');
   const passedTests = testResults.filter(t => t.status === 'passed');
-  
-  let prompt = `You are a Playwright testing expert analyzing test results. Provide clear, actionable insights.
 
-## Test Execution Summary
-- **Total Tests**: ${testResults.length}
-- **Passed**: ${passedTests.length}
-- **Failed**: ${failedTests.length}
+  let prompt = `Analyze Playwright test results. Be concise and actionable.
 
-## Test Code
+Summary: ${testResults.length} total, ${passedTests.length} passed, ${failedTests.length} failed.
+
+Test code:
 \`\`\`typescript
 ${testCode.slice(0, 4000)}
 \`\`\`
-
 `;
 
-  // Add source code context if available
   if (sourceCode) {
-    prompt += `## Source Code Being Tested
+    prompt += `\nSource under test:
 \`\`\`typescript
 ${sourceCode.slice(0, 2000)}
 \`\`\`
-
 `;
   }
 
-  // Add DOM context if available
   if (domContext) {
-    prompt += `## Live DOM Context (from ${domContext.url})
-**Page Title**: ${domContext.title}
-
-**Available Interactive Elements**:
-${domContext.interactiveElements.slice(0, 15).map(el => 
+    prompt += `\nLive DOM (${domContext.url} — "${domContext.title}")
+Interactive:
+${domContext.interactiveElements.slice(0, 15).map(el =>
   `- ${el.role || el.tagName}: "${el.name || el.text || 'unnamed'}" → ${el.suggestedSelectors[0] || 'no selector'}`
 ).join('\n')}
-
-**Form Fields**:
-${domContext.formFields.slice(0, 10).map(f => 
+Forms:
+${domContext.formFields.slice(0, 10).map(f =>
   `- ${f.name} (${f.type}): ${f.suggestedSelector}`
 ).join('\n')}
-
 `;
   }
 
-  // Add detailed failure information
   if (failedTests.length > 0) {
-    prompt += `## Failed Tests Details
-
-`;
+    prompt += `\nFailures:\n`;
     for (const test of failedTests) {
-      prompt += `### ❌ ${test.suite} > ${test.name}
-`;
+      prompt += `\n- ${test.suite} > ${test.name}\n`;
       if (test.error?.message) {
-        // Strip ANSI codes
         const cleanMessage = test.error.message.replace(/\u001b\[[0-9;]*m/g, '');
-        prompt += `**Error**: ${cleanMessage}
-
-`;
+        prompt += `  error: ${cleanMessage}\n`;
       }
       if (test.error?.snippet) {
-        prompt += `**Code Snippet**:
-\`\`\`
-${test.error.snippet}
-\`\`\`
-
-`;
+        prompt += `  snippet:\n\`\`\`\n${test.error.snippet}\n\`\`\`\n`;
       }
       if (test.error?.location) {
-        prompt += `**Location**: ${test.error.location.file.split('/').pop()}:${test.error.location.line}
-
-`;
+        prompt += `  at: ${test.error.location.file.split('/').pop()}:${test.error.location.line}\n`;
       }
     }
   }
 
-  // Instructions for the AI
-  prompt += `## Your Task
-
-Provide a comprehensive analysis with the following sections:
-
-### 1. Executive Summary
-Brief overview of test results - what passed, what failed, overall health.
-
-### 2. Failure Analysis (if any failures)
-For each failed test:
-- **Root Cause**: What specifically caused the failure
-- **Selector Issues**: Are the selectors correct based on the DOM context?
-- **Timing Issues**: Could this be a race condition or async problem?
-- **Logic Issues**: Is the test logic correct?
-
-### 3. Recommendations
-Specific, actionable fixes for each failure. Include corrected code snippets when possible.
-
-### 4. Test Quality Assessment
-- Are the tests following best practices?
-- Are selectors resilient (using role-based > test-id > CSS)?
-- Are there missing assertions?
-- Suggestions for improvement.
-
-${failedTests.length === 0 ? `
-### 5. Celebration! 🎉
-All tests passed! Highlight what's working well.
-` : ''}
-
-Be concise but thorough. Focus on actionable insights.`;
+  prompt += `
+Output (skip empty sections):
+1. Summary — overall health in 1-2 lines.
+2. Failures — for each: root cause, selector/timing/logic, then a fix (with corrected code if useful).
+3. Quality — selector resilience, missing assertions, concrete improvements.${failedTests.length === 0 ? '\n4. What is working well — short.' : ''}`;
 
   try {
     const result = await streamText({

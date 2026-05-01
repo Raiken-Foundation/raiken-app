@@ -1,265 +1,124 @@
+import { Logo } from "./logo";
+
 interface HeaderProps {
-  projectName: string;
-  staleCount?: number;
-  failedCount?: number;
-  userName?: string;
-  onMonitorSync?: () => void;
+    projectName: string;
+    staleCount?: number;
+    failedCount?: number;
 }
 
-export function Header({ 
-  projectName, 
-  staleCount = 0, 
-  failedCount = 0, 
-  userName = 'User',
-  onMonitorSync 
+export function Header({
+    projectName,
+    staleCount = 0,
+    failedCount = 0,
 }: HeaderProps) {
-  return (
-    <header className="header">
-      {/* Left: Logo & Project */}
-      <div className="header-left">
-        <div className="logo">
-          <svg className="logo-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path 
-              d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" 
-              stroke="currentColor" 
-              strokeWidth="1.5" 
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="logo-text">Raiken</span>
-        </div>
-        
-        <div className="divider" />
-        
-        <button type="button" className="project-selector">
-          <svg className="project-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>
-          <span>{projectName}</span>
-        </button>
-      </div>
+    return (
+        <header className="header">
+            <div className="header-left">
+                <span className="header-brand">
+                    <Logo size={14} />
+                    <span className="header-brand-text">raiken</span>
+                </span>
+                <span className="header-sep" aria-hidden="true">
+                    /
+                </span>
+                <span className="header-key">project</span>
+                <span className="header-val">{projectName}</span>
+            </div>
 
-      {/* Center: Status Indicators */}
-      <div className="header-center">
-        {(staleCount > 0 || failedCount > 0) && (
-          <div className="status-pills">
-            {staleCount > 0 && (
-              <span className="status-pill stale">
-                <span className="status-dot" />
-                {staleCount} Stale
-              </span>
-            )}
-            {failedCount > 0 && (
-              <span className="status-pill failed">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                {failedCount} Failed
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+            <div className="header-center">
+                {staleCount > 0 && (
+                    <span className="header-stat header-stat--warn" title={`${staleCount} stale`}>
+                        <span className="q-dot q-dot--warn" />
+                        <span className="header-stat-val">{staleCount}</span>
+                        <span className="header-stat-label">stale</span>
+                    </span>
+                )}
+                {failedCount > 0 && (
+                    <span className="header-stat header-stat--fail" title={`${failedCount} failed`}>
+                        <span className="q-dot q-dot--fail" />
+                        <span className="header-stat-val">{failedCount}</span>
+                        <span className="header-stat-label">failed</span>
+                    </span>
+                )}
+                {staleCount === 0 && failedCount === 0 && (
+                    <span className="header-stat header-stat--ok">
+                        <span className="q-dot q-dot--ok" />
+                        <span className="header-stat-label">clean</span>
+                    </span>
+                )}
+            </div>
 
-      {/* Right: Sync + User */}
-      <div className="header-right">
-        {onMonitorSync && (
-          <button type="button" className="monitor-sync-btn" onClick={onMonitorSync}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            Sync
-          </button>
-        )}
-        <div className="user-menu">
-          <div className="user-avatar">
-            {userName.split(' ').map(n => n[0]).join('').toUpperCase()}
-          </div>
-          <span className="user-name">{userName}</span>
-          <svg className="dropdown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path d="M19 9l-7 7-7-7" />
-          </svg>
-        </div>
-      </div>
-
-      <style>{`
-        .header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          height: 56px;
-          padding: 0 1rem;
-          background: #0f0f0f;
-          border-bottom: 1px solid #1f1f1f;
-        }
-
-        .header-left {
-          display: flex;
-          align-items: center;
-          gap: 1rem;
-        }
-
-        .logo {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-        }
-
-        .logo-icon {
-          width: 1.5rem;
-          height: 1.5rem;
-          color: #3b82f6;
-        }
-
-        .logo-text {
-          font-size: 1.125rem;
-          font-weight: 600;
-          color: #ffffff;
-        }
-
-        .divider {
-          width: 1px;
-          height: 24px;
-          background: #2a2a2a;
-        }
-
-        .project-selector {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.375rem 0.75rem;
-          background: transparent;
-          border: none;
-          color: #9ca3af;
-          font-size: 0.875rem;
-          cursor: pointer;
-          border-radius: 0.375rem;
-          transition: all 0.15s;
-        }
-
-        .project-selector:hover {
-          background: #1f1f1f;
-          color: #e5e7eb;
-        }
-
-        .project-icon {
-          width: 1rem;
-          height: 1rem;
-        }
-
-        .header-center {
-          display: flex;
-          align-items: center;
-        }
-
-        .status-pills {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          padding: 0.375rem 0.5rem;
-          background: #18181b;
-          border-radius: 8px;
-        }
-
-        .status-pill {
-          display: flex;
-          align-items: center;
-          gap: 0.25rem;
-          padding: 0.25rem 0.5rem;
-          font-size: 0.6875rem;
-          font-weight: 500;
-          border-radius: 6px;
-        }
-
-        .status-pill.stale {
-          color: #fbbf24;
-        }
-
-        .status-pill.stale .status-dot {
-          width: 5px;
-          height: 5px;
-          background: #fbbf24;
-          border-radius: 50%;
-        }
-
-        .status-pill.failed {
-          color: #ef4444;
-        }
-
-        .status-pill.failed svg {
-          width: 0.75rem;
-          height: 0.75rem;
-        }
-
-        .monitor-sync-btn {
-          display: flex;
-          align-items: center;
-          gap: 0.25rem;
-          padding: 0.25rem 0.625rem;
-          background: rgba(34, 197, 94, 0.1);
-          border: 1px solid #22c55e;
-          border-radius: 6px;
-          color: #4ade80;
-          font-size: 0.6875rem;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-
-        .monitor-sync-btn:hover {
-          background: rgba(34, 197, 94, 0.2);
-        }
-
-        .monitor-sync-btn svg {
-          width: 0.75rem;
-          height: 0.75rem;
-        }
-
-        .header-right {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-        }
-
-        .user-menu {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.25rem 0.5rem;
-          cursor: pointer;
-          border-radius: 0.375rem;
-          transition: all 0.15s;
-        }
-
-        .user-menu:hover {
-          background: #1f1f1f;
-        }
-
-        .user-avatar {
-          width: 2rem;
-          height: 2rem;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
-          border-radius: 50%;
-          font-size: 0.75rem;
-          font-weight: 600;
-          color: white;
-        }
-
-        .user-name {
-          font-size: 0.875rem;
-          color: #e5e7eb;
-        }
-
-        .dropdown-icon {
-          width: 1rem;
-          height: 1rem;
-          color: #6b7280;
-        }
-      `}</style>
-    </header>
-  );
+            <style>{`
+                .header {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 1rem;
+                    height: 28px;
+                    padding: 0 0.875rem;
+                    background: var(--bg-bar);
+                    border-bottom: 1px solid var(--hair);
+                    font-family: var(--mono);
+                    font-size: 11px;
+                    color: var(--ink-dim);
+                    flex-shrink: 0;
+                }
+                .header-left,
+                .header-center {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                    min-width: 0;
+                }
+                .header-center {
+                    flex: 1;
+                    justify-content: flex-end;
+                    gap: 0.875rem;
+                }
+                .header-brand {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 0.4375rem;
+                    color: var(--accent);
+                }
+                .header-brand-text {
+                    color: var(--accent);
+                }
+                .header-sep,
+                .header-key {
+                    color: var(--ink-faint);
+                }
+                .header-val {
+                    color: var(--ink);
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    max-width: 240px;
+                }
+                .header-stat {
+                    display: inline-flex;
+                    align-items: baseline;
+                    gap: 0.375rem;
+                    font-variant-numeric: tabular-nums;
+                }
+                .header-stat-val {
+                    color: var(--ink);
+                    font-weight: 500;
+                }
+                .header-stat-label {
+                    color: var(--ink-faint);
+                    text-transform: lowercase;
+                }
+                .header-stat--warn .header-stat-val {
+                    color: var(--warn);
+                }
+                .header-stat--fail .header-stat-val {
+                    color: var(--fail);
+                }
+                .header-stat--ok .header-stat-label {
+                    color: var(--pass);
+                }
+            `}</style>
+        </header>
+    );
 }
-

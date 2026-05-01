@@ -6,6 +6,23 @@ import type { AgentNodeDeps } from "./types";
 import { ProjectContext } from "../../../analysis/project-context";
 import { normalizeSelector, parseSummaryElements } from "../utils";
 
+const PAGE_SUMMARIES_MAX_CHARS = 3000;
+
+function truncatePageSummaries(summaries: string[]): string {
+    const lines: string[] = [];
+    let totalChars = 0;
+    for (let i = 0; i < summaries.length; i++) {
+        const entry = `--- Page ${i + 1} ---\n${summaries[i]}`;
+        if (totalChars + entry.length > PAGE_SUMMARIES_MAX_CHARS) {
+            lines.push(`... and ${summaries.length - i} more pages (truncated)`);
+            break;
+        }
+        lines.push(entry);
+        totalChars += entry.length;
+    }
+    return lines.join("\n\n");
+}
+
 export const createGatherContextNode =
     ({ gatherContext, projectPath }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
@@ -29,6 +46,12 @@ export const createGenerateTestsNode =
 
         const memoryContext = getMemoryContext();
         let systemPrompt = buildSystemPrompt(context, state.userPrompt, "golden-v1", memoryContext);
+
+        if (state.pageSummaries && state.pageSummaries.length > 1) {
+            const truncated = truncatePageSummaries(state.pageSummaries);
+            systemPrompt = `${systemPrompt}\n\n[PAGES EXPLORED]\n${truncated}`;
+        }
+
         if (state.domSummary) {
             systemPrompt = `${systemPrompt}\n\n${state.domSummary}`;
         }
@@ -40,21 +63,32 @@ export const createGenerateTestsNode =
             systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
         }
 
-        const response = await model.invoke([
-            new SystemMessage(systemPrompt),
-            new HumanMessage(state.userPrompt),
-        ]);
-        const content = Array.isArray(response.content)
-            ? response.content
-                  .map((part) => (typeof part === "string" ? part : part?.text || ""))
-                  .join("")
-            : response.content;
+        try {
+            const response = await model.invoke([
+                new SystemMessage(systemPrompt),
+                new HumanMessage(state.userPrompt),
+            ]);
+            const content = Array.isArray(response.content)
+                ? response.content
+                      .map((part) => (typeof part === "string" ? part : part?.text || ""))
+                      .join("")
+                : response.content;
 
-        return {
-            testDraft: content || "",
-            context,
-            testDirectory: context.testDirectory,
-        };
+            return {
+                testDraft: content || "",
+                context,
+                testDirectory: context.testDirectory,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error("Test generation LLM call failed:", message);
+            return {
+                testDraft: "",
+                summary: `Test generation failed: ${message}. Check your API key and network connection.`,
+                context,
+                testDirectory: context.testDirectory,
+            };
+        }
     };
 
 export const createAnswerQuestionsNode =
@@ -227,11 +261,18 @@ export const createAnswerQuestionsNode =
         const memoryContext = getMemoryContext();
         let systemPrompt = buildExplorationPrompt(context, state.userPrompt, memoryContext, state.intent, {
             activeGoal: state.activeGoal,
+
             targetFeature: state.targetFeature,
             targetUrl: state.targetUrl,
             missingContext: state.missingContext,
             nextTool: state.nextTool,
         });
+
+        if (state.pageSummaries && state.pageSummaries.length > 1) {
+            const truncated = truncatePageSummaries(state.pageSummaries);
+            systemPrompt = `${systemPrompt}\n\n[PAGES EXPLORED]\n${truncated}`;
+        }
+
         if (state.domSummary) {
             systemPrompt = `${systemPrompt}\n\n[DOM SUMMARY]\n${state.domSummary}`;
         }
@@ -399,11 +440,12 @@ export const createAnswerQuestionsNode =
                 const elements = parseSummaryElements(state.domSummary);
                 const domSelectors = new Set<string>();
                 for (const el of elements) {
-                    if (!el.selector) continue;
-                    domSelectors.add(el.selector);
-                    const normalized = normalizeSelector(el.selector);
-                    if (normalized) {
-                        domSelectors.add(normalized);
+                    for (const sel of el.selectors) {
+                        domSelectors.add(sel);
+                        const normalized = normalizeSelector(sel);
+                        if (normalized) {
+                            domSelectors.add(normalized);
+                        }
                     }
                 }
                 if (domSelectors.size > 0) {

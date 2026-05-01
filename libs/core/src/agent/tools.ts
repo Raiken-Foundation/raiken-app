@@ -12,11 +12,48 @@ import * as path from "node:path";
 import { ProjectContext } from "../analysis/project-context";
 import { AgentMemory } from "./memory";
 import { TestRunner, type TestRunResult } from "../testing/runner";
-import { captureDOMContext, formatDOMContext, type DOMContext } from "../browser/dom-capture";
+import { formatDOMContext, type DOMContext } from "../browser/dom-capture";
 import { createSaveAction, createRunAction, shouldSkipHITL, type HITLAction } from "./hitl-types";
 import { BrowserSession } from "../browser/session";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
+import { CodeGraphDB } from "../database/db";
+import { SiteKnowledgeDB } from "../site-discovery/db";
+import * as fsSync from "node:fs";
 export type { HITLAction } from "./hitl-types";
+
+/**
+ * Ensure a relative file path stays within the project root.
+ * Throws if the resolved path escapes the project directory.
+ */
+function safePath(projectPath: string, filePath: string): string {
+    const resolved = path.resolve(projectPath, filePath);
+    const root = path.resolve(projectPath);
+    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+        throw new Error(`Path traversal denied: ${filePath}`);
+    }
+    return resolved;
+}
+
+/**
+ * Resolve auth storage state path for the browser session.
+ * Checks raiken.config.json first, then .raiken/auth-state.json.
+ */
+function resolveAuthStatePath(projectPath: string): string | undefined {
+    try {
+        const configPath = path.join(projectPath, "raiken.config.json");
+        const raw = fsSync.readFileSync(configPath, "utf-8");
+        const config = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
+        if (config.auth?.storageStatePath) {
+            const resolved = safePath(projectPath, config.auth.storageStatePath);
+            if (fsSync.existsSync(resolved)) return resolved;
+        }
+    } catch {
+        // Config missing, invalid, or path traversal denied
+    }
+    const fallback = path.join(projectPath, ".raiken", "auth-state.json");
+    if (fsSync.existsSync(fallback)) return fallback;
+    return undefined;
+}
 
 interface PageSnapshot {
     url: string;
@@ -37,11 +74,157 @@ function buildPageSnapshot(domContext: DOMContext): PageSnapshot {
     };
 }
 
+/**
+ * Get a BrowserSession pre-bound to the project's persistent selector memory
+ * so every click/fill/hover records its outcome in `selector_history`.
+ *
+ * Use this everywhere instead of `BrowserSession.getInstance(projectPath)`
+ * so the compounding selector value actually accrues.
+ */
+function getBoundBrowserSession(projectPath: string): BrowserSession {
+    const session = BrowserSession.getInstance(projectPath);
+    const memory = AgentMemory.getInstance(projectPath);
+    session.setSelectorMemory(memory.asSelectorMemory());
+    return session;
+}
+
 function formatToolError<T = unknown>(context: string, error: unknown): ToolResult<T> {
     return {
         success: false,
         message: `${context}: ${error instanceof Error ? error.message : "Unknown error"}`,
     };
+}
+
+// Lazy shared DB connection for site knowledge persistence during a tools session.
+// Bounded to MAX_SITE_DB_ENTRIES entries; evicts least-recently-used when full.
+const MAX_SITE_DB_ENTRIES = 5;
+const siteDbCache = new Map<string, { db: CodeGraphDB; siteDb: SiteKnowledgeDB; lastUsed: number }>();
+
+function getSiteDb(projectPath: string): { db: CodeGraphDB; siteDb: SiteKnowledgeDB } {
+    const cached = siteDbCache.get(projectPath);
+    if (cached) {
+        cached.lastUsed = Date.now();
+        return cached;
+    }
+
+    // Evict oldest entry if cache is full
+    if (siteDbCache.size >= MAX_SITE_DB_ENTRIES) {
+        let oldestKey: string | null = null;
+        let oldestTime = Infinity;
+        for (const [key, entry] of siteDbCache) {
+            if (entry.lastUsed < oldestTime) {
+                oldestTime = entry.lastUsed;
+                oldestKey = key;
+            }
+        }
+        if (oldestKey) {
+            const evicted = siteDbCache.get(oldestKey);
+            siteDbCache.delete(oldestKey);
+            try { evicted?.db.close(); } catch { /* ignore */ }
+        }
+    }
+
+    const db = new CodeGraphDB(projectPath);
+    const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+    siteDbCache.set(projectPath, { db, siteDb, lastUsed: Date.now() });
+    return { db, siteDb };
+}
+
+export function closeSiteDbCache(): void {
+    for (const [, entry] of siteDbCache) {
+        try { entry.db.close(); } catch { /* ignore */ }
+    }
+    siteDbCache.clear();
+}
+
+// Auto-cleanup on process exit
+process.once("SIGINT", closeSiteDbCache);
+process.once("SIGTERM", closeSiteDbCache);
+process.once("beforeExit", closeSiteDbCache);
+
+function persistPageDiscovery(projectPath: string, snapshot: PageSnapshot, parentUrl?: string): void {
+    try {
+        const { siteDb } = getSiteDb(projectPath);
+        const now = Date.now();
+        const existing = siteDb.getPage(snapshot.url);
+
+        if (existing) {
+            siteDb.updatePageVisit(snapshot.url);
+            return;
+        }
+
+        // Compute depth from parent when available. Fresh navigations (no
+        // parent) are treated as depth 0 roots. Parent lookup failure falls
+        // back to 0 so we never block persistence on a depth read.
+        let depth = 0;
+        if (parentUrl) {
+            try {
+                const parent = siteDb.getPage(parentUrl);
+                if (parent && typeof parent.depth === "number") {
+                    depth = parent.depth + 1;
+                }
+            } catch {
+                // Parent not in DB yet; treat as root.
+            }
+        }
+
+        siteDb.savePage({
+            projectPath,
+            url: snapshot.url,
+            normalizedUrl: snapshot.url,
+            title: snapshot.title,
+            snapshotJson: snapshot.summary,
+            parentUrl: parentUrl ?? null,
+            navigationAction: null,
+            depth,
+            discoveredAt: now,
+            lastVisitedAt: now,
+            visitCount: 1,
+        });
+    } catch {
+        // Non-critical: don't break the agent if persistence fails
+    }
+}
+
+function persistLinksDiscovery(
+    projectPath: string,
+    fromUrl: string,
+    links: Array<{ text: string; href: string; suggestedSelectors?: string[] }>
+): void {
+    try {
+        const { siteDb } = getSiteDb(projectPath);
+        const now = Date.now();
+
+        for (const link of links) {
+            // Prefer the first DOM-derived selector (built from observed
+            // attributes: testid, role+name, aria-label, id). Only fall back
+            // to href-attribute CSS when the page element genuinely had no
+            // other signal. Never invent one.
+            const suggested = link.suggestedSelectors ?? [];
+            const selector = suggested.find((s) => s && s.length > 0) ?? null;
+
+            if (!selector) {
+                // No DOM-derived selector available; skip rather than
+                // persist a brittle fabricated one.
+                continue;
+            }
+
+            siteDb.saveLink({
+                projectPath,
+                fromUrl,
+                toUrl: link.href,
+                selector,
+                linkText: link.text || null,
+                elementRole: "link",
+                status: "pending",
+                errorMessage: null,
+                discoveredAt: now,
+                verifiedAt: null,
+            });
+        }
+    } catch {
+        // Non-critical
+    }
 }
 
 /**
@@ -134,7 +317,7 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<{ content: string; lines: number }>> => {
                 const { filePath } = params as { filePath: string };
                 try {
-                    const fullPath = path.join(projectPath, filePath);
+                    const fullPath = safePath(projectPath, filePath);
                     const content = await fs.readFile(fullPath, "utf-8");
                     const lines = content.split("\n").length;
                     return {
@@ -162,7 +345,7 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<string[]>> => {
                 const { dirPath } = params as { dirPath: string };
                 try {
-                    const fullPath = path.join(projectPath, dirPath);
+                    const fullPath = safePath(projectPath, dirPath);
                     const entries = await fs.readdir(fullPath, { withFileTypes: true });
                     const files = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
                     return {
@@ -191,18 +374,13 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<{ summary: string; elementCount: number; formCount: number }>> => {
                 const { url } = params as { url: string };
                 try {
-                    // Check for auth config
-                    let storageStatePath: string | undefined;
-                    try {
-                        const configPath = path.join(projectPath, "raiken.config.json");
-                        const configContent = await fs.readFile(configPath, "utf-8");
-                        const config = JSON.parse(configContent);
-                        storageStatePath = config.auth?.storageStatePath;
-                    } catch {
-                        // Config not found
+                    const session = getBoundBrowserSession(projectPath);
+                    if (!session.isActive()) {
+                        const storageStatePath = resolveAuthStatePath(projectPath);
+                        await session.start({ headless: true, storageStatePath });
                     }
 
-                    const domContext = await captureDOMContext(url, { storageStatePath });
+                    const domContext = await session.navigate(url);
                     const summary = formatDOMContext(domContext);
 
                     return {
@@ -243,7 +421,7 @@ export function createAgentTools(ctx: ToolContext) {
                 if (shouldSkipHITL("save", autonomy)) {
                     // Auto-save enabled - save immediately
                     try {
-                        const fullPath = path.join(projectPath, filePath);
+                        const fullPath = safePath(projectPath, filePath);
                         // Ensure directory exists
                         await fs.mkdir(path.dirname(fullPath), { recursive: true });
                         await fs.writeFile(fullPath, content, "utf-8");
@@ -462,7 +640,8 @@ export function createAgentTools(ctx: ToolContext) {
                             unresolvedBlockers: overview.unresolvedBlockers.map((blocker) => ({
                                 id: blocker.id ?? null,
                                 url: blocker.url,
-                                blockerType: blocker.blockerType,
+                                blockerType:
+                                    blocker.blockerType ?? blocker.category ?? "unknown",
                                 discoveredAt: blocker.discoveredAt,
                             })),
                         },
@@ -608,19 +787,8 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<{ active: boolean }>> => {
                 const { headless = false } = params as { headless?: boolean };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
-                    
-                    // Load auth state path from config if exists
-                    let storageStatePath: string | undefined;
-                    try {
-                        const configPath = path.join(projectPath, "raiken.config.json");
-                        const configContent = await fs.readFile(configPath, "utf-8");
-                        const config = JSON.parse(configContent);
-                        storageStatePath = config.auth?.storageStatePath;
-                    } catch {
-                        // Config not found
-                    }
-                    
+                    const session = getBoundBrowserSession(projectPath);
+                    const storageStatePath = resolveAuthStatePath(projectPath);
                     await session.start({ headless, storageStatePath });
                     return {
                         success: true,
@@ -644,7 +812,7 @@ export function createAgentTools(ctx: ToolContext) {
             inputSchema: z.object({}),
             execute: async (): Promise<ToolResult<{ closed: boolean }>> => {
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.close();
                     return {
                         success: true,
@@ -671,14 +839,18 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<PageSnapshot>> => {
                 const { url } = params as { url: string };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
-                        // Auto-start browser in visible mode for better debugging
-                        await session.start({ headless: false });
+                        const storageStatePath = resolveAuthStatePath(projectPath);
+                        await session.start({ headless: false, storageStatePath });
                     }
-                    
+
+                    let previousUrl: string | undefined;
+                    try { previousUrl = session.getCurrentUrl(); } catch { /* browser just started */ }
                     const domContext = await session.navigate(url);
                     const snapshot = buildPageSnapshot(domContext);
+
+                    persistPageDiscovery(projectPath, snapshot, previousUrl ?? undefined);
 
                     return {
                         success: true,
@@ -695,19 +867,19 @@ export function createAgentTools(ctx: ToolContext) {
          * Click an element on the page
          */
         clickElement: tool({
-            description: "Click an element on the page using a selector.",
+            description: "Click an element on the page using a selector or array of selectors.",
             inputSchema: z.object({
-                selector: z.string().describe("CSS selector or Playwright selector (e.g., 'button', '#submit', '[data-testid=\"login\"]')"),
+                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of DOM-derived selectors to try"),
             }),
             execute: async (params): Promise<ToolResult<{ clicked: boolean }>> => {
-                const { selector } = params as { selector: string };
+                const { selector } = params as { selector: string | string[] };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.click(selector);
                     return {
                         success: true,
                         data: { clicked: true },
-                        message: `Clicked: ${selector}`,
+                        message: `Clicked: ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
                     return {
@@ -724,18 +896,18 @@ export function createAgentTools(ctx: ToolContext) {
         fillInput: tool({
             description: "Fill an input field with text (clears existing value first).",
             inputSchema: z.object({
-                selector: z.string().describe("CSS selector for the input field"),
+                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of DOM-derived selectors to try"),
                 value: z.string().describe("Value to fill"),
             }),
             execute: async (params): Promise<ToolResult<{ filled: boolean }>> => {
-                const { selector, value } = params as { selector: string; value: string };
+                const { selector, value } = params as { selector: string | string[]; value: string };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.fill(selector, value);
                     return {
                         success: true,
                         data: { filled: true },
-                        message: `Filled ${selector} with value`,
+                        message: `Filled ${Array.isArray(selector) ? selector[0] : selector} with value`,
                     };
                 } catch (error) {
                     return {
@@ -757,7 +929,7 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<{ pressed: boolean }>> => {
                 const { key } = params as { key: string };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.press(key);
                     return {
                         success: true,
@@ -781,9 +953,10 @@ export function createAgentTools(ctx: ToolContext) {
             inputSchema: z.object({}),
             execute: async (): Promise<ToolResult<PageSnapshot>> => {
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
-                        await session.start({ headless: false });
+                        const storageStatePath = resolveAuthStatePath(projectPath);
+                        await session.start({ headless: false, storageStatePath });
                     }
                     const domContext = await session.captureCurrentPage();
                     const snapshot = buildPageSnapshot(domContext);
@@ -805,18 +978,18 @@ export function createAgentTools(ctx: ToolContext) {
         waitForElement: tool({
             description: "Wait for an element to appear on the page.",
             inputSchema: z.object({
-                selector: z.string().describe("CSS selector to wait for"),
+                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors to wait for"),
                 timeout: z.number().optional().default(5000).describe("Timeout in milliseconds"),
             }),
             execute: async (params): Promise<ToolResult<{ found: boolean }>> => {
-                const { selector, timeout } = params as { selector: string; timeout?: number };
+                const { selector, timeout } = params as { selector: string | string[]; timeout?: number };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.waitForSelector(selector, timeout);
                     return {
                         success: true,
                         data: { found: true },
-                        message: `Element found: ${selector}`,
+                        message: `Element found: ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
                     return {
@@ -833,18 +1006,18 @@ export function createAgentTools(ctx: ToolContext) {
         selectOption: tool({
             description: "Select an option from a dropdown/select element.",
             inputSchema: z.object({
-                selector: z.string().describe("CSS selector for the select element"),
+                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors for the select element"),
                 value: z.string().describe("Option value to select"),
             }),
             execute: async (params): Promise<ToolResult<{ selected: boolean }>> => {
-                const { selector, value } = params as { selector: string; value: string };
+                const { selector, value } = params as { selector: string | string[]; value: string };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     await session.selectOption(selector, value);
                     return {
                         success: true,
                         data: { selected: true },
-                        message: `Selected ${value} from ${selector}`,
+                        message: `Selected ${value} from ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
                     return {
@@ -861,13 +1034,13 @@ export function createAgentTools(ctx: ToolContext) {
         toggleCheckbox: tool({
             description: "Check or uncheck a checkbox.",
             inputSchema: z.object({
-                selector: z.string().describe("CSS selector for the checkbox"),
+                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors for the checkbox"),
                 checked: z.boolean().describe("True to check, false to uncheck"),
             }),
             execute: async (params): Promise<ToolResult<{ toggled: boolean }>> => {
-                const { selector, checked } = params as { selector: string; checked: boolean };
+                const { selector, checked } = params as { selector: string | string[]; checked: boolean };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     if (checked) {
                         await session.check(selector);
                     } else {
@@ -876,7 +1049,7 @@ export function createAgentTools(ctx: ToolContext) {
                     return {
                         success: true,
                         data: { toggled: true },
-                        message: `Checkbox ${checked ? "checked" : "unchecked"}: ${selector}`,
+                        message: `Checkbox ${checked ? "checked" : "unchecked"}: ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
                     return {
@@ -895,7 +1068,7 @@ export function createAgentTools(ctx: ToolContext) {
             inputSchema: z.object({}),
             execute: async (): Promise<ToolResult<{ url: string }>> => {
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     const url = session.getCurrentUrl();
                     return {
                         success: true,
@@ -912,6 +1085,33 @@ export function createAgentTools(ctx: ToolContext) {
         }),
 
         /**
+         * Save browser auth state for future sessions
+         */
+        saveAuthState: tool({
+            description: "Save the current browser authentication state (cookies, localStorage) so future sessions start already logged in. Call this after the user has manually logged in.",
+            inputSchema: z.object({}),
+            execute: async (): Promise<ToolResult<{ saved: boolean; path: string }>> => {
+                try {
+                    const session = getBoundBrowserSession(projectPath);
+                    const fs = await import("node:fs");
+                    const authDir = path.join(projectPath, ".raiken");
+                    if (!fs.existsSync(authDir)) {
+                        fs.mkdirSync(authDir, { recursive: true });
+                    }
+                    const authPath = path.join(authDir, "auth-state.json");
+                    await session.saveAuthState(authPath);
+                    return {
+                        success: true,
+                        data: { saved: true, path: authPath },
+                        message: `Auth state saved. Future sessions will start authenticated.`,
+                    };
+                } catch (error) {
+                    return formatToolError("Failed to save auth state", error);
+                }
+            },
+        }),
+
+        /**
          * Discover all links on the current page (lightweight, for exploration)
          */
         discoverLinks: tool({
@@ -922,20 +1122,30 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (params): Promise<ToolResult<{ links: Array<{ text: string; href: string }>; totalFound: number }>> => {
                 const { includeExternal } = params as { includeExternal?: boolean };
                 try {
-                    const session = BrowserSession.getInstance(projectPath);
+                    const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
-                        await session.start({ headless: false });
+                        const storageStatePath = resolveAuthStatePath(projectPath);
+                        await session.start({ headless: false, storageStatePath });
                     }
                     const allLinks = await session.discoverLinks();
                     
                     const links = includeExternal 
                         ? allLinks 
                         : allLinks.filter(l => !l.isExternal);
-                    
+
+                    const currentUrl = session.getCurrentUrl() ?? "";
+                    const persisted = links.map(l => ({
+                        text: l.text,
+                        href: l.href,
+                        suggestedSelectors: l.suggestedSelectors,
+                    }));
+                    persistLinksDiscovery(projectPath, currentUrl, persisted);
+                    const mapped = links.map((l) => ({ text: l.text, href: l.href }));
+
                     return {
                         success: true,
                         data: {
-                            links: links.map(l => ({ text: l.text, href: l.href })),
+                            links: mapped,
                             totalFound: links.length,
                         },
                         message: `Found ${links.length} links on page`,

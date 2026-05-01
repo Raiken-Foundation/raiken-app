@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { AuthProvider } from "./contexts/AuthContext";
+import { ToastProvider } from "./contexts/ToastContext";
 import "./styles.css";
 
 const root = document.getElementById("root");
@@ -13,7 +15,11 @@ if (!root) {
 ReactDOM.createRoot(root).render(
     <React.StrictMode>
         <BrowserRouter>
-            <App />
+            <AuthProvider>
+                <ToastProvider>
+                    <App />
+                </ToastProvider>
+            </AuthProvider>
         </BrowserRouter>
-    </React.StrictMode>
+    </React.StrictMode>,
 );

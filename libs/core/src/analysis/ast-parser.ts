@@ -50,14 +50,8 @@ function getParserPlugins(filename: string): ParserPlugin[] {
     plugins.push('typescript');
   }
 
-  // Add JSX plugin for JSX/TSX files
-  if (isJsxFile(filename)) {
-    plugins.push('jsx');
-  } else {
-    // For non-JSX files, we still add JSX support as many JS files use it
-    // without the explicit extension
-    plugins.push('jsx');
-  }
+  // Always add JSX support - many JS files use JSX without the explicit extension
+  plugins.push('jsx');
 
   return plugins;
 }
@@ -121,7 +115,7 @@ export function parseSourceFile(code: string, filename = 'unknown.js'): import('
           // Check both parent and grandparent for export
           // VariableDeclarator → VariableDeclaration → ExportNamedDeclaration
           const isExported = isExportedNode(path.parentPath) || 
-                           isExportedNode(path.parentPath.parentPath);
+                           (path.parentPath?.parentPath ? isExportedNode(path.parentPath.parentPath) : false);
           
           result.functions.push({
             name: node.id.name,
@@ -444,7 +438,7 @@ export function fullAstToSearchableText(ast: unknown, filePath: string, sourceCo
           (t.isArrowFunctionExpression(node.init) || t.isFunctionExpression(node.init))) {
         const async = node.init.async ? 'async ' : '';
         const params = node.init.params.map(p => getParamName(p)).join(', ');
-        const exported = isExportedNode(path.parentPath) || isExportedNode(path.parentPath.parentPath) ? 'export ' : '';
+        const exported = isExportedNode(path.parentPath) || (path.parentPath?.parentPath ? isExportedNode(path.parentPath.parentPath) : false) ? 'export ' : '';
         
         lines.push(`${exported}${async}const ${node.id.name} = (${params}) => {...}`);
         lines.push('');

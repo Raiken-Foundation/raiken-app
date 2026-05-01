@@ -11,6 +11,7 @@ import {
 } from "./nodes/interruptions";
 import { createAnswerQuestionsNode, createGatherContextNode, createGenerateTestsNode } from "./nodes/context";
 import { createHitlRunNode, createHitlSaveNode } from "./nodes/hitl";
+import { createRepairNode, shouldRepair } from "./nodes/repair";
 import { createSummarizeNode } from "./nodes/summarize";
 
 export function createAgentGraph(deps: AgentNodeDeps) {
@@ -27,6 +28,7 @@ export function createAgentGraph(deps: AgentNodeDeps) {
         .addNode("generateTests", createGenerateTestsNode(deps))
         .addNode("hitlSave", createHitlSaveNode(deps))
         .addNode("hitlRun", createHitlRunNode(deps))
+        .addNode("repair", createRepairNode(deps))
         .addNode("summarize", createSummarizeNode())
         .addEdge(START, "classifyGoal")
         .addConditionalEdges(
@@ -61,10 +63,27 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             },
             ["resolveInterruption", "awaitUser", "explore"]
         )
-        .addEdge("resolveInterruption", "captureAfterResolve")
+        .addConditionalEdges(
+            "resolveInterruption",
+            (state: GraphStateType) => {
+                if (state.shouldPause || state.awaitUserMessage) return "awaitUser";
+                return "captureAfterResolve";
+            },
+            ["awaitUser", "captureAfterResolve"]
+        )
         .addEdge("captureAfterResolve", "explore")
         .addEdge("awaitUser", END)
-        .addEdge("explore", "gatherContext")
+        .addConditionalEdges(
+            "explore",
+            (state: GraphStateType) => {
+                if (state.interruption) {
+                    if (state.interruption.requiresUser) return "awaitUser";
+                    return "resolveInterruption";
+                }
+                return "gatherContext";
+            },
+            ["awaitUser", "resolveInterruption", "gatherContext"]
+        )
         .addConditionalEdges(
             "gatherContext",
             (state: GraphStateType) => {
@@ -86,8 +105,20 @@ export function createAgentGraph(deps: AgentNodeDeps) {
         )
         .addConditionalEdges(
             "hitlRun",
-            (state: GraphStateType) => (state.shouldPause ? END : "summarize"),
-            ["summarize", END]
+            (state: GraphStateType) => {
+                if (state.shouldPause) return END;
+                if (shouldRepair(state, deps.projectPath)) return "repair";
+                return "summarize";
+            },
+            ["repair", "summarize", END]
+        )
+        .addConditionalEdges(
+            "repair",
+            (state: GraphStateType) => {
+                if (state.shouldPause) return END;
+                return "hitlRun";
+            },
+            ["hitlRun", END]
         )
         .addEdge("summarize", END)
         .compile();

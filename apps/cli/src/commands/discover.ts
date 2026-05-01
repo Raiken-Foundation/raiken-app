@@ -4,11 +4,15 @@
  * Autonomously discover web application structure by crawling pages.
  */
 
+import type {
+    DiscoveryEvent,
+    DiscoverySession,
+    DiscoveryStats,
+    SiteDiscovery,
+} from "@raiken/core";
+import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
-import { SiteDiscovery } from "@raiken/core";
-import type { DiscoveryStats, DiscoverySession, DiscoveryEvent } from "@raiken/core";
-import { loadDiscoveryConfig } from "@raiken/shared";
 
 interface DiscoverOptions {
     maxPages?: string;
@@ -28,9 +32,7 @@ const parseNumber = (value: string | number | undefined, fallback: number): numb
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const getActiveDiscoverySession = async (
-    projectPath: string
-): Promise<DiscoverySession | null> => {
+const getActiveDiscoverySession = async (projectPath: string): Promise<DiscoverySession | null> => {
     const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
     const db = new CodeGraphDB(projectPath);
     const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
@@ -71,7 +73,7 @@ const attachDiscoveryListeners = (params: {
                 `Links: ${stats.linksFound} | ` +
                 `Depth: ${stats.currentDepth}/${maxDepth} | ` +
                 `Elapsed: ${elapsed}s\n` +
-                `  ${stats.currentUrl || "..."}`
+                `  ${stats.currentUrl || "..."}`,
         );
     };
 
@@ -83,12 +85,15 @@ const attachDiscoveryListeners = (params: {
         clearInterval(progressInterval);
         spinner.stop();
 
-        const blocker = (event.data as { blocker: { url: string; blockerType: string } }).blocker;
+        const blocker = (
+            event.data as {
+                blocker: { url: string; category?: string; blockerType?: string };
+            }
+        ).blocker;
+        const label = blocker.blockerType ?? blocker.category ?? "auth_required";
         console.log(chalk.yellow(`\n🛑 ${authHeader}`));
         console.log(chalk.dim(`   URL: ${blocker.url}`));
-        console.log(
-            chalk.dim(`   Type: ${blocker.blockerType.replace("_", " ")}`)
-        );
+        console.log(chalk.dim(`   Type: ${label.replace(/_/g, " ")}`));
         console.log();
 
         if (showAuthOptions) {
@@ -97,18 +102,15 @@ const attachDiscoveryListeners = (params: {
                 chalk.white("  1."),
                 chalk.dim("Run"),
                 chalk.white("raiken auth"),
-                chalk.dim("to log in")
+                chalk.dim("to log in"),
             );
             console.log(
                 chalk.white("  2."),
                 chalk.dim("Run"),
                 chalk.white("raiken discover --skip-auth"),
-                chalk.dim("to skip protected routes")
+                chalk.dim("to skip protected routes"),
             );
-            console.log(
-                chalk.white("  3."),
-                chalk.dim("Press Ctrl+C to cancel")
-            );
+            console.log(chalk.white("  3."), chalk.dim("Press Ctrl+C to cancel"));
             console.log();
         }
 
@@ -122,24 +124,14 @@ const attachDiscoveryListeners = (params: {
         if (lastStats) {
             console.log();
             console.log(chalk.cyan("📊 Summary:"));
-            console.log(
-                chalk.dim(`   Pages discovered: ${lastStats.pagesDiscovered}`)
-            );
+            console.log(chalk.dim(`   Pages discovered: ${lastStats.pagesDiscovered}`));
             console.log(chalk.dim(`   Links found:      ${lastStats.linksFound}`));
+            console.log(chalk.dim(`   Auth blockers:    ${lastStats.authBlockersFound}`));
             console.log(
-                chalk.dim(
-                    `   Auth blockers:    ${lastStats.authBlockersFound}`
-                )
-            );
-            console.log(
-                chalk.dim(
-                    `   Time elapsed:     ${Math.round(lastStats.elapsedMs / 1000)}s`
-                )
+                chalk.dim(`   Time elapsed:     ${Math.round(lastStats.elapsedMs / 1000)}s`),
             );
             console.log();
-            console.log(
-                chalk.dim("✨ Site knowledge saved to .raiken/raiken.db")
-            );
+            console.log(chalk.dim("✨ Site knowledge saved to .raiken/raiken.db"));
         }
 
         onCompleted?.(lastStats);
@@ -156,7 +148,7 @@ const attachDiscoveryListeners = (params: {
 
 export async function discoverCommand(
     url: string | undefined,
-    options: DiscoverOptions
+    options: DiscoverOptions,
 ): Promise<void> {
     const projectPath = process.cwd();
 
@@ -175,21 +167,14 @@ export async function discoverCommand(
 
         // Start new discovery
         if (!url) {
-            console.error(
-                chalk.red("❌ Error: URL is required for new discovery")
-            );
-            console.log(
-                chalk.dim("Usage: raiken discover <url> [options]")
-            );
+            console.error(chalk.red("❌ Error: URL is required for new discovery"));
+            console.log(chalk.dim("Usage: raiken discover <url> [options]"));
             process.exit(1);
         }
 
         await startDiscovery(url, projectPath, options);
     } catch (error) {
-        console.error(
-            chalk.red("\n❌ Discovery failed:"),
-            (error as Error).message
-        );
+        console.error(chalk.red("\n❌ Discovery failed:"), (error as Error).message);
         process.exit(1);
     }
 }
@@ -197,7 +182,7 @@ export async function discoverCommand(
 async function startDiscovery(
     url: string,
     projectPath: string,
-    options: DiscoverOptions
+    options: DiscoverOptions,
 ): Promise<void> {
     const config = loadDiscoveryConfig(projectPath);
     const maxPages = parseNumber(options.maxPages, config.maxPages);
@@ -224,6 +209,12 @@ async function startDiscovery(
         spinner: "dots",
     }).start();
 
+    const storageStatePath = resolveAuthStorageStatePath(projectPath);
+    if (storageStatePath) {
+        console.log(chalk.dim(`  Auth:      ${storageStatePath}\n`));
+    }
+
+    const { SiteDiscovery } = await import("@raiken/core");
     const discovery = new SiteDiscovery({
         startUrl: url,
         projectPath,
@@ -233,6 +224,8 @@ async function startDiscovery(
         timeout,
         excludePatterns,
         pauseOnAuth,
+        storageStatePath,
+        maxRunTimeMs: config.maxRunTimeMs,
     });
 
     const { progressInterval } = attachDiscoveryListeners({
@@ -257,10 +250,7 @@ async function startDiscovery(
     }
 }
 
-async function continueDiscovery(
-    projectPath: string,
-    options: DiscoverOptions
-): Promise<void> {
+async function continueDiscovery(projectPath: string, options: DiscoverOptions): Promise<void> {
     console.log(chalk.cyan("\n▶️  Resuming discovery...\n"));
 
     const config = loadDiscoveryConfig(projectPath);
@@ -271,6 +261,8 @@ async function continueDiscovery(
     const maxConcurrency = config.maxConcurrency;
     const excludePatterns = config.excludePatterns;
 
+    const storageStatePath = resolveAuthStorageStatePath(projectPath);
+    const { SiteDiscovery } = await import("@raiken/core");
     const discovery = new SiteDiscovery({
         startUrl: "",
         projectPath,
@@ -279,6 +271,8 @@ async function continueDiscovery(
         maxConcurrency,
         timeout,
         excludePatterns,
+        storageStatePath,
+        maxRunTimeMs: config.maxRunTimeMs,
     });
 
     const spinner = ora({
@@ -332,11 +326,7 @@ async function showDiscoveryStatus(projectPath: string): Promise<void> {
             console.log(chalk.dim(`  Started:  ${new Date(startedAt).toLocaleString()}`));
         }
         if (completedAt && Number.isFinite(completedAt)) {
-            console.log(
-                chalk.dim(
-                    `  Completed: ${new Date(completedAt).toLocaleString()}`
-                )
-            );
+            console.log(chalk.dim(`  Completed: ${new Date(completedAt).toLocaleString()}`));
         }
         if (session.blockedAtUrl) {
             console.log(chalk.dim(`  Blocked:  ${session.blockedAtUrl}`));
@@ -349,14 +339,12 @@ async function showDiscoveryStatus(projectPath: string): Promise<void> {
         console.log(chalk.dim(`  Verified links:       ${stats.verifiedLinksCount}`));
         console.log(chalk.dim(`  Broken links:         ${stats.brokenLinksCount}`));
         console.log(chalk.dim(`  Auth blockers:        ${stats.authBlockersCount}`));
-        console.log(
-            chalk.dim(`  Unresolved blockers:  ${stats.unresolvedBlockersCount}`)
-        );
+        console.log(chalk.dim(`  Unresolved blockers:  ${stats.unresolvedBlockersCount}`));
         console.log();
 
         if (session.status === "paused") {
             console.log(
-                chalk.yellow("⏸️  Session is paused. Resume with 'raiken discover --continue'.")
+                chalk.yellow("⏸️  Session is paused. Resume with 'raiken discover --continue'."),
             );
         }
     } finally {

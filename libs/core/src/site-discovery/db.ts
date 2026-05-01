@@ -11,10 +11,57 @@ import type {
     LinkStatus,
     AuthBlocker,
     AuthBlockerType,
+    BlockerCategory,
+    BlockerResolution,
+    BlockerSeverity,
+    DiscoveryBlocker,
     DiscoverySession,
     SessionStatus,
 } from "./types";
 import { normalizeUrl } from "./url-utils";
+
+/**
+ * Legacy input shape for {@link SiteKnowledgeDB.saveAuthBlocker}, kept so
+ * external scripts (and our own pre-blocker-pipeline tests) keep compiling.
+ * Only the auth-specific fields are required; everything else on the
+ * generalised {@link DiscoveryBlocker} is filled in by `saveAuthBlocker`.
+ */
+export interface LegacyAuthBlockerInput {
+    projectPath: string;
+    url: string;
+    blockerType: AuthBlockerType;
+    detectedElements?: string | null;
+    resolvedAt?: number | null;
+    storageStatePath?: string | null;
+    discoveredAt: number;
+}
+
+/**
+ * Map a `detectorId` like `"auth:login_form"` back to the legacy
+ * `AuthBlockerType` string consumers (the old dashboard, knowledge-loader)
+ * still read off `blockerType`. Defaults to `"login_form"` when the
+ * detector id doesn't carry an auth-flavored suffix — safe because callers
+ * only inspect `blockerType` for display.
+ */
+function detectorIdToLegacyAuthType(
+    detectorId: string | null,
+    category: BlockerCategory,
+): AuthBlockerType {
+    if (detectorId && detectorId.includes(":")) {
+        const suffix = detectorId.split(":", 2)[1];
+        const valid: AuthBlockerType[] = [
+            "url_pattern",
+            "login_form",
+            "oauth_button",
+            "error_message",
+            "http_status",
+        ];
+        if ((valid as string[]).includes(suffix)) {
+            return suffix as AuthBlockerType;
+        }
+    }
+    return category === "auth_required" ? "login_form" : "error_message";
+}
 
 export class SiteKnowledgeDB {
     private db: Database.Database;
@@ -288,46 +335,78 @@ export class SiteKnowledgeDB {
     }
 
     // ==========================================================================
-    // Auth Blockers Operations
+    // Discovery Blockers Operations (generic — auth, captcha, manual, ...)
     // ==========================================================================
 
     /**
-     * Save an auth blocker to the database.
+     * Save a generic discovery blocker. Used by detectors and by the
+     * manual-pause path (`category: "manual"`).
      */
-    saveAuthBlocker(blocker: Omit<AuthBlocker, "id">): number {
+    saveBlocker(blocker: Omit<DiscoveryBlocker, "id">): number {
         const result = this.db
             .prepare(
                 `
-            INSERT INTO auth_blockers (
-                project_path, url, blocker_type, detected_elements,
+            INSERT INTO discovery_blockers (
+                project_path, url, category, severity,
+                detector_id, detected_elements, evidence_json,
+                screenshot_path, resolution, resolved_via,
                 resolved_at, storage_state_path, discovered_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        `
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
             )
             .run(
                 blocker.projectPath,
                 blocker.url,
-                blocker.blockerType,
+                blocker.category,
+                blocker.severity,
+                blocker.detectorId,
                 blocker.detectedElements,
+                blocker.evidenceJson,
+                blocker.screenshotPath,
+                blocker.resolution,
+                blocker.resolvedVia,
                 blocker.resolvedAt,
                 blocker.storageStatePath,
-                blocker.discoveredAt
+                blocker.discoveredAt,
             );
 
         return Number(result.lastInsertRowid);
     }
 
     /**
-     * Get all unresolved auth blockers for this project.
+     * Back-compat wrapper. Old call sites pass an `AuthBlocker` and expect
+     * the same return shape. We translate the legacy `blockerType` into the
+     * new `category` + `detectorId` model.
      */
-    getUnresolvedBlockers(): AuthBlocker[] {
+    saveAuthBlocker(blocker: LegacyAuthBlockerInput): number {
+        return this.saveBlocker({
+            projectPath: blocker.projectPath,
+            url: blocker.url,
+            category: "auth_required",
+            severity: "pause",
+            detectorId: `auth:${blocker.blockerType}`,
+            detectedElements: blocker.detectedElements ?? null,
+            evidenceJson: blocker.detectedElements ?? null,
+            screenshotPath: null,
+            resolution: blocker.resolvedAt ? "provide_state" : null,
+            resolvedVia: blocker.resolvedAt ? "auth_command" : null,
+            resolvedAt: blocker.resolvedAt ?? null,
+            storageStatePath: blocker.storageStatePath ?? null,
+            discoveredAt: blocker.discoveredAt,
+        });
+    }
+
+    /**
+     * Get all unresolved blockers for this project.
+     */
+    getUnresolvedBlockers(): DiscoveryBlocker[] {
         const rows = this.db
             .prepare(
                 `
-            SELECT * FROM auth_blockers
+            SELECT * FROM discovery_blockers
             WHERE project_path = ? AND resolved_at IS NULL
             ORDER BY discovered_at DESC
-        `
+        `,
             )
             .all(this.projectPath) as Array<Record<string, unknown>>;
 
@@ -335,16 +414,16 @@ export class SiteKnowledgeDB {
     }
 
     /**
-     * Get all auth blockers (resolved and unresolved).
+     * Get all blockers (resolved and unresolved).
      */
-    getAllBlockers(): AuthBlocker[] {
+    getAllBlockers(): DiscoveryBlocker[] {
         const rows = this.db
             .prepare(
                 `
-            SELECT * FROM auth_blockers
+            SELECT * FROM discovery_blockers
             WHERE project_path = ?
             ORDER BY discovered_at DESC
-        `
+        `,
             )
             .all(this.projectPath) as Array<Record<string, unknown>>;
 
@@ -352,18 +431,95 @@ export class SiteKnowledgeDB {
     }
 
     /**
-     * Mark an auth blocker as resolved.
+     * Get a single blocker by id (for resolution flows that need to look up
+     * a specific row, e.g. "skip the URL of blocker #42").
      */
-    markBlockerResolved(id: number, storageStatePath: string): void {
+    getBlocker(id: number): DiscoveryBlocker | null {
+        const row = this.db
+            .prepare(`SELECT * FROM discovery_blockers WHERE id = ?`)
+            .get(id) as Record<string, unknown> | undefined;
+        return row ? this.mapBlockerRow(row) : null;
+    }
+
+    /**
+     * Mark a blocker resolved with a structured resolution.
+     *
+     * Overloaded for back-compat: the legacy 2-arg form
+     *   `markBlockerResolved(id, storageStatePath)`
+     * still works and is treated as a `provide_state` resolution.
+     */
+    markBlockerResolved(
+        id: number,
+        resolutionOrPath:
+            | string
+            | {
+                  resolution: BlockerResolution;
+                  resolvedVia?: string | null;
+                  storageStatePath?: string | null;
+              },
+    ): void {
+        const resolved =
+            typeof resolutionOrPath === "string"
+                ? {
+                      resolution: "provide_state" as BlockerResolution,
+                      resolvedVia: "legacy_storage_state",
+                      storageStatePath: resolutionOrPath,
+                  }
+                : {
+                      resolution: resolutionOrPath.resolution,
+                      resolvedVia: resolutionOrPath.resolvedVia ?? null,
+                      storageStatePath: resolutionOrPath.storageStatePath ?? null,
+                  };
+
         this.db
             .prepare(
                 `
-            UPDATE auth_blockers
-            SET resolved_at = ?, storage_state_path = ?
+            UPDATE discovery_blockers
+            SET resolved_at = ?,
+                resolution = ?,
+                resolved_via = ?,
+                storage_state_path = COALESCE(?, storage_state_path)
             WHERE id = ?
-        `
+        `,
             )
-            .run(Date.now(), storageStatePath, id);
+            .run(
+                Date.now(),
+                resolved.resolution,
+                resolved.resolvedVia,
+                resolved.storageStatePath,
+                id,
+            );
+    }
+
+    /**
+     * Mark every unresolved blocker for this project as resolved with the
+     * same resolution. Used by `raiken auth` and the dashboard's
+     * "I've handled it for everyone" affordance.
+     */
+    resolveAllBlockers(args: {
+        resolution: BlockerResolution;
+        resolvedVia?: string | null;
+        storageStatePath?: string | null;
+    }): number {
+        const result = this.db
+            .prepare(
+                `
+            UPDATE discovery_blockers
+            SET resolved_at = ?,
+                resolution = ?,
+                resolved_via = ?,
+                storage_state_path = COALESCE(?, storage_state_path)
+            WHERE project_path = ? AND resolved_at IS NULL
+        `,
+            )
+            .run(
+                Date.now(),
+                args.resolution,
+                args.resolvedVia ?? null,
+                args.storageStatePath ?? null,
+                this.projectPath,
+            );
+        return result.changes;
     }
 
 
@@ -381,8 +537,8 @@ export class SiteKnowledgeDB {
             INSERT INTO discovery_sessions (
                 project_path, start_url, status, pages_discovered,
                 links_found, started_at, completed_at, blocked_at_url, queue_json,
-                max_pages, max_depth
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                max_pages, max_depth, skipped_urls_json, ignored_categories_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
             )
             .run(
@@ -396,7 +552,9 @@ export class SiteKnowledgeDB {
                 session.blockedAtUrl,
                 session.queueJson,
                 session.maxPages ?? null,
-                session.maxDepth ?? null
+                session.maxDepth ?? null,
+                session.skippedUrlsJson ?? null,
+                session.ignoredCategoriesJson ?? null,
             );
 
         return Number(result.lastInsertRowid);
@@ -440,6 +598,14 @@ export class SiteKnowledgeDB {
         if (updates.maxDepth !== undefined) {
             fields.push("max_depth = ?");
             values.push(updates.maxDepth);
+        }
+        if (updates.skippedUrlsJson !== undefined) {
+            fields.push("skipped_urls_json = ?");
+            values.push(updates.skippedUrlsJson);
+        }
+        if (updates.ignoredCategoriesJson !== undefined) {
+            fields.push("ignored_categories_json = ?");
+            values.push(updates.ignoredCategoriesJson);
         }
 
         if (fields.length === 0) return;
@@ -533,6 +699,8 @@ export class SiteKnowledgeDB {
             queueJson: (row["queue_json"] as string | null) ?? null,
             maxPages: (row["max_pages"] as number | null) ?? null,
             maxDepth: (row["max_depth"] as number | null) ?? null,
+            skippedUrlsJson: (row["skipped_urls_json"] as string | null) ?? null,
+            ignoredCategoriesJson: (row["ignored_categories_json"] as string | null) ?? null,
         };
     }
 
@@ -554,15 +722,28 @@ export class SiteKnowledgeDB {
     }
 
     private mapBlockerRow(row: Record<string, unknown>): AuthBlocker {
+        const category = ((row["category"] as string | null) ?? "auth_required") as BlockerCategory;
+        const detectorId = (row["detector_id"] as string | null) ?? null;
         return {
             id: row["id"] as number | undefined,
             projectPath: row["project_path"] as string,
             url: row["url"] as string,
-            blockerType: row["blocker_type"] as AuthBlockerType,
-            detectedElements: row["detected_elements"] as string,
+            category,
+            severity: ((row["severity"] as string | null) ?? "pause") as BlockerSeverity,
+            detectorId,
+            detectedElements: (row["detected_elements"] as string | null) ?? null,
+            evidenceJson:
+                (row["evidence_json"] as string | null) ??
+                (row["detected_elements"] as string | null) ??
+                null,
+            screenshotPath: (row["screenshot_path"] as string | null) ?? null,
+            resolution: (row["resolution"] as BlockerResolution | null) ?? null,
+            resolvedVia: (row["resolved_via"] as string | null) ?? null,
             resolvedAt: (row["resolved_at"] as number | null) ?? null,
             storageStatePath: (row["storage_state_path"] as string | null) ?? null,
             discoveredAt: row["discovered_at"] as number,
+            // Legacy alias — keep readable for `getAuthBlockers` consumers.
+            blockerType: detectorIdToLegacyAuthType(detectorId, category),
         };
     }
 
@@ -620,7 +801,7 @@ export class SiteKnowledgeDB {
                 .prepare("DELETE FROM discovered_links WHERE project_path = ?")
                 .run(this.projectPath);
             this.db
-                .prepare("DELETE FROM auth_blockers WHERE project_path = ?")
+                .prepare("DELETE FROM discovery_blockers WHERE project_path = ?")
                 .run(this.projectPath);
             this.db
                 .prepare("DELETE FROM discovery_sessions WHERE project_path = ?")
@@ -663,7 +844,7 @@ export class SiteKnowledgeDB {
         const blockersCount = this.db
             .prepare(
                 `
-            SELECT COUNT(*) as count FROM auth_blockers
+            SELECT COUNT(*) as count FROM discovery_blockers
             WHERE project_path = ?
         `
             )
@@ -672,7 +853,7 @@ export class SiteKnowledgeDB {
         const unresolvedBlockersCount = this.db
             .prepare(
                 `
-            SELECT COUNT(*) as count FROM auth_blockers
+            SELECT COUNT(*) as count FROM discovery_blockers
             WHERE project_path = ? AND resolved_at IS NULL
         `
             )

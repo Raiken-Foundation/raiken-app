@@ -110,9 +110,88 @@ nx serve dashboard
    ```
    - Serves both API and dashboard on `http://localhost:7101`
 
-### Available Commands
+### CLI Commands
 
-#### Development
+After installing and building Raiken, these commands are available:
+
+```bash
+raiken start [options]         # Start the Raiken dashboard and agent server
+  -p, --port <number>          # Port to run on (default: 7101)
+
+raiken init [options]          # Initialize Raiken in the current project
+  -f, --force                  # Overwrite existing configuration files
+
+raiken discover [url] [options]  # Autonomously discover web application structure
+  --max-pages <number>         # Maximum pages to discover (default: 100)
+  --max-depth <number>         # Maximum navigation depth (default: 5)
+  --timeout <number>           # Timeout per page in ms (default: 30000)
+  --auth                       # Prompt for authentication before discovery
+  --skip-auth                  # Skip authentication-required routes
+  --continue                   # Resume a paused discovery session
+  --status                     # Show discovery statistics
+
+raiken auth [options]          # Authenticate to save browser session state
+  --url <url>                  # URL to navigate to for authentication
+```
+
+### Configuration
+
+Raiken is configured via `raiken.config.json` in your project root (created by `raiken init`). All fields are optional.
+
+```json
+{
+  "projectType": "react",
+  "testDirectory": "e2e",
+  "playwrightConfig": "playwright.config.ts",
+  "ai": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.5",
+    "baseURL": "https://openrouter.ai/api/v1",
+    "maxTokens": 4000,
+    "temperature": 0.7
+  },
+  "auth": {
+    "storageStatePath": ".raiken/auth-state.json",
+    "baseUrl": "http://localhost:3000",
+    "loginPath": "/login"
+  },
+  "browser": {
+    "defaultBrowser": "chromium",
+    "headless": true,
+    "timeout": 30000,
+    "retries": 1
+  },
+  "features": {
+    "video": true,
+    "screenshots": true,
+    "tracing": false,
+    "network": true
+  },
+  "autonomy": {
+    "autoSaveTests": false,
+    "autoRunTests": false,
+    "autoCorrect": "suggest",
+    "autoLearn": "confirm",
+    "maxRetries": 2
+  },
+  "discovery": {
+    "maxPages": 100,
+    "maxDepth": 5,
+    "maxConcurrency": 3,
+    "timeout": 30000,
+    "excludePatterns": ["/logout", "/api/"],
+    "pauseOnAuth": true
+  },
+  "indexing": {
+    "fullScan": false
+  }
+}
+```
+
+The API key can also be set via the `OPENROUTER_API_KEY` environment variable (recommended) or in a `.env` file in your project root.
+
+### Development Commands
+
 ```bash
 nx serve cli              # Run CLI backend (Fastify on :7101)
 nx serve dashboard        # Run React dashboard (Vite on :4200)

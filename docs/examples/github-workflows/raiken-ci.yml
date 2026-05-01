@@ -1,0 +1,103 @@
+# raiken-ci.yml
+#
+# Drop this file into your project at .github/workflows/raiken-ci.yml.
+#
+# What it does:
+#   1. Runs `raiken ci` on every PR.
+#   2. Computes which tests are affected by the diff (graph-aware impact).
+#   3. Runs only those tests, then publishes:
+#      - JUnit XML for the GitHub UI's test summary
+#      - JSON impact report as an artifact for downstream tooling
+#   4. Posts the impact summary back to the PR as a comment.
+#
+# Required secrets:
+#   OPENROUTER_API_KEY  - Optional. Only needed if you also use AI features in CI.
+#   GITHUB_TOKEN        - Provided automatically by GitHub Actions.
+
+name: raiken ci
+
+on:
+    pull_request:
+        branches: [main, master]
+
+permissions:
+    contents: read
+    pull-requests: write
+    checks: write
+
+jobs:
+    raiken:
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  # Full history so `raiken ci` can resolve the base ref.
+                  fetch-depth: 0
+
+            # pnpm must be installed BEFORE setup-node for the pnpm cache to work.
+            - name: Install pnpm
+              uses: pnpm/action-setup@v3
+              with:
+                  version: 9
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install Playwright browsers
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Run raiken ci
+              env:
+                  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+              run: pnpm exec raiken ci --format both --output-dir .raiken/ci
+
+            - name: Publish JUnit results
+              if: always()
+              uses: dorny/test-reporter@v1
+              with:
+                  name: raiken affected tests
+                  path: .raiken/ci/results.xml
+                  reporter: java-junit
+                  fail-on-error: false
+
+            - name: Upload impact report
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: raiken-impact
+                  path: .raiken/ci/
+
+            - name: Comment impact on PR
+              if: always()
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const fs = require('node:fs');
+                      const path = '.raiken/ci/impact.json';
+                      if (!fs.existsSync(path)) return;
+                      const impact = JSON.parse(fs.readFileSync(path, 'utf-8'));
+                      const tests = impact.affectedTests
+                          .map(t => `- \`${t.testFile}\` _(confidence: ${t.confidence.toFixed(2)})_`)
+                          .join('\n') || '_No affected tests detected._';
+                      const body = [
+                          '### 🔎 raiken ci',
+                          '',
+                          `**Changed files:** ${impact.changedFiles.length}`,
+                          `**Affected tests:** ${impact.affectedTests.length}`,
+                          '',
+                          tests,
+                      ].join('\n');
+                      await github.rest.issues.createComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          issue_number: context.issue.number,
+                          body,
+                      });

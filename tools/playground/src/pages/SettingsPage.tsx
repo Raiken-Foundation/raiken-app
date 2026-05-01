@@ -1,376 +1,123 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useId, useState } from "react";
+import { resetStore } from "../api";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { useAuth } from "../contexts/AuthContext";
+import { useToast } from "../contexts/ToastContext";
 
-interface Settings {
-    theme: "light" | "dark" | "system";
-    language: string;
-    notifications: {
-        email: boolean;
-        push: boolean;
-        sms: boolean;
-    };
-    privacy: {
-        profilePublic: boolean;
-        showEmail: boolean;
-        showActivity: boolean;
-    };
-    accessibility: {
-        fontSize: "small" | "medium" | "large";
-        highContrast: boolean;
-        reduceMotion: boolean;
-    };
+const THEME_KEY = "playground.theme";
+
+type Theme = "light" | "dark";
+
+function readTheme(): Theme {
+    if (typeof window === "undefined") return "light";
+    try {
+        return (window.localStorage.getItem(THEME_KEY) as Theme) ?? "light";
+    } catch {
+        return "light";
+    }
 }
 
-function SettingsPage() {
-    const [settings, setSettings] = useState<Settings>({
-        theme: "light",
-        language: "en",
-        notifications: { email: true, push: true, sms: false },
-        privacy: { profilePublic: true, showEmail: false, showActivity: true },
-        accessibility: {
-            fontSize: "medium",
-            highContrast: false,
-            reduceMotion: false,
-        },
-    });
-    const [activeTab, setActiveTab] = useState<
-        "general" | "notifications" | "privacy" | "accessibility"
-    >("general");
-    const [saved, setSaved] = useState(false);
+export default function SettingsPage() {
+    const { user, logout } = useAuth();
+    const { push } = useToast();
+    const [theme, setTheme] = useState<Theme>(readTheme);
+    const [notifications, setNotifications] = useState(true);
+    const [confirmReset, setConfirmReset] = useState(false);
+    const themeId = useId();
+    const notifyId = useId();
 
-    const handleSave = () => {
-        setSaved(true);
-        setTimeout(() => setSaved(false), 3000);
+    useEffect(() => {
+        document.documentElement.dataset.theme = theme;
+        try {
+            window.localStorage.setItem(THEME_KEY, theme);
+        } catch {
+            // ignore
+        }
+    }, [theme]);
+
+    const handleReset = () => {
+        resetStore();
+        push("success", "Mock data reset");
+        setConfirmReset(false);
     };
 
     return (
-        <div className="page settings-page" data-testid="settings-page">
-            <div className="page-header">
-                <h1>Settings</h1>
-                <p className="page-subtitle">
-                    Configure your application preferences
-                </p>
-            </div>
-
-            {saved && (
-                <div
-                    className="alert alert-success"
-                    data-testid="settings-saved"
-                >
-                    Settings saved successfully!
+        <div className="page" data-testid="settings-page">
+            <header className="page-header">
+                <div>
+                    <h1>Settings</h1>
+                    <p className="page-subtitle">
+                        Tune your experience. Preferences are scoped to this browser.
+                    </p>
                 </div>
-            )}
+            </header>
 
-            <div className="settings-layout">
-                <aside className="settings-tabs" data-testid="settings-tabs">
-                    <button
-                        onClick={() => setActiveTab("general")}
-                        className={`tab-btn ${activeTab === "general" ? "active" : ""}`}
-                        data-testid="tab-general"
+            <section className="card" data-testid="settings-preferences">
+                <h3>Preferences</h3>
+                <div className="form-group">
+                    <label htmlFor={themeId}>Theme</label>
+                    <select
+                        id={themeId}
+                        value={theme}
+                        onChange={(e) => setTheme(e.target.value as Theme)}
+                        data-testid="theme-select"
                     >
-                        🎨 General
-                    </button>
+                        <option value="light">Light</option>
+                        <option value="dark">Dark</option>
+                    </select>
+                </div>
+                <div className="form-group form-group-inline">
+                    <input
+                        id={notifyId}
+                        type="checkbox"
+                        checked={notifications}
+                        onChange={(e) => setNotifications(e.target.checked)}
+                        data-testid="notifications-toggle"
+                    />
+                    <label htmlFor={notifyId}>Email me about activity in my projects</label>
+                </div>
+            </section>
+
+            <section className="card card-danger" data-testid="settings-danger">
+                <h3>Danger zone</h3>
+                <p className="muted">
+                    Mock data lives in memory only. Resetting wipes any tasks, projects and comments
+                    you created during this session.
+                </p>
+                <div className="settings-danger-actions">
                     <button
-                        onClick={() => setActiveTab("notifications")}
-                        className={`tab-btn ${activeTab === "notifications" ? "active" : ""}`}
-                        data-testid="tab-notifications"
+                        type="button"
+                        className="btn btn-danger"
+                        onClick={() => setConfirmReset(true)}
+                        data-testid="reset-data"
                     >
-                        🔔 Notifications
+                        Reset mock data
                     </button>
-                    <button
-                        onClick={() => setActiveTab("privacy")}
-                        className={`tab-btn ${activeTab === "privacy" ? "active" : ""}`}
-                        data-testid="tab-privacy"
-                    >
-                        🔒 Privacy
-                    </button>
-                    <button
-                        onClick={() => setActiveTab("accessibility")}
-                        className={`tab-btn ${activeTab === "accessibility" ? "active" : ""}`}
-                        data-testid="tab-accessibility"
-                    >
-                        ♿ Accessibility
-                    </button>
-                </aside>
-
-                <main className="settings-content">
-                    {activeTab === "general" && (
-                        <div
-                            className="card"
-                            data-testid="general-settings"
-                        >
-                            <h2>General Settings</h2>
-
-                            <div className="form-group">
-                                <label htmlFor="theme">Theme</label>
-                                <select
-                                    id="theme"
-                                    value={settings.theme}
-                                    onChange={(e) =>
-                                        setSettings({
-                                            ...settings,
-                                            theme: e.target.value as Settings["theme"],
-                                        })
-                                    }
-                                    data-testid="theme-select"
-                                >
-                                    <option value="light">Light</option>
-                                    <option value="dark">Dark</option>
-                                    <option value="system">System</option>
-                                </select>
-                            </div>
-
-                            <div className="form-group">
-                                <label htmlFor="language">Language</label>
-                                <select
-                                    id="language"
-                                    value={settings.language}
-                                    onChange={(e) =>
-                                        setSettings({
-                                            ...settings,
-                                            language: e.target.value,
-                                        })
-                                    }
-                                    data-testid="language-select"
-                                >
-                                    <option value="en">English</option>
-                                    <option value="es">Spanish</option>
-                                    <option value="fr">French</option>
-                                    <option value="de">German</option>
-                                    <option value="ja">Japanese</option>
-                                </select>
-                            </div>
-                        </div>
-                    )}
-
-                    {activeTab === "notifications" && (
-                        <div
-                            className="card"
-                            data-testid="notification-settings"
-                        >
-                            <h2>Notification Preferences</h2>
-
-                            <div className="toggle-group">
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.notifications.email}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                notifications: {
-                                                    ...settings.notifications,
-                                                    email: e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-email-notif"
-                                    />
-                                    <span>Email Notifications</span>
-                                </label>
-
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.notifications.push}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                notifications: {
-                                                    ...settings.notifications,
-                                                    push: e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-push-notif"
-                                    />
-                                    <span>Push Notifications</span>
-                                </label>
-
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.notifications.sms}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                notifications: {
-                                                    ...settings.notifications,
-                                                    sms: e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-sms-notif"
-                                    />
-                                    <span>SMS Notifications</span>
-                                </label>
-                            </div>
-                        </div>
-                    )}
-
-                    {activeTab === "privacy" && (
-                        <div
-                            className="card"
-                            data-testid="privacy-settings"
-                        >
-                            <h2>Privacy Settings</h2>
-
-                            <div className="toggle-group">
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.privacy.profilePublic}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                privacy: {
-                                                    ...settings.privacy,
-                                                    profilePublic:
-                                                        e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-public-profile"
-                                    />
-                                    <span>Public Profile</span>
-                                </label>
-
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.privacy.showEmail}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                privacy: {
-                                                    ...settings.privacy,
-                                                    showEmail: e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-show-email"
-                                    />
-                                    <span>Show Email Address</span>
-                                </label>
-
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={settings.privacy.showActivity}
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                privacy: {
-                                                    ...settings.privacy,
-                                                    showActivity:
-                                                        e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-show-activity"
-                                    />
-                                    <span>Show Activity Status</span>
-                                </label>
-                            </div>
-                        </div>
-                    )}
-
-                    {activeTab === "accessibility" && (
-                        <div
-                            className="card"
-                            data-testid="accessibility-settings"
-                        >
-                            <h2>Accessibility</h2>
-
-                            <div className="form-group">
-                                <label htmlFor="font-size">Font Size</label>
-                                <select
-                                    id="font-size"
-                                    value={settings.accessibility.fontSize}
-                                    onChange={(e) =>
-                                        setSettings({
-                                            ...settings,
-                                            accessibility: {
-                                                ...settings.accessibility,
-                                                fontSize: e.target
-                                                    .value as Settings["accessibility"]["fontSize"],
-                                            },
-                                        })
-                                    }
-                                    data-testid="font-size-select"
-                                >
-                                    <option value="small">Small</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="large">Large</option>
-                                </select>
-                            </div>
-
-                            <div className="toggle-group">
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={
-                                            settings.accessibility.highContrast
-                                        }
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                accessibility: {
-                                                    ...settings.accessibility,
-                                                    highContrast:
-                                                        e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-high-contrast"
-                                    />
-                                    <span>High Contrast Mode</span>
-                                </label>
-
-                                <label className="toggle-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={
-                                            settings.accessibility.reduceMotion
-                                        }
-                                        onChange={(e) =>
-                                            setSettings({
-                                                ...settings,
-                                                accessibility: {
-                                                    ...settings.accessibility,
-                                                    reduceMotion:
-                                                        e.target.checked,
-                                                },
-                                            })
-                                        }
-                                        data-testid="toggle-reduce-motion"
-                                    />
-                                    <span>Reduce Motion</span>
-                                </label>
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="settings-actions">
+                    {user && (
                         <button
-                            onClick={handleSave}
-                            className="btn btn-primary"
-                            data-testid="save-settings-button"
-                        >
-                            Save Settings
-                        </button>
-                        <Link
-                            to="/dashboard"
+                            type="button"
                             className="btn btn-secondary"
-                            data-testid="back-to-dashboard"
+                            onClick={() => {
+                                logout();
+                                push("info", "Signed out");
+                            }}
+                            data-testid="settings-logout"
                         >
-                            Back to Dashboard
-                        </Link>
-                    </div>
-                </main>
-            </div>
+                            Sign out
+                        </button>
+                    )}
+                </div>
+            </section>
+
+            <ConfirmDialog
+                open={confirmReset}
+                title="Reset mock data?"
+                message="This will restore the default seed data. Anything you've created in this session will be lost."
+                confirmLabel="Reset"
+                danger
+                onConfirm={handleReset}
+                onCancel={() => setConfirmReset(false)}
+            />
         </div>
     );
 }
-
-export default SettingsPage;

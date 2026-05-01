@@ -1,905 +1,881 @@
-import { useState, useEffect, useCallback } from 'react';
-import Editor from '@monaco-editor/react';
+import Editor from "@monaco-editor/react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface TestFile {
-  id: string;
-  name: string;
-  path: string;
-  content: string;
-  status: 'passed' | 'failed' | 'running' | 'pending';
-  passedCount?: number;
-  failedCount?: number;
-  language?: string;
+    id: string;
+    name: string;
+    path: string;
+    content: string;
+    status: "passed" | "failed" | "running" | "pending";
+    passedCount?: number;
+    failedCount?: number;
+    language?: string;
 }
 
 interface CodeEditorProps {
-  files: TestFile[];
-  activeFileId: string;
-  onFileSelect: (fileId: string) => void;
-  onFileClose?: (fileId: string) => void;
-  onContentChange?: (fileId: string, content: string) => void;
-  onRunTests?: (fileId: string) => void;
-  onNewFile?: () => void;
-  onSaveFile?: (fileId: string) => void;
-  onDeleteFile?: (fileId: string) => void;
-  isRunningTests?: boolean;
-  isSaving?: boolean;
-  savedFileId?: string | null;
+    files: TestFile[];
+    activeFileId: string;
+    onFileSelect: (fileId: string) => void;
+    onFileClose?: (fileId: string) => void;
+    onContentChange?: (fileId: string, content: string) => void;
+    onRunTests?: (fileId: string) => void;
+    onNewFile?: () => void;
+    onSaveFile?: (fileId: string) => void;
+    onDeleteFile?: (fileId: string) => void;
+    isRunningTests?: boolean;
+    isSaving?: boolean;
+    savedFileId?: string | null;
 }
 
-export function CodeEditor({ files, activeFileId, onFileSelect, onFileClose, onContentChange, onRunTests, onNewFile, onSaveFile, onDeleteFile, isRunningTests, isSaving, savedFileId }: CodeEditorProps) {
-  const activeFile = files.find(f => f.id === activeFileId);
-  const [isEditorReady, setIsEditorReady] = useState(false);
-  const [showSavedFlash, setShowSavedFlash] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+const isMac =
+    typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "");
+const MOD = isMac ? "⌘" : "Ctrl+";
 
-  useEffect(() => {
-    if (savedFileId === activeFileId && savedFileId) {
-      setShowSavedFlash(true);
-      const t = setTimeout(() => setShowSavedFlash(false), 1800);
-      return () => clearTimeout(t);
-    }
-  }, [savedFileId, activeFileId]);
+export function CodeEditor({
+    files,
+    activeFileId,
+    onFileSelect,
+    onFileClose,
+    onContentChange,
+    onRunTests,
+    onNewFile,
+    onSaveFile,
+    onDeleteFile,
+    isRunningTests,
+    isSaving,
+    savedFileId,
+}: CodeEditorProps) {
+    const activeFile = files.find((f) => f.id === activeFileId);
+    const [isEditorReady, setIsEditorReady] = useState(false);
+    const [showSavedFlash, setShowSavedFlash] = useState(false);
+    const [confirmDelete, setConfirmDelete] = useState(false);
+    const confirmRef = useRef<HTMLDivElement | null>(null);
 
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-      e.preventDefault();
-      if (onSaveFile && activeFileId) onSaveFile(activeFileId);
-    }
-  }, [onSaveFile, activeFileId]);
+    useEffect(() => {
+        if (savedFileId === activeFileId && savedFileId) {
+            setShowSavedFlash(true);
+            const t = setTimeout(() => setShowSavedFlash(false), 1500);
+            return () => clearTimeout(t);
+        }
+    }, [savedFileId, activeFileId]);
 
-  useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
+    // Dismiss delete-confirm on outside click / Escape
+    useEffect(() => {
+        if (!confirmDelete) return;
+        const onClick = (e: MouseEvent) => {
+            if (confirmRef.current && !confirmRef.current.contains(e.target as Node)) {
+                setConfirmDelete(false);
+            }
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setConfirmDelete(false);
+        };
+        document.addEventListener("mousedown", onClick);
+        document.addEventListener("keydown", onKey);
+        return () => {
+            document.removeEventListener("mousedown", onClick);
+            document.removeEventListener("keydown", onKey);
+        };
+    }, [confirmDelete]);
 
-  const handleEditorChange = (value: string | undefined) => {
-    if (value !== undefined && onContentChange) {
-      onContentChange(activeFileId, value);
-    }
-  };
-
-  // Empty state when no file is selected
-  if (!activeFile) {
-    return (
-      <div className="code-editor">
-        <div className="empty-state">
-          <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          <h3>No file selected</h3>
-          <p>Select a test file from the sidebar or create a new one</p>
-          {onNewFile && (
-            <button type="button" className="new-file-btn" onClick={onNewFile}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              New File
-            </button>
-          )}
-        </div>
-        <style>{`
-          .empty-state {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 1.5rem;
-            padding: 3rem 2rem;
-            text-align: center;
-            background: #0a0a0a;
-          }
-
-          .empty-icon {
-            width: 5rem;
-            height: 5rem;
-            color: #4b5563;
-          }
-
-          .empty-state h3 {
-            margin: 0;
-            font-size: 1.25rem;
-            font-weight: 500;
-            color: #9ca3af;
-          }
-
-          .empty-state p {
-            margin: 0;
-            font-size: 0.9375rem;
-            color: #6b7280;
-          }
-
-          .empty-state .new-file-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.625rem 1.25rem;
-            background: #2563eb;
-            border: none;
-            border-radius: 0.5rem;
-            color: white;
-            font-size: 0.875rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.15s;
-          }
-
-          .empty-state .new-file-btn:hover {
-            background: #1d4ed8;
-          }
-
-          .empty-state .new-file-btn svg {
-            width: 1rem;
-            height: 1rem;
-          }
-        `}</style>
-      </div>
+    const handleKeyDown = useCallback(
+        (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                e.preventDefault();
+                if (onSaveFile && activeFileId) onSaveFile(activeFileId);
+            }
+            // ⌘⏎ runs the current test file
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                if (onRunTests && activeFileId && !isRunningTests) {
+                    onRunTests(activeFileId);
+                }
+            }
+        },
+        [onSaveFile, onRunTests, activeFileId, isRunningTests],
     );
-  }
 
-  const getStatusIcon = (status: TestFile['status']) => {
-    switch (status) {
-      case 'passed':
-        return (
-          <svg className="tab-status passed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path d="M5 13l4 4L19 7" />
-          </svg>
-        );
-      case 'failed':
-        return (
-          <svg className="tab-status failed" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        );
-      case 'running':
-        return (
-          <svg className="tab-status running" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-        );
-      default:
-        return null;
-    }
-  };
+    useEffect(() => {
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [handleKeyDown]);
 
-  // Get language from file extension
-  const getLanguage = (filename: string): string => {
-    const ext = filename.split('.').pop()?.toLowerCase();
-    const langMap: Record<string, string> = {
-      'ts': 'typescript',
-      'tsx': 'typescript',
-      'js': 'javascript',
-      'jsx': 'javascript',
-      'json': 'json',
-      'css': 'css',
-      'scss': 'scss',
-      'html': 'html',
-      'md': 'markdown',
+    const handleEditorChange = (value: string | undefined) => {
+        if (value !== undefined && onContentChange) {
+            onContentChange(activeFileId, value);
+        }
     };
-    return langMap[ext || ''] || 'typescript';
-  };
 
-  return (
-    <div className="code-editor">
-      {/* Tabs */}
-      <div className="editor-tabs">
-        {files.map((file) => (
-          <div
-            key={file.id}
-            className={`editor-tab ${file.id === activeFileId ? 'active' : ''}`}
-          >
-            <button
-              className="tab-content"
-            onClick={() => onFileSelect(file.id)}
-          >
-            <svg className="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-              <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-              <span className="tab-name">{file.name}</span>
-            {getStatusIcon(file.status)}
-          </button>
-            {onFileClose && (
-              <button
-                type="button"
-                className="tab-close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onFileClose(file.id);
-                }}
-                title="Close file"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* File Header */}
-      {activeFile && (
-        <div className="file-header">
-          <div className="file-path">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-              <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <span>{activeFile.path}</span>
-          </div>
-          <div className="header-actions">
-            {onNewFile && (
-              <button
-                type="button"
-                className="new-file-header-btn"
-                onClick={onNewFile}
-                title="Create new file"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                New
-              </button>
-            )}
-            {onSaveFile && (
-              <button
-                type="button"
-                className={`save-file-btn ${showSavedFlash ? 'saved' : ''}`}
-                onClick={() => onSaveFile(activeFileId)}
-                disabled={isSaving}
-                title="Save file (⌘S)"
-              >
-                {isSaving ? (
-                  <>
-                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Saving…
-                  </>
-                ) : showSavedFlash ? (
-                  <>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                      <path d="M5 13l4 4L19 7" />
-                    </svg>
-                    Saved
-                  </>
-                ) : (
-                  <>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                      <path d="M17 21H7a2 2 0 01-2-2V5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2z" />
-                      <polyline points="17 21 17 13 7 13 7 21" />
-                      <polyline points="7 3 7 8 15 8" />
-                    </svg>
-                    Save
-                  </>
-                )}
-              </button>
-            )}
-            {onDeleteFile && (
-              <>
-                <button
-                  type="button"
-                  className="delete-file-btn"
-                  onClick={() => setShowDeleteConfirm(true)}
-                  title="Delete file"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                    <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
-                {showDeleteConfirm && (
-                  <div className="delete-confirm-popover">
-                    <p>Delete <strong>{activeFile?.name}</strong>?</p>
-                    <span className="delete-confirm-hint">This will remove the file from disk.</span>
-                    <div className="delete-confirm-actions">
-                      <button type="button" className="dc-cancel" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
-                      <button type="button" className="dc-delete" onClick={() => { setShowDeleteConfirm(false); onDeleteFile(activeFileId); }}>Delete</button>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-            <div className="header-divider" />
-            {onRunTests && (
-              <button
-                type="button"
-                className={`run-tests-btn ${isRunningTests ? 'running' : ''}`}
-                onClick={() => onRunTests(activeFile.id)}
-                disabled={isRunningTests}
-                title="Run tests in this file"
-              >
-                {isRunningTests ? (
-                  <>
-                    <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Running...
-                  </>
-                ) : (
-                  <>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                      <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                      <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    Run Tests
-                  </>
-                )}
-              </button>
-            )}
-          <div className={`status-badge ${activeFile.status}`}>
-            {activeFile.status === 'failed' && (
-              <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M6 18L18 6M6 6l12 12" />
-                </svg>
-                Tests failed
-              </>
-            )}
-            {activeFile.status === 'passed' && (
-              <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M5 13l4 4L19 7" />
-                </svg>
-                Tests passed
-              </>
-            )}
-            {activeFile.status === 'running' && (
-              <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                Running...
-              </>
-            )}
+    // Empty state ----------------------------------------------------------
+    if (!activeFile) {
+        return (
+            <div className="ce-shell">
+                <div className="ce-empty">
+                    <pre className="ce-empty-prompt" aria-hidden="true">
+                        $ raiken — no file open
+                    </pre>
+                    <p className="ce-empty-hint">
+                        Open a spec from the sidebar
+                        {onNewFile && (
+                            <>
+                                {" "}
+                                or{" "}
+                                <button type="button" className="ce-empty-link" onClick={onNewFile}>
+                                    create a new file
+                                </button>
+                            </>
+                        )}
+                        .
+                    </p>
+                </div>
+                <CodeEditorStyles />
             </div>
-          </div>
+        );
+    }
+
+    const language = getLanguage(activeFile.name);
+    const passed = activeFile.passedCount;
+    const failed = activeFile.failedCount;
+    const isScratch = activeFile.path.startsWith("scratch:");
+
+    return (
+        <div className="ce-shell">
+            {/* ---------- Single combined toolbar ---------- */}
+            <div className="ce-bar">
+                <div className="ce-tabs">
+                    {files.map((file) => {
+                        const active = file.id === activeFileId;
+                        return (
+                            <div key={file.id} className={`ce-tab ${active ? "is-active" : ""}`}>
+                                <button
+                                    type="button"
+                                    className="ce-tab-btn"
+                                    onClick={() => onFileSelect(file.id)}
+                                    title={file.path}
+                                >
+                                    <StatusDot status={file.status} />
+                                    <span className="ce-tab-name">{file.name}</span>
+                                </button>
+                                {onFileClose && (
+                                    <button
+                                        type="button"
+                                        className="ce-tab-x"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onFileClose(file.id);
+                                        }}
+                                        aria-label={`Close ${file.name}`}
+                                        title="Close"
+                                    >
+                                        <IconClose />
+                                    </button>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+
+                <div className="ce-spacer" />
+
+                {/* Inline run summary — replaces the bottom results bar */}
+                {(passed !== undefined ||
+                    failed !== undefined ||
+                    activeFile.status === "running") && (
+                    <div className="ce-summary" aria-live="polite">
+                        {activeFile.status === "running" ? (
+                            <span className="ce-sum-running">
+                                <span className="ce-sum-spinner" aria-hidden="true" />
+                                running
+                            </span>
+                        ) : (
+                            <>
+                                {failed !== undefined && failed > 0 && (
+                                    <span className="ce-sum-failed">{failed}✗</span>
+                                )}
+                                {passed !== undefined && (
+                                    <span className="ce-sum-passed">{passed}✓</span>
+                                )}
+                            </>
+                        )}
+                    </div>
+                )}
+
+                <div className="ce-rule" aria-hidden="true" />
+
+                {/* Icon-only actions */}
+                <div className="ce-actions" role="toolbar" aria-label="File actions">
+                    {onNewFile && (
+                        <IconButton label={`New file (${MOD}N)`} onClick={onNewFile}>
+                            <IconPlus />
+                        </IconButton>
+                    )}
+                    {onSaveFile && (
+                        <IconButton
+                            label={
+                                isScratch
+                                    ? "Save (use Save As… for scratch files)"
+                                    : `Save (${MOD}S)`
+                            }
+                            onClick={() => onSaveFile(activeFileId)}
+                            disabled={isSaving}
+                            state={isSaving ? "loading" : showSavedFlash ? "success" : undefined}
+                        >
+                            {isSaving ? (
+                                <IconSpinner />
+                            ) : showSavedFlash ? (
+                                <IconCheck />
+                            ) : (
+                                <IconSave />
+                            )}
+                        </IconButton>
+                    )}
+                    {onDeleteFile && (
+                        <div className="ce-confirm-anchor">
+                            <IconButton
+                                label="Delete file"
+                                onClick={() => setConfirmDelete((v) => !v)}
+                                tone={confirmDelete ? "danger-active" : undefined}
+                            >
+                                <IconTrash />
+                            </IconButton>
+                            {confirmDelete && (
+                                <div className="ce-confirm" role="dialog" ref={confirmRef}>
+                                    <p>
+                                        Delete <span className="ce-mono">{activeFile.name}</span>?
+                                    </p>
+                                    <span className="ce-confirm-hint">
+                                        {isScratch
+                                            ? "This scratch buffer will be discarded."
+                                            : "This will remove the file from disk."}
+                                    </span>
+                                    <div className="ce-confirm-row">
+                                        <button
+                                            type="button"
+                                            className="ce-confirm-btn"
+                                            onClick={() => setConfirmDelete(false)}
+                                        >
+                                            cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="ce-confirm-btn ce-confirm-btn--danger"
+                                            onClick={() => {
+                                                setConfirmDelete(false);
+                                                onDeleteFile(activeFileId);
+                                            }}
+                                            ref={(el) => {
+                                                if (el && confirmDelete) el.focus();
+                                            }}
+                                        >
+                                            delete
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    {onRunTests && (
+                        <IconButton
+                            label={isRunningTests ? "Running…" : `Run tests (${MOD}↵)`}
+                            onClick={() => onRunTests(activeFile.id)}
+                            disabled={isRunningTests}
+                            tone="run"
+                            state={isRunningTests ? "loading" : undefined}
+                        >
+                            {isRunningTests ? <IconSpinner /> : <IconPlay />}
+                        </IconButton>
+                    )}
+                </div>
+            </div>
+
+            {/* ---------- Editor ---------- */}
+            <div className="ce-editor">
+                {!isEditorReady && (
+                    <div className="ce-loading">
+                        <span className="ce-loading-spin" aria-hidden="true" />
+                        <span>loading editor</span>
+                    </div>
+                )}
+                <Editor
+                    height="100%"
+                    language={language}
+                    value={activeFile.content || ""}
+                    theme="vs-dark"
+                    beforeMount={(monaco) => {
+                        monaco.editor.defineTheme("raiken-dark", {
+                            base: "vs-dark",
+                            inherit: true,
+                            rules: [],
+                            colors: {
+                                "editor.background": "#0a0a0a",
+                                "editor.lineHighlightBackground": "#141414",
+                                "editorLineNumber.foreground": "#3a3a3a",
+                                "editorLineNumber.activeForeground": "#9ca3af",
+                                "editor.selectionBackground": "#2a2440",
+                                "editorCursor.foreground": "#a78bfa",
+                            },
+                        });
+                    }}
+                    onMount={(_editor, monaco) => {
+                        monaco.editor.setTheme("raiken-dark");
+                        setIsEditorReady(true);
+                    }}
+                    onChange={handleEditorChange}
+                    options={{
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        lineHeight: 22,
+                        fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
+                        fontLigatures: true,
+                        padding: { top: 12, bottom: 12 },
+                        scrollBeyondLastLine: false,
+                        lineNumbers: "on",
+                        renderLineHighlight: "line",
+                        cursorStyle: "line",
+                        automaticLayout: true,
+                        scrollbar: {
+                            vertical: "auto",
+                            horizontal: "auto",
+                            verticalScrollbarSize: 8,
+                            horizontalScrollbarSize: 8,
+                        },
+                        overviewRulerBorder: false,
+                        hideCursorInOverviewRuler: true,
+                        glyphMargin: false,
+                        folding: true,
+                        lineDecorationsWidth: 10,
+                        lineNumbersMinChars: 4,
+                    }}
+                />
+            </div>
+
+            <CodeEditorStyles />
         </div>
-      )}
-
-      {/* Monaco Editor */}
-      <div className="editor-container">
-        {!isEditorReady && (
-          <div className="editor-loading">
-            <div className="loading-spinner" />
-            <span>Loading editor...</span>
-          </div>
-        )}
-        <Editor
-          height="100%"
-          language={activeFile ? getLanguage(activeFile.name) : 'typescript'}
-          value={activeFile?.content || ''}
-          theme="vs-dark"
-          beforeMount={(monaco) => {
-            // Define custom black theme
-            monaco.editor.defineTheme('raiken-dark', {
-              base: 'vs-dark',
-              inherit: true,
-              rules: [],
-              colors: {
-                'editor.background': '#0a0a0a',
-                'editor.lineHighlightBackground': '#1a1a1a',
-                'editorLineNumber.foreground': '#4b5563',
-                'editorLineNumber.activeForeground': '#9ca3af',
-                'editor.selectionBackground': '#264f78',
-                'editorCursor.foreground': '#3b82f6',
-              }
-            });
-          }}
-          onMount={(_editor, monaco) => {
-            monaco.editor.setTheme('raiken-dark');
-            setIsEditorReady(true);
-          }}
-          onChange={handleEditorChange}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 13,
-            lineHeight: 22,
-            fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
-            fontLigatures: true,
-            padding: { top: 16, bottom: 16 },
-            scrollBeyondLastLine: false,
-            lineNumbers: 'on',
-            renderLineHighlight: 'line',
-            cursorStyle: 'line',
-            automaticLayout: true,
-            scrollbar: {
-              vertical: 'auto',
-              horizontal: 'auto',
-              verticalScrollbarSize: 8,
-              horizontalScrollbarSize: 8,
-            },
-            overviewRulerBorder: false,
-            hideCursorInOverviewRuler: true,
-            glyphMargin: false,
-            folding: true,
-            lineDecorationsWidth: 10,
-            lineNumbersMinChars: 4,
-          }}
-        />
-      </div>
-
-      {/* Results Bar */}
-      {activeFile && (
-        <div className="results-bar">
-          {activeFile.failedCount !== undefined && activeFile.failedCount > 0 && (
-            <span className="result-count failed">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M6 18L18 6M6 6l12 12" />
-              </svg>
-              {activeFile.failedCount} failed
-            </span>
-          )}
-          {activeFile.passedCount !== undefined && (
-            <span className="result-count passed">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M5 13l4 4L19 7" />
-              </svg>
-              {activeFile.passedCount} passed
-            </span>
-          )}
-          <span className="result-time">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-              <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            1.323s
-          </span>
-        </div>
-      )}
-
-      <style>{`
-        .code-editor {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          background: #0a0a0a;
-          overflow: hidden;
-          min-height: 0;
-        }
-
-        .editor-tabs {
-          display: flex;
-          align-items: center;
-          gap: 0;
-          background: #0f0f0f;
-          border-bottom: 1px solid #1f1f1f;
-          overflow-x: auto;
-          flex-shrink: 0;
-        }
-
-        .editor-tab {
-          display: flex;
-          align-items: center;
-          gap: 0;
-          padding: 0;
-          background: transparent;
-          border: none;
-          border-bottom: 2px solid transparent;
-          color: #6b7280;
-          font-size: 0.8125rem;
-          transition: all 0.15s;
-          white-space: nowrap;
-        }
-
-        .editor-tab:hover {
-          background: #1a1a1a;
-          color: #9ca3af;
-        }
-
-        .editor-tab.active {
-          background: #0a0a0a;
-          color: #e5e7eb;
-          border-bottom-color: #3b82f6;
-        }
-
-        .tab-content {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.75rem 0.75rem;
-          background: transparent;
-          border: none;
-          color: inherit;
-          font-size: inherit;
-          cursor: pointer;
-        }
-
-        .tab-name {
-          max-width: 150px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .tab-close {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          width: 1.25rem;
-          height: 1.25rem;
-          margin-right: 0.5rem;
-          background: transparent;
-          border: none;
-          border-radius: 4px;
-          color: #6b7280;
-          cursor: pointer;
-          transition: all 0.15s;
-          opacity: 0;
-        }
-
-        .editor-tab:hover .tab-close,
-        .editor-tab.active .tab-close {
-          opacity: 1;
-        }
-
-        .tab-close:hover {
-          background: rgba(239, 68, 68, 0.2);
-          color: #ef4444;
-        }
-
-        .tab-close svg {
-          width: 0.75rem;
-          height: 0.75rem;
-        }
-
-        .file-icon {
-          width: 1rem;
-          height: 1rem;
-        }
-
-        .tab-status {
-          width: 0.875rem;
-          height: 0.875rem;
-        }
-
-        .tab-status.passed {
-          color: #22c55e;
-        }
-
-        .tab-status.failed {
-          color: #ef4444;
-        }
-
-        .tab-status.running {
-          color: #60a5fa;
-          animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-
-        .file-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 0.75rem 1rem;
-          background: #0f0f0f;
-          border-bottom: 1px solid #1f1f1f;
-          flex-shrink: 0;
-        }
-
-        .file-path {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          color: #6b7280;
-          font-size: 0.8125rem;
-        }
-
-        .file-path svg {
-          width: 1rem;
-          height: 1rem;
-        }
-
-        .header-actions {
-          display: flex;
-          align-items: center;
-          gap: 0.75rem;
-        }
-
-        .new-file-header-btn {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          padding: 0.375rem 0.75rem;
-          background: transparent;
-          border: 1px solid #3a3a3a;
-          border-radius: 0.375rem;
-          color: #9ca3af;
-          font-size: 0.75rem;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-
-        .new-file-header-btn:hover {
-          background: #1f1f1f;
-          border-color: #4a4a4a;
-          color: #e5e7eb;
-        }
-
-        .new-file-header-btn svg {
-          width: 0.875rem;
-          height: 0.875rem;
-        }
-
-        .run-tests-btn {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.5rem 1rem;
-          background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-          border: none;
-          border-radius: 6px;
-          color: white;
-          font-size: 0.8125rem;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.15s;
-          box-shadow: 0 2px 8px rgba(34, 197, 94, 0.25);
-        }
-
-        .run-tests-btn:hover:not(:disabled) {
-          transform: translateY(-1px);
-          box-shadow: 0 4px 12px rgba(34, 197, 94, 0.35);
-        }
-
-        .run-tests-btn:disabled {
-          opacity: 0.7;
-          cursor: not-allowed;
-        }
-
-        .run-tests-btn.running {
-          background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-          box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
-        }
-
-        .run-tests-btn svg {
-          width: 1rem;
-          height: 1rem;
-        }
-
-        .run-tests-btn .spin {
-          animation: spin 1s linear infinite;
-        }
-
-        .header-divider {
-          width: 1px;
-          height: 1.25rem;
-          background: #2a2a2a;
-        }
-
-        .save-file-btn {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          padding: 0.375rem 0.75rem;
-          background: transparent;
-          border: 1px solid #3a3a3a;
-          border-radius: 0.375rem;
-          color: #9ca3af;
-          font-size: 0.75rem;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-
-        .save-file-btn:hover:not(:disabled) {
-          background: #1f1f1f;
-          border-color: #4a4a4a;
-          color: #e5e7eb;
-        }
-
-        .save-file-btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        .save-file-btn.saved {
-          border-color: rgba(34, 197, 94, 0.4);
-          color: #22c55e;
-        }
-
-        .save-file-btn svg {
-          width: 0.875rem;
-          height: 0.875rem;
-        }
-
-        .save-file-btn .spin {
-          animation: spin 1s linear infinite;
-        }
-
-        .delete-file-btn {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 0.375rem;
-          background: transparent;
-          border: 1px solid transparent;
-          border-radius: 0.375rem;
-          color: #6b7280;
-          cursor: pointer;
-          transition: all 0.15s;
-          position: relative;
-        }
-
-        .delete-file-btn:hover {
-          background: rgba(239, 68, 68, 0.1);
-          border-color: rgba(239, 68, 68, 0.3);
-          color: #ef4444;
-        }
-
-        .delete-file-btn svg {
-          width: 0.9375rem;
-          height: 0.9375rem;
-        }
-
-        .delete-confirm-popover {
-          position: absolute;
-          top: calc(100% + 0.5rem);
-          right: 0;
-          z-index: 200;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 0.5rem;
-          padding: 0.875rem 1rem;
-          box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
-          min-width: 220px;
-        }
-
-        .delete-confirm-popover p {
-          margin: 0 0 0.25rem 0;
-          font-size: 0.8125rem;
-          color: #e5e7eb;
-        }
-
-        .delete-confirm-hint {
-          display: block;
-          font-size: 0.6875rem;
-          color: #6b7280;
-          margin-bottom: 0.75rem;
-        }
-
-        .delete-confirm-actions {
-          display: flex;
-          gap: 0.5rem;
-          justify-content: flex-end;
-        }
-
-        .dc-cancel, .dc-delete {
-          padding: 0.3125rem 0.75rem;
-          border: none;
-          border-radius: 0.375rem;
-          font-size: 0.75rem;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-
-        .dc-cancel {
-          background: #2a2a2a;
-          color: #e5e7eb;
-        }
-
-        .dc-cancel:hover {
-          background: #3a3a3a;
-        }
-
-        .dc-delete {
-          background: #dc2626;
-          color: white;
-        }
-
-        .dc-delete:hover {
-          background: #b91c1c;
-        }
-
-        .status-badge {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          padding: 0.375rem 0.75rem;
-          border-radius: 6px;
-          font-size: 0.75rem;
-          font-weight: 500;
-        }
-
-        .status-badge.failed {
-          background: rgba(239, 68, 68, 0.1);
-          color: #ef4444;
-          border: 1px solid rgba(239, 68, 68, 0.2);
-        }
-
-        .status-badge.passed {
-          background: rgba(34, 197, 94, 0.1);
-          color: #22c55e;
-          border: 1px solid rgba(34, 197, 94, 0.2);
-        }
-
-        .status-badge.running {
-          background: rgba(96, 165, 250, 0.1);
-          color: #60a5fa;
-          border: 1px solid rgba(96, 165, 250, 0.2);
-        }
-
-        .status-badge svg {
-          width: 0.75rem;
-          height: 0.75rem;
-        }
-
-        .editor-container {
-          flex: 1;
-          position: relative;
-          min-height: 200px;
-        }
-
-        .editor-loading {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 1rem;
-          background: #0a0a0a;
-          color: #6b7280;
-          font-size: 0.875rem;
-          z-index: 10;
-        }
-
-        .loading-spinner {
-          width: 24px;
-          height: 24px;
-          border: 2px solid #3f3f46;
-          border-top-color: #3b82f6;
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-
-        .results-bar {
-          display: flex;
-          align-items: center;
-          gap: 1rem;
-          padding: 0.625rem 1rem;
-          background: #0f0f0f;
-          border-top: 1px solid #1f1f1f;
-          flex-shrink: 0;
-        }
-
-        .result-count {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          font-size: 0.8125rem;
-        }
-
-        .result-count svg {
-          width: 0.875rem;
-          height: 0.875rem;
-        }
-
-        .result-count.failed {
-          color: #ef4444;
-        }
-
-        .result-count.passed {
-          color: #22c55e;
-        }
-
-        .result-time {
-          display: flex;
-          align-items: center;
-          gap: 0.375rem;
-          color: #6b7280;
-          font-size: 0.8125rem;
-          margin-left: auto;
-        }
-
-        .result-time svg {
-          width: 0.875rem;
-          height: 0.875rem;
-        }
-      `}</style>
-    </div>
-  );
+    );
+}
+
+// ---------- Icon button primitive ------------------------------------------
+
+function IconButton({
+    label,
+    onClick,
+    children,
+    disabled,
+    state,
+    tone,
+}: {
+    label: string;
+    onClick: () => void;
+    children: React.ReactNode;
+    disabled?: boolean;
+    state?: "loading" | "success";
+    tone?: "run" | "danger-active";
+}) {
+    const cls = ["ce-icon-btn", tone ? `ce-icon-btn--${tone}` : "", state ? `is-${state}` : ""]
+        .filter(Boolean)
+        .join(" ");
+    return (
+        <button
+            type="button"
+            className={cls}
+            onClick={onClick}
+            disabled={disabled}
+            title={label}
+            aria-label={label}
+        >
+            {children}
+        </button>
+    );
+}
+
+// ---------- Status dot inside tabs -----------------------------------------
+
+function StatusDot({ status }: { status: TestFile["status"] }) {
+    return <span className={`ce-dot ce-dot--${status}`} aria-hidden="true" />;
+}
+
+// ---------- Icons ----------------------------------------------------------
+// Single-stroke 14px monoline icons, no fill.
+
+// Decorative icons: parent <button> always carries the accessible label/title.
+function IconClose() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+    );
+}
+function IconPlus() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M8 3v10M3 8h10" />
+        </svg>
+    );
+}
+function IconSave() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M3 3h8l2 2v8H3V3z" />
+            <path d="M5 3v3h5V3" />
+            <path d="M5 9h6v4H5z" />
+        </svg>
+    );
+}
+function IconCheck() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M3 8.5l3 3 7-7" />
+        </svg>
+    );
+}
+function IconTrash() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M3 4h10M6 4V2.5h4V4M5 4l.5 9h5l.5-9" />
+        </svg>
+    );
+}
+function IconPlay() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M5 3.5l7 4.5-7 4.5V3.5z" />
+        </svg>
+    );
+}
+function IconSpinner() {
+    return (
+        <svg
+            className="ce-spin"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M8 2a6 6 0 1 1-6 6" />
+        </svg>
+    );
+}
+
+// ---------- Helpers --------------------------------------------------------
+
+function getLanguage(filename: string): string {
+    const ext = filename.split(".").pop()?.toLowerCase();
+    const map: Record<string, string> = {
+        ts: "typescript",
+        tsx: "typescript",
+        js: "javascript",
+        jsx: "javascript",
+        json: "json",
+        css: "css",
+        scss: "scss",
+        html: "html",
+        md: "markdown",
+    };
+    return map[ext || ""] || "typescript";
+}
+
+// ---------- Styles ---------------------------------------------------------
+
+function CodeEditorStyles() {
+    return (
+        <style>{`
+            .ce-shell {
+                --bg: #0a0a0a;
+                --bg-bar: #0d0d0d;
+                --bg-hover: #181818;
+                --bg-active: #0a0a0a;
+                --hair: #1c1c1c;
+                --hair-soft: #161616;
+                --ink: #d4d4d4;
+                --ink-dim: #8a8a8a;
+                --ink-faint: #5a5a5a;
+                --accent: #a78bfa;
+                --accent-dim: rgba(167, 139, 250, 0.18);
+                --pass: #6fb86f;
+                --fail: #d75c5c;
+                --run: #6fa3c6;
+                --danger: #d75c5c;
+
+                --mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
+                    Menlo, Consolas, monospace;
+
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                background: var(--bg);
+                overflow: hidden;
+                min-height: 0;
+                font-family: var(--mono);
+                color: var(--ink);
+            }
+
+            /* ---------- Toolbar ---------- */
+            .ce-bar {
+                display: flex;
+                align-items: stretch;
+                background: var(--bg-bar);
+                border-bottom: 1px solid var(--hair);
+                flex-shrink: 0;
+                min-height: 34px;
+            }
+            .ce-tabs {
+                display: flex;
+                align-items: stretch;
+                overflow-x: auto;
+                scrollbar-width: thin;
+                min-width: 0;
+            }
+            .ce-tabs::-webkit-scrollbar { height: 6px; }
+            .ce-tabs::-webkit-scrollbar-thumb { background: var(--hair); }
+
+            .ce-tab {
+                display: flex;
+                align-items: center;
+                position: relative;
+                border-right: 1px solid var(--hair);
+                background: transparent;
+                color: var(--ink-faint);
+                white-space: nowrap;
+            }
+            .ce-tab:hover { color: var(--ink-dim); background: var(--hair-soft); }
+            .ce-tab.is-active {
+                background: var(--bg-active);
+                color: var(--ink);
+            }
+            .ce-tab.is-active::before {
+                content: "";
+                position: absolute;
+                left: 0; right: 0; top: 0;
+                height: 1px;
+                background: var(--accent);
+            }
+            .ce-tab-btn {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.4375rem 0.5rem 0.4375rem 0.75rem;
+                background: transparent;
+                border: 0;
+                color: inherit;
+                font-family: var(--mono);
+                font-size: 0.75rem;
+                cursor: pointer;
+                line-height: 1;
+            }
+            .ce-tab-btn:focus-visible {
+                outline: 0;
+                box-shadow: inset 0 0 0 1px var(--accent);
+            }
+            .ce-tab-name {
+                max-width: 200px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                font-variant-ligatures: none;
+            }
+            .ce-tab-x {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 18px;
+                height: 18px;
+                margin-right: 0.4375rem;
+                background: transparent;
+                border: 0;
+                color: var(--ink-faint);
+                cursor: pointer;
+                opacity: 0;
+                transition: opacity 0.1s, color 0.1s, background 0.1s;
+            }
+            .ce-tab:hover .ce-tab-x,
+            .ce-tab.is-active .ce-tab-x { opacity: 0.7; }
+            .ce-tab-x:hover { opacity: 1; color: var(--ink); background: var(--bg-hover); }
+            .ce-tab-x svg { width: 11px; height: 11px; }
+
+            /* ---------- Status dot in tabs ---------- */
+            .ce-dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 0;
+                background: currentColor;
+                flex-shrink: 0;
+                opacity: 0.55;
+            }
+            .ce-dot--pending { background: var(--ink-faint); opacity: 0.45; }
+            .ce-dot--passed { background: var(--pass); opacity: 0.95; }
+            .ce-dot--failed { background: var(--fail); opacity: 0.95; }
+            .ce-dot--running {
+                background: var(--run);
+                animation: ce-blink 1s step-end infinite;
+            }
+            @keyframes ce-blink {
+                50% { opacity: 0.25; }
+            }
+
+            .ce-spacer { flex: 1; min-width: 0.5rem; }
+
+            /* ---------- Inline run summary ---------- */
+            .ce-summary {
+                display: flex;
+                align-items: center;
+                gap: 0.625rem;
+                padding: 0 0.75rem;
+                font-family: var(--mono);
+                font-size: 0.6875rem;
+                color: var(--ink-dim);
+                font-variant-numeric: tabular-nums;
+            }
+            .ce-sum-passed { color: var(--pass); }
+            .ce-sum-failed { color: var(--fail); }
+            .ce-sum-running {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.375rem;
+                color: var(--run);
+                text-transform: lowercase;
+                letter-spacing: 0.04em;
+            }
+            .ce-sum-spinner {
+                width: 8px;
+                height: 8px;
+                border: 1px solid var(--run);
+                border-top-color: transparent;
+                border-radius: 50%;
+                display: inline-block;
+                animation: ce-spin 0.8s linear infinite;
+            }
+
+            .ce-rule {
+                width: 1px;
+                background: var(--hair);
+                margin: 6px 0;
+            }
+
+            /* ---------- Icon actions ---------- */
+            .ce-actions {
+                display: flex;
+                align-items: center;
+                padding: 0 0.25rem;
+                gap: 0;
+            }
+            .ce-icon-btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                background: transparent;
+                border: 0;
+                color: var(--ink-dim);
+                cursor: pointer;
+                position: relative;
+                margin: 3px 0;
+                transition: background 0.1s, color 0.1s;
+            }
+            .ce-icon-btn:hover:not(:disabled) {
+                background: var(--bg-hover);
+                color: var(--ink);
+            }
+            .ce-icon-btn:focus-visible {
+                outline: 0;
+                box-shadow: inset 0 0 0 1px var(--accent);
+                color: var(--ink);
+            }
+            .ce-icon-btn:disabled {
+                opacity: 0.45;
+                cursor: not-allowed;
+            }
+            .ce-icon-btn svg {
+                width: 14px;
+                height: 14px;
+            }
+            .ce-icon-btn.is-success { color: var(--pass); }
+            .ce-icon-btn.is-loading { color: var(--accent); }
+            .ce-icon-btn--run { color: var(--accent); }
+            .ce-icon-btn--run:hover:not(:disabled) {
+                background: var(--accent-dim);
+                color: var(--accent);
+            }
+            .ce-icon-btn--danger-active { color: var(--danger); background: rgba(215, 92, 92, 0.12); }
+
+            .ce-spin { animation: ce-spin 1s linear infinite; transform-origin: center; }
+            @keyframes ce-spin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+            }
+
+            /* ---------- Delete confirm popover ---------- */
+            .ce-confirm-anchor { position: relative; display: inline-flex; }
+            .ce-confirm {
+                position: absolute;
+                top: calc(100% + 4px);
+                right: 0;
+                z-index: 200;
+                background: #111;
+                border: 1px solid var(--hair);
+                padding: 0.625rem 0.75rem;
+                min-width: 220px;
+                font-family: var(--mono);
+                font-size: 0.75rem;
+                color: var(--ink);
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            }
+            .ce-confirm p {
+                margin: 0 0 0.125rem;
+                font-size: 0.75rem;
+            }
+            .ce-mono {
+                font-family: var(--mono);
+                color: var(--accent);
+            }
+            .ce-confirm-hint {
+                display: block;
+                font-size: 0.6875rem;
+                color: var(--ink-faint);
+                margin-bottom: 0.625rem;
+                line-height: 1.4;
+            }
+            .ce-confirm-row {
+                display: flex;
+                gap: 0.375rem;
+                justify-content: flex-end;
+            }
+            .ce-confirm-btn {
+                background: transparent;
+                border: 1px solid var(--hair);
+                color: var(--ink-dim);
+                padding: 0.25rem 0.625rem;
+                font-family: var(--mono);
+                font-size: 0.6875rem;
+                cursor: pointer;
+                letter-spacing: 0.04em;
+                transition: background 0.1s, color 0.1s, border-color 0.1s;
+            }
+            .ce-confirm-btn:hover { color: var(--ink); border-color: #2a2a2a; background: var(--bg-hover); }
+            .ce-confirm-btn--danger { color: var(--danger); border-color: rgba(215, 92, 92, 0.4); }
+            .ce-confirm-btn--danger:hover {
+                background: rgba(215, 92, 92, 0.12);
+                color: #ff8888;
+                border-color: var(--danger);
+            }
+
+            /* ---------- Editor area ---------- */
+            .ce-editor {
+                flex: 1;
+                position: relative;
+                min-height: 200px;
+            }
+            .ce-loading {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 0.625rem;
+                background: var(--bg);
+                color: var(--ink-faint);
+                font-family: var(--mono);
+                font-size: 0.75rem;
+                z-index: 10;
+                letter-spacing: 0.04em;
+            }
+            .ce-loading-spin {
+                width: 10px;
+                height: 10px;
+                border: 1px solid var(--accent);
+                border-top-color: transparent;
+                border-radius: 50%;
+                animation: ce-spin 0.8s linear infinite;
+            }
+
+            /* ---------- Empty state ---------- */
+            .ce-empty {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                justify-content: center;
+                gap: 0.5rem;
+                padding: 2rem 2.5rem;
+                background: var(--bg);
+                font-family: var(--mono);
+            }
+            .ce-empty-prompt {
+                margin: 0;
+                font-family: var(--mono);
+                font-size: 0.8125rem;
+                color: var(--ink-faint);
+                white-space: pre;
+            }
+            .ce-empty-hint {
+                margin: 0;
+                font-family: var(--mono);
+                font-size: 0.75rem;
+                color: var(--ink-dim);
+                line-height: 1.6;
+            }
+            .ce-empty-link {
+                background: transparent;
+                border: 0;
+                padding: 0;
+                color: var(--accent);
+                font: inherit;
+                cursor: pointer;
+                text-decoration: underline;
+                text-decoration-thickness: 1px;
+                text-underline-offset: 3px;
+            }
+            .ce-empty-link:hover { text-decoration-thickness: 2px; }
+        `}</style>
+    );
 }

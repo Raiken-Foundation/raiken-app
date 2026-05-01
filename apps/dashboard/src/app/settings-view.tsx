@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AIProviderPanel } from "../components/ai-provider-panel";
 import { Header } from "../components/header";
 import { trpc } from "../utils/trpc";
 
@@ -7,7 +8,7 @@ interface RaikenConfig {
     testDirectory: string;
     playwrightConfig: string;
     outputFormats: string[];
-    ai: { provider: string; model: string; apiKey?: string };
+    ai: { provider: string; model: string; apiKey?: string; baseURL?: string };
     auth?: Record<string, unknown>;
     features: { video: boolean; screenshots: boolean; tracing: boolean; network: boolean };
     indexing?: { fullScan: boolean };
@@ -18,16 +19,16 @@ interface RaikenConfig {
     browser: { defaultBrowser: string; headless: boolean; timeout: number; retries: number };
     autonomy?: {
         autoSaveTests: boolean; autoRunTests: boolean;
-        autoCorrect: string; autoLearn: string; maxRetries: number;
+        autoCorrect: "suggest" | "apply" | "off"; autoLearn: string; maxRetries: number;
     };
 }
 
 const defaultConfig: RaikenConfig = {
     projectType: "generic",
-    testDirectory: "tests",
+    testDirectory: "e2e",
     playwrightConfig: "playwright.config.ts",
     outputFormats: ["typescript"],
-    ai: { provider: "openrouter", model: "anthropic/claude-3.5-sonnet" },
+    ai: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
     features: { video: true, screenshots: true, tracing: false, network: true },
     discovery: { maxPages: 100, maxDepth: 5, maxConcurrency: 3, timeout: 30000, excludePatterns: [], pauseOnAuth: true },
     browser: { defaultBrowser: "chromium", headless: true, timeout: 30000, retries: 1 },
@@ -52,13 +53,19 @@ export function SettingsView() {
     const [dirty, setDirty] = useState(false);
     const [saved, setSaved] = useState(false);
 
+    const [saveError, setSaveError] = useState<string | null>(null);
+
     const configQuery = trpc.getConfig.useQuery();
     const saveMutation = trpc.updateConfig.useMutation({
         onSuccess: () => {
             setDirty(false);
             setSaved(true);
+            setSaveError(null);
             configQuery.refetch();
             setTimeout(() => setSaved(false), 2000);
+        },
+        onError: (error) => {
+            setSaveError(error.message || "Failed to save configuration");
         },
     });
 
@@ -121,14 +128,45 @@ export function SettingsView() {
         return undefined;
     };
 
+    if (configQuery.isLoading) {
+        return (
+            <div className="settings-view">
+                <Header projectName="Settings" />
+                <div className="settings-loading">
+                    <div className="loader-spinner" />
+                    <span>Loading configuration...</span>
+                </div>
+                <style>{`
+                    .settings-view { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg); color: var(--ink); font-family: var(--mono); overflow: hidden; }
+                    .settings-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; flex: 1; color: var(--ink-dim); font-size: 12px; font-family: var(--mono); }
+                    .loader-spinner { width: 18px; height: 18px; border: 2px solid var(--hair-strong); border-top-color: var(--accent); border-radius: 50%; animation: q-spin 0.8s linear infinite; }
+                `}</style>
+            </div>
+        );
+    }
+
+    if (configQuery.isError) {
+        return (
+            <div className="settings-view">
+                <Header projectName="Settings" />
+                <div className="settings-loading">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="var(--fail)" strokeWidth="1.5" style={{ width: 24, height: 24 }}>
+                        <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span>Failed to load configuration: {configQuery.error?.message}</span>
+                    <button type="button" onClick={() => configQuery.refetch()} style={{ padding: '4px 10px', background: 'transparent', border: '1px solid var(--accent-dim)', color: 'var(--accent)', cursor: 'pointer', fontSize: '11.5px', fontFamily: 'var(--mono)' }}>retry</button>
+                </div>
+                <style>{`
+                    .settings-view { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg); color: var(--ink); font-family: var(--mono); overflow: hidden; }
+                    .settings-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; flex: 1; color: var(--ink-dim); font-size: 12px; font-family: var(--mono); }
+                `}</style>
+            </div>
+        );
+    }
+
     return (
         <div className="settings-view">
-            <Header
-                projectName="Settings"
-                staleCount={0}
-                failedCount={0}
-                userName="Developer"
-            />
+            <Header projectName="Settings" />
 
             <div className="settings-body">
                 <nav className="settings-nav" role="navigation" aria-label="Settings sections">
@@ -181,6 +219,13 @@ export function SettingsView() {
                         </div>
                     </div>
 
+                    {saveError && (
+                        <div className="save-error-banner">
+                            <span>Save failed: {saveError}</span>
+                            <button type="button" onClick={() => setSaveError(null)} style={{ background: 'none', border: 'none', color: 'var(--fail)', cursor: 'pointer', fontSize: '14px', fontFamily: 'var(--mono)' }}>×</button>
+                        </div>
+                    )}
+
                     <div className="field-list">
                         {activeSection === "general" && (
                             <>
@@ -212,33 +257,13 @@ export function SettingsView() {
                         )}
 
                         {activeSection === "ai" && (
-                            <>
-                                <FieldGroup label="Provider" hint="Which AI backend to route requests through.">
-                                    <select
-                                        value={(val("ai", "provider") as string) ?? defaultConfig.ai.provider}
-                                        onChange={(e) => update("ai", "provider", e.target.value)}
-                                    >
-                                        <option value="openrouter">OpenRouter</option>
-                                        <option value="openai">OpenAI</option>
-                                    </select>
-                                </FieldGroup>
-                                <FieldGroup label="Model" hint="Model identifier (e.g. anthropic/claude-3.5-sonnet).">
-                                    <input
-                                        type="text"
-                                        value={(val("ai", "model") as string) ?? defaultConfig.ai.model}
-                                        onChange={(e) => update("ai", "model", e.target.value)}
-                                        placeholder={defaultConfig.ai.model}
-                                    />
-                                </FieldGroup>
-                                <FieldGroup label="API Key" hint="API key for the selected provider. Stored locally in raiken.config.json.">
-                                    <input
-                                        type="password"
-                                        value={(val("ai", "apiKey") as string) ?? ""}
-                                        onChange={(e) => update("ai", "apiKey", e.target.value)}
-                                        placeholder="sk-..."
-                                    />
-                                </FieldGroup>
-                            </>
+                            <AIProviderPanel
+                                provider={val("ai", "provider") as string | undefined}
+                                apiKey={val("ai", "apiKey") as string | undefined}
+                                model={val("ai", "model") as string | undefined}
+                                baseURL={val("ai", "baseURL") as string | undefined}
+                                onChange={(field, value) => update("ai", field, value)}
+                            />
                         )}
 
                         {activeSection === "browser" && (
@@ -427,8 +452,9 @@ export function SettingsView() {
                     flex-direction: column;
                     flex: 1;
                     min-height: 0;
-                    background: #0a0a0a;
-                    color: #e5e7eb;
+                    background: var(--bg);
+                    color: var(--ink);
+                    font-family: var(--mono);
                     overflow: hidden;
                 }
 
@@ -439,50 +465,60 @@ export function SettingsView() {
                 }
 
                 .settings-nav {
-                    width: 220px;
-                    min-width: 220px;
-                    border-right: 1px solid #1f1f1f;
-                    padding: 1rem 0.75rem;
+                    width: 180px;
+                    min-width: 180px;
+                    border-right: 1px solid var(--hair);
+                    background: var(--bg-bar);
+                    padding: 0.5rem 0.25rem;
                     display: flex;
                     flex-direction: column;
-                    gap: 0.25rem;
+                    gap: 1px;
                     overflow-y: auto;
                 }
 
                 .nav-item {
                     display: flex;
                     align-items: center;
-                    gap: 0.625rem;
-                    padding: 0.55rem 0.75rem;
+                    gap: 0.4375rem;
+                    padding: 0.375rem 0.5rem;
                     background: transparent;
-                    border: none;
-                    border-radius: 8px;
-                    color: #9ca3af;
-                    font-size: 0.8125rem;
+                    border: 0;
+                    color: var(--ink-dim);
+                    font-family: var(--mono);
+                    font-size: 11.5px;
                     cursor: pointer;
-                    transition: all 0.15s;
                     text-align: left;
+                    transition: background 0.12s, color 0.12s;
+                    position: relative;
                 }
 
                 .nav-item:hover {
-                    background: #1a1a1a;
-                    color: #e5e7eb;
+                    background: var(--bg-hover);
+                    color: var(--ink);
                 }
 
                 .nav-item.active {
-                    background: #1e293b;
-                    color: #60a5fa;
+                    background: var(--accent-soft);
+                    color: var(--accent);
+                }
+
+                .nav-item.active::before {
+                    content: "";
+                    position: absolute;
+                    left: 0; top: 0; bottom: 0;
+                    width: 2px;
+                    background: var(--accent);
                 }
 
                 .nav-item svg {
-                    width: 1.125rem;
-                    height: 1.125rem;
+                    width: 12px;
+                    height: 12px;
                     flex-shrink: 0;
                 }
 
                 .settings-main {
                     flex: 1;
-                    padding: 1.5rem 2rem;
+                    padding: 1rem 1.25rem;
                     overflow-y: auto;
                     max-width: 720px;
                 }
@@ -491,58 +527,73 @@ export function SettingsView() {
                     display: flex;
                     justify-content: space-between;
                     align-items: flex-start;
-                    margin-bottom: 1.5rem;
+                    margin-bottom: 1rem;
+                    padding-bottom: 0.625rem;
+                    border-bottom: 1px solid var(--hair);
                     gap: 1rem;
                 }
 
                 .settings-header h1 {
                     margin: 0;
-                    font-size: 1.25rem;
-                    font-weight: 600;
-                    color: #f9fafb;
+                    font-size: 14px;
+                    font-weight: 500;
+                    color: var(--ink);
+                    font-family: var(--mono);
+                    display: flex;
+                    align-items: center;
+                    gap: 0.4375rem;
+                }
+
+                .settings-header h1::before {
+                    content: "#";
+                    color: var(--accent);
+                    font-weight: 400;
                 }
 
                 .settings-desc {
-                    margin: 0.35rem 0 0;
-                    font-size: 0.8125rem;
-                    color: #6b7280;
+                    margin: 0.3125rem 0 0;
+                    font-size: 11.5px;
+                    color: var(--ink-faint);
+                    line-height: 1.5;
                 }
 
                 .save-bar {
                     display: flex;
                     align-items: center;
-                    gap: 0.5rem;
+                    gap: 0.375rem;
                     flex-shrink: 0;
                 }
 
                 .save-toast {
-                    font-size: 0.75rem;
-                    color: #4ade80;
-                    padding: 0.25rem 0.5rem;
-                    background: rgba(74, 222, 128, 0.1);
-                    border-radius: 6px;
-                    animation: fade-in 0.2s ease;
+                    font-size: 11px;
+                    color: var(--pass);
+                    padding: 2px 6px;
+                    background: var(--pass-soft);
+                    border: 1px solid rgba(111, 184, 111, 0.3);
+                    animation: settings-fade-in 0.2s ease;
+                    font-family: var(--mono);
                 }
+                .save-toast::before { content: "✓ "; }
 
-                @keyframes fade-in {
-                    from { opacity: 0; transform: translateY(-4px); }
+                @keyframes settings-fade-in {
+                    from { opacity: 0; transform: translateY(-2px); }
                     to { opacity: 1; transform: translateY(0); }
                 }
 
                 .btn-secondary {
-                    padding: 0.45rem 0.875rem;
-                    background: #1f1f1f;
-                    border: 1px solid #2a2a2a;
-                    border-radius: 8px;
-                    color: #9ca3af;
-                    font-size: 0.8125rem;
+                    padding: 4px 10px;
+                    background: transparent;
+                    border: 1px solid var(--hair-strong);
+                    color: var(--ink-dim);
+                    font-family: var(--mono);
+                    font-size: 11.5px;
                     cursor: pointer;
-                    transition: all 0.15s;
+                    transition: background 0.12s, color 0.12s;
                 }
 
                 .btn-secondary:hover:not(:disabled) {
-                    background: #2a2a2a;
-                    color: #e5e7eb;
+                    background: var(--bg-hover);
+                    color: var(--ink);
                 }
 
                 .btn-secondary:disabled {
@@ -551,24 +602,43 @@ export function SettingsView() {
                 }
 
                 .btn-primary {
-                    padding: 0.45rem 1rem;
-                    background: #3b82f6;
-                    border: none;
-                    border-radius: 8px;
-                    color: #ffffff;
-                    font-size: 0.8125rem;
-                    font-weight: 500;
+                    padding: 4px 12px;
+                    background: transparent;
+                    border: 1px solid var(--accent-dim);
+                    color: var(--accent);
+                    font-family: var(--mono);
+                    font-size: 11.5px;
                     cursor: pointer;
-                    transition: all 0.15s;
+                    transition: background 0.12s, border-color 0.12s;
                 }
 
                 .btn-primary:hover:not(:disabled) {
-                    background: #2563eb;
+                    background: var(--accent-dim);
+                    border-color: var(--accent);
                 }
 
                 .btn-primary:disabled {
                     opacity: 0.4;
                     cursor: default;
+                }
+
+                .save-error-banner {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    padding: 0.4375rem 0.625rem;
+                    background: var(--fail-soft);
+                    border: 1px solid rgba(215, 92, 92, 0.3);
+                    border-left-width: 2px;
+                    color: var(--ink);
+                    font-size: 11.5px;
+                    font-family: var(--mono);
+                    margin-bottom: 0.75rem;
+                }
+                .save-error-banner > span::before {
+                    content: "✕ ";
+                    color: var(--fail);
+                    margin-right: 4px;
                 }
 
                 .field-list {
@@ -581,9 +651,9 @@ export function SettingsView() {
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    gap: 1.5rem;
-                    padding: 1rem 0;
-                    border-bottom: 1px solid #1a1a1a;
+                    gap: 1.25rem;
+                    padding: 0.75rem 0;
+                    border-bottom: 1px solid var(--hair-soft);
                 }
 
                 .field-group:first-child {
@@ -595,16 +665,17 @@ export function SettingsView() {
                 }
 
                 .field-label {
-                    font-size: 0.875rem;
+                    font-size: 12.5px;
                     font-weight: 500;
-                    color: #e5e7eb;
+                    color: var(--ink);
+                    font-family: var(--mono);
                 }
 
                 .field-hint {
-                    margin: 0.2rem 0 0;
-                    font-size: 0.75rem;
-                    color: #6b7280;
-                    line-height: 1.4;
+                    margin: 0.1875rem 0 0;
+                    font-size: 11px;
+                    color: var(--ink-faint);
+                    line-height: 1.5;
                 }
 
                 .field-control {
@@ -618,78 +689,73 @@ export function SettingsView() {
                 .field-control input[type="number"],
                 .field-control select {
                     width: 100%;
-                    padding: 0.5rem 0.75rem;
-                    background: #111;
-                    border: 1px solid #2a2a2a;
-                    border-radius: 8px;
-                    color: #e5e7eb;
-                    font-size: 0.8125rem;
+                    padding: 0.375rem 0.5rem;
+                    background: var(--bg);
+                    border: 1px solid var(--hair-strong);
+                    border-radius: 0;
+                    color: var(--ink);
+                    font-family: var(--mono);
+                    font-size: 12px;
                     outline: none;
-                    transition: border-color 0.15s;
+                    transition: border-color 0.12s;
+                    box-sizing: border-box;
                 }
 
                 .field-control input:focus,
                 .field-control select:focus {
-                    border-color: #3b82f6;
+                    border-color: var(--accent);
                 }
 
                 .field-control select {
                     cursor: pointer;
                     appearance: none;
-                    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+                    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
                     background-repeat: no-repeat;
-                    background-position: right 0.75rem center;
-                    padding-right: 2rem;
+                    background-position: right 0.5rem center;
+                    padding-right: 1.75rem;
                 }
 
                 .toggle-switch {
                     position: relative;
-                    width: 40px;
-                    height: 22px;
-                    background: #2a2a2a;
-                    border: none;
-                    border-radius: 11px;
+                    width: 28px;
+                    height: 14px;
+                    background: var(--hair-strong);
+                    border: 0;
+                    border-radius: 0;
                     cursor: pointer;
                     padding: 0;
-                    transition: background 0.2s;
+                    transition: background 0.15s;
                 }
 
-                .toggle-switch.on {
-                    background: #3b82f6;
-                }
+                .toggle-switch.on { background: var(--accent); }
 
                 .toggle-knob {
                     position: absolute;
                     top: 2px;
                     left: 2px;
-                    width: 18px;
-                    height: 18px;
-                    background: #fff;
-                    border-radius: 50%;
-                    transition: transform 0.2s;
+                    width: 10px;
+                    height: 10px;
+                    background: var(--bg);
+                    transition: transform 0.15s;
                     pointer-events: none;
                 }
 
                 .toggle-switch.on .toggle-knob {
-                    transform: translateX(18px);
+                    transform: translateX(14px);
                 }
 
                 @media (max-width: 768px) {
-                    .settings-body {
-                        flex-direction: column;
-                    }
+                    .settings-body { flex-direction: column; }
                     .settings-nav {
                         width: 100%;
                         min-width: unset;
                         border-right: none;
-                        border-bottom: 1px solid #1f1f1f;
+                        border-bottom: 1px solid var(--hair);
                         flex-direction: row;
                         flex-wrap: wrap;
-                        padding: 0.5rem;
+                        padding: 0.375rem;
                     }
-                    .settings-main {
-                        padding: 1rem;
-                    }
+                    .settings-main { padding: 0.75rem; }
                     .field-group {
                         flex-direction: column;
                         align-items: flex-start;

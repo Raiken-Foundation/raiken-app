@@ -85,6 +85,25 @@ export class AgentMemory {
         this.instances.clear();
     }
 
+    /**
+     * Expose a SelectorMemory-compatible sink backed by this AgentMemory.
+     * Use this to bind the BrowserSession's selector tracking to persistent
+     * storage without forcing the browser layer to depend on AgentMemory.
+     */
+    asSelectorMemory(): {
+        recordSuccess: (element: string, selector: string, kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other") => void;
+        recordFailure: (element: string, selector: string, kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other") => void;
+    } {
+        return {
+            recordSuccess: (element, selector, kind) => {
+                this.recordSelectorSuccess(element, selector, kind);
+            },
+            recordFailure: (element, selector, kind) => {
+                this.recordSelectorFailure(element, selector, kind);
+            },
+        };
+    }
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -93,17 +112,32 @@ export class AgentMemory {
      * Initialize the memory system.
      * Loads preferences into cache.
      */
+    private static readonly MAX_SELECTOR_ROWS = 500;
+    private static readonly MAX_TEST_OUTCOME_ROWS = 200;
+
     initialize(): void {
         if (this.initialized) return;
 
-        // Load all preferences into cache
         const allPrefs = this.db.getAllPreferences();
         for (const [key, value] of Object.entries(allPrefs)) {
             this.preferencesCache.set(key, value);
         }
 
+        this.prune();
+
         this.initialized = true;
         console.log(`🧠 AgentMemory initialized: ${this.preferencesCache.size} preferences loaded`);
+    }
+
+    /**
+     * Prune old selector history and test outcome rows to prevent unbounded growth.
+     */
+    private prune(): void {
+        try {
+            this.db.pruneHistory(AgentMemory.MAX_SELECTOR_ROWS, AgentMemory.MAX_TEST_OUTCOME_ROWS);
+        } catch (error) {
+            console.warn("Memory pruning failed:", error instanceof Error ? error.message : error);
+        }
     }
 
     /**
@@ -249,6 +283,57 @@ export class AgentMemory {
     }
 
     /**
+     * Persist exploration state so it survives across graph invocations
+     * (e.g., when the graph pauses for user auth and resumes later).
+     */
+    setExplorationState(state: {
+        pagesVisited?: string[];
+        currentUrl?: string | null;
+    }): void {
+        if (state.pagesVisited !== undefined) {
+            this.setPreference("explore_pages_visited", JSON.stringify(state.pagesVisited));
+        }
+        if (state.currentUrl !== undefined) {
+            this.setPreference("explore_current_url", state.currentUrl ?? "");
+        }
+    }
+
+    /**
+     * Retrieve persisted exploration state and clear it (one-shot restore).
+     */
+    consumeExplorationState(): {
+        pagesVisited: string[];
+        currentUrl: string | null;
+    } | null {
+        const pagesRaw = this.getPreference("explore_pages_visited");
+        const currentUrl = this.getPreference("explore_current_url");
+
+        if (!pagesRaw && !currentUrl) return null;
+
+        let pagesVisited: string[] = [];
+        if (pagesRaw) {
+            try {
+                const parsed = JSON.parse(pagesRaw);
+                if (Array.isArray(parsed)) {
+                    pagesVisited = parsed.filter((p) => typeof p === "string");
+                }
+            } catch {
+                pagesVisited = [];
+            }
+        }
+
+        this.setPreference("explore_pages_visited", "");
+        this.setPreference("explore_current_url", "");
+
+        if (pagesVisited.length === 0 && !currentUrl) return null;
+
+        return {
+            pagesVisited,
+            currentUrl: currentUrl || null,
+        };
+    }
+
+    /**
      * Get default test directory.
      */
     getTestDirectory(): string {
@@ -280,8 +365,12 @@ export class AgentMemory {
     /**
      * Record a failed selector usage.
      */
-    recordSelectorFailure(elementDescription: string, selector: string): void {
-        this.db.recordSelectorFailure(elementDescription, selector);
+    recordSelectorFailure(
+        elementDescription: string,
+        selector: string,
+        selectorType: "data-testid" | "role" | "text" | "css" | "xpath" | "other" = "other",
+    ): void {
+        this.db.recordSelectorFailure(elementDescription, selector, selectorType);
     }
 
     /**
@@ -316,9 +405,14 @@ export class AgentMemory {
         testFile: string,
         testName: string,
         sourcePrompt: string,
-        generatedCode: string
+        generatedCode: string,
+        sourceFiles?: string[]
     ): number {
-        return this.db.recordTestGenerated(testFile, testName, sourcePrompt, generatedCode);
+        const id = this.db.recordTestGenerated(testFile, testName, sourcePrompt, generatedCode);
+        if (sourceFiles && sourceFiles.length > 0) {
+            this.db.recordTestSourceFiles(testFile, sourceFiles);
+        }
+        return id;
     }
 
     /**

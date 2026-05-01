@@ -1,80 +1,68 @@
 import { NavLink } from "react-router-dom";
-import type { NavItem } from "../types";
+import { useAuth } from "../contexts/AuthContext";
+import Avatar from "./Avatar";
 
 interface NavbarProps {
-    isLoggedIn: boolean;
-    username: string;
     onLogout: () => void;
 }
 
-const publicLinks: NavItem[] = [
-    { path: "/", label: "Home", icon: "🏠", requiresAuth: false },
-    { path: "/about", label: "About", icon: "ℹ️", requiresAuth: false },
-    { path: "/contact", label: "Contact", icon: "✉️", requiresAuth: false },
+const NAV = [
+    { to: "/dashboard", label: "Dashboard" },
+    { to: "/projects", label: "Projects" },
+    { to: "/activity", label: "Activity" },
+    { to: "/settings", label: "Settings" },
 ];
 
-const protectedLinks: NavItem[] = [
-    { path: "/dashboard", label: "Dashboard", icon: "📊", requiresAuth: true },
-    { path: "/profile", label: "Profile", icon: "👤", requiresAuth: true },
-    { path: "/settings", label: "Settings", icon: "⚙️", requiresAuth: true },
-];
-
-function Navbar({ isLoggedIn, username, onLogout }: NavbarProps) {
-    const links = isLoggedIn
-        ? [...publicLinks, ...protectedLinks]
-        : publicLinks;
+export default function Navbar({ onLogout }: NavbarProps) {
+    const { user } = useAuth();
 
     return (
-        <nav className="navbar" data-testid="navbar">
-            <div className="navbar-brand">
-                <NavLink to="/" className="brand-link" data-testid="brand-link">
-                    Raiken Playground
+        <header className="topbar" data-testid="navbar">
+            <div className="topbar-left">
+                <NavLink to="/dashboard" className="brand" data-testid="brand">
+                    <span className="brand-mark" aria-hidden="true">
+                        ◢◣
+                    </span>
+                    <span className="brand-name">Atlas Tracker</span>
                 </NavLink>
+
+                <nav className="topbar-nav" aria-label="Primary">
+                    {NAV.map((item) => (
+                        <NavLink
+                            key={item.to}
+                            to={item.to}
+                            className={({ isActive }) =>
+                                `nav-link ${isActive ? "nav-link-active" : ""}`
+                            }
+                            data-testid={`nav-${item.label.toLowerCase()}`}
+                        >
+                            {item.label}
+                        </NavLink>
+                    ))}
+                </nav>
             </div>
 
-            <ul className="navbar-links" data-testid="navbar-links">
-                {links.map((link) => (
-                    <li key={link.path}>
-                        <NavLink
-                            to={link.path}
-                            className={({ isActive }) =>
-                                `nav-link ${isActive ? "active" : ""}`
-                            }
-                            data-testid={`nav-${link.label.toLowerCase()}`}
-                        >
-                            <span className="nav-icon">{link.icon}</span>
-                            {link.label}
-                        </NavLink>
-                    </li>
-                ))}
-            </ul>
-
-            <div className="navbar-actions" data-testid="navbar-actions">
-                {isLoggedIn ? (
+            <div className="topbar-right">
+                {user && (
                     <>
-                        <span className="user-badge" data-testid="user-badge">
-                            {username}
-                        </span>
+                        <NavLink to="/profile" className="user-chip" data-testid="user-chip">
+                            <Avatar user={user} size="sm" />
+                            <span className="user-meta">
+                                <span className="user-name">{user.username}</span>
+                                <span className="user-role">{user.role}</span>
+                            </span>
+                        </NavLink>
                         <button
+                            type="button"
+                            className="btn btn-ghost"
                             onClick={onLogout}
-                            className="btn btn-secondary btn-sm"
                             data-testid="logout-button"
                         >
-                            Logout
+                            Sign out
                         </button>
                     </>
-                ) : (
-                    <NavLink
-                        to="/login"
-                        className="btn btn-primary btn-sm"
-                        data-testid="login-nav-button"
-                    >
-                        Login
-                    </NavLink>
                 )}
             </div>
-        </nav>
+        </header>
     );
 }
-
-export default Navbar;

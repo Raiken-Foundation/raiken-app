@@ -1,282 +1,149 @@
 // ============================================================================
-// Prompt Templates for AI Test Generation
-// Using GOLDEN Framework (Goal, Output, Limits, Data, Evaluation, Next)
-// Version: 1.0.0
+// Prompt templates for AI test generation.
+// Tight, instruction-only style: no persona, no few-shot, no recap sections.
 // ============================================================================
 
-import type { ParsedFunction, ParsedClass, ParsedImport } from '../types';
-import type { AgentIntent } from './graph/utils';
-import type { SiteKnowledge } from '../site-discovery';
+import type { SiteKnowledge } from "../site-discovery";
+import type { ParsedClass, ParsedFunction, ParsedImport } from "../types";
+import type { AgentIntent } from "./graph/utils";
 
 export interface ContextData {
-  files: Array<{
-    path: string;
-    functions: ParsedFunction[];
-    classes: ParsedClass[];
-    imports: ParsedImport[];
-    fullContext: string;
-    relevanceScore: number;
-  }>;
-  projectType: string;
-  testDirectory: string;
-  totalTokens: number;
-  siteKnowledge?: SiteKnowledge | null;
+    files: Array<{
+        path: string;
+        functions: ParsedFunction[];
+        classes: ParsedClass[];
+        imports: ParsedImport[];
+        fullContext: string;
+        relevanceScore: number;
+    }>;
+    projectType: string;
+    testDirectory: string;
+    totalTokens: number;
+    siteKnowledge?: SiteKnowledge | null;
+    /**
+     * Static `use.baseURL` extracted from the target project's
+     * `playwright.config.{ts,js,mjs}`, when present. Drives whether the
+     * generated test should use relative paths (`page.goto('/login')`) or
+     * fully-qualified URLs.
+     */
+    baseURL?: string | null;
 }
 
 /**
  * Memory context from AgentMemory for prompt building
  */
 export interface MemoryContext {
-  /** Preferred selector strategy (e.g., 'data-testid', 'role') */
-  selectorStrategy: string | null;
-  /** Selectors that have worked in the past */
-  successfulSelectors: Array<{ element: string; selector: string; type: string }>;
-  /** Recent test failures to avoid */
-  recentFailures: Array<{ testName: string; error: string }>;
+    /** Preferred selector strategy (e.g., 'data-testid', 'role') */
+    selectorStrategy: string | null;
+    /** Selectors that have worked in the past */
+    successfulSelectors: Array<{ element: string; selector: string; type: string }>;
+    /** Recent test failures to avoid */
+    recentFailures: Array<{ testName: string; error: string }>;
 }
 
 export interface PromptTemplate {
-  version: string;
-  name: string;
-  description: string;
-  buildPrompt: (context: ContextData, userPrompt: string) => string;
-  formatSiteKnowledgeSection?: (siteKnowledge: SiteKnowledge) => string;
-  changelog?: string[];
-  performanceMetrics?: {
-    successRate?: number;
-    avgTokens?: number;
-    avgGenerationTime?: number;
-  };
+    version: string;
+    name: string;
+    description: string;
+    buildPrompt: (context: ContextData, userPrompt: string) => string;
+    formatSiteKnowledgeSection?: (siteKnowledge: SiteKnowledge) => string;
+    changelog?: string[];
+    performanceMetrics?: {
+        successRate?: number;
+        avgTokens?: number;
+        avgGenerationTime?: number;
+    };
 }
 
 export interface AgentClassifierResult {
-  intent: "explore" | "generateTests" | "explain";
-  goal: string | null;
-  targetFeature: string | null;
-  targetUrl: string | null;
-  nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "discoveryRead" | "none" | null;
-  missingContext: string[];
+    intent: "explore" | "generateTests" | "explain";
+    goal: string | null;
+    targetFeature: string | null;
+    targetUrl: string | null;
+    nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "discoveryRead" | "none" | null;
+    missingContext: string[];
 }
 
 /**
- * Main prompt template using GOLDEN framework
- * Version 1.0.0 - Initial implementation
+ * Test-generation prompt. Stripped of persona, few-shot, and recap sections;
+ * load-bearing rules only.
  */
 export const goldenFrameworkTemplate: PromptTemplate = {
-  version: '1.0.0',
-  name: 'GOLDEN Framework',
-  description: 'Structured prompt template with role, goal, constraints, examples, and self-correction',
-  
-  buildPrompt(context: ContextData, userPrompt: string): string {
-    return `
-[ROLE & EXPERTISE]
-You are a senior Playwright test automation engineer with 10+ years experience in:
-- End-to-end testing for ${context.projectType} applications
-- TypeScript/JavaScript test development
-- Test design patterns (AAA, Page Object Model, Test Fixtures)
-- Accessibility, performance, and visual regression testing
+    version: "2.0.0",
+    name: "tight-v2",
+    description: "Instruction-only Playwright test generation prompt.",
 
-[GOAL]
-Generate a production-ready Playwright test file that:
-✓ Tests the functionality described in the user request
-✓ Follows Playwright best practices and conventions
-✓ Is maintainable, readable, and follows project patterns
-✓ Includes proper error handling and assertions
+    buildPrompt(context: ContextData, userPrompt: string): string {
+        // The URL rule has to flip depending on whether the target project
+        // has a Playwright `baseURL` configured. With one set, relative paths
+        // (`page.goto('/login')`) compose with the baseURL and let the same
+        // test run against local / staging / prod just by changing the
+        // config. Without one, Playwright treats `'/login'` as a navigation
+        // failure, so the test must hardcode the full URL.
+        const urlRule = context.baseURL
+            ? `- A Playwright \`use.baseURL\` is configured: \`${context.baseURL}\`.
+  URLs MUST be relative paths starting with "/" (e.g. \`page.goto('/login')\`).
+  Do NOT emit \`http://\` / \`https://\` URLs unless navigating to an external origin.`
+            : `- URLs MUST be absolute (no baseURL is configured). Source from user prompt, [SITE DISCOVERY KNOWLEDGE], or DOM context. If none, ask.`;
 
-[CONTEXT - PROJECT STRUCTURE]
-Project Type: ${context.projectType}
-Test Framework: Playwright (TypeScript)
-Test Directory: ${context.testDirectory}
+        return `[ROLE]
+Senior Playwright/TypeScript engineer. Target: ${context.projectType}.
 
-[CONTEXT - RELEVANT SOURCE FILES]
-${context.files.map(f => `
-File: ${f.path}
-Functions: ${f.functions.map(fn => `${fn.name}(${fn.params.join(', ')})`).join(', ') || 'none'}
-Classes: ${f.classes.map(c => c.name).join(', ') || 'none'}
-Key Imports: ${f.imports.slice(0, 5).map(i => i.source).join(', ') || 'none'}
+[PROJECT]
+Test directory: ${context.testDirectory}${context.baseURL ? `\nbaseURL: ${context.baseURL}` : ""}
+
+[SOURCE FILES]
+${context.files
+    .map(
+        (f) => `File: ${f.path}
+Functions: ${f.functions.map((fn) => `${fn.name}(${fn.params.join(", ")})`).join(", ") || "none"}
+Classes: ${f.classes.map((c) => c.name).join(", ") || "none"}
+Imports: ${
+            f.imports
+                .slice(0, 5)
+                .map((i) => i.source)
+                .join(", ") || "none"
+        }
 ---
-${f.fullContext}
-`).join('\n')}
+${f.fullContext}`,
+    )
+    .join("\n\n")}
+${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ""}
 
-${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ''}
-
-[TASK - USER REQUEST]
+[TASK]
 ${userPrompt}
 
-[OUTPUT FORMAT & STRUCTURE]
-Generate a complete TypeScript test file with this structure:
+[OUTPUT]
+Complete .ts test file. No markdown fences. No prose.
+Structure: imports → describe → optional beforeEach → test cases (Arrange/Act/Assert).
 
-1. Imports section (playwright/test, fixtures, page objects if needed)
-2. Test suite with descriptive name
-3. Setup/teardown hooks if needed
-4. Individual test cases following AAA pattern:
-   - Arrange: Set up test data and preconditions
-   - Act: Perform the action being tested
-   - Assert: Verify expected outcomes
+[RULES]
+- Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
+- If a [LIVE DOM CONTEXT] block is present, use ONLY selectors from it. Do not invent.
+${urlRule}
+- If [LIVE DOM CONTEXT] includes [PREREQUISITES], add beforeEach handling them; use env vars for credentials.
+- No fixed sleeps. NEVER emit page.waitForTimeout, setTimeout, or sleep.
+  Use expect.toBeVisible/toHaveText with timeout, waitForURL, or waitForResponse.
+- No vague assertions (expect(true).toBe(true)).
+- No deprecated APIs. No Jest/Vitest syntax.
+- Use TypeScript types and async/await correctly.`;
+    },
 
-Format: Complete TypeScript code only, no markdown fences or explanations.
+    formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge): string {
+        const { formatSiteKnowledge } = require("../site-discovery");
+        return "\n" + formatSiteKnowledge(siteKnowledge);
+    },
 
-[CONSTRAINTS & RULES]
-MUST DO:
-- Use TypeScript with proper types
-- Use Playwright's modern test() and expect() syntax
-- Include meaningful test descriptions
-- Use proper selectors (prefer role-based > label-based > data-testid)
-- Add assertions for success and error cases
-- Follow async/await patterns correctly
-- Include comments for complex logic
+    changelog: [
+        "v1.0.0: Initial GOLDEN framework structure.",
+        "v2.0.0: Stripped persona, few-shot, and recap sections to cut tokens ~70%.",
+    ],
 
-SELECTOR PRIORITY (in order of preference):
-1. getByRole() - Most reliable, matches accessibility tree
-2. getByLabel() - Great for form inputs with visible labels
-3. getByPlaceholder() - For inputs without visible labels
-4. getByTestId() - Explicit test hooks (data-testid attribute)
-5. getByText() - For buttons and links with stable text content
-
-IMPORTANT: If a [LIVE DOM CONTEXT] section is provided below, you MUST:
-- Use the EXACT selectors provided from the live DOM - they are verified working
-- DO NOT guess or fabricate selectors that are not listed in the DOM context
-- Prefer selectors in the priority order listed above
-
-URLS — ALWAYS USE FULL URLS:
-- NEVER use relative paths like page.goto('/login'). There is NO baseURL configured.
-- ALWAYS use complete URLs like page.goto('http://localhost:3000/login').
-- Get the correct host + port from the user's prompt, from the [SITE DISCOVERY KNOWLEDGE] section, or from any URL context provided.
-- If no URL is provided, ask the user which URL to target.
-
-NAVIGATION & PREREQUISITES:
-If the [LIVE DOM CONTEXT] includes a [PREREQUISITES] section, you MUST:
-- Include beforeEach hooks that handle navigation prerequisites (login, cookie acceptance, etc.)
-- Create reusable helper functions for complex setup steps
-- Use realistic test data or reference environment variables for credentials
-- Add comments explaining why each prerequisite step is needed
-
-Example of handling login prerequisite:
-\`\`\`typescript
-const BASE = 'http://localhost:3000';
-
-test.describe('Counter (requires auth)', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto(\`\${BASE}/login\`);
-    await page.getByLabel('Email').fill(process.env.TEST_USER || 'test@example.com');
-    await page.getByLabel('Password').fill(process.env.TEST_PASSWORD || 'password123');
-    await page.getByRole('button', { name: 'Login' }).click();
-    await page.waitForURL(\`\${BASE}/dashboard\`);
-  });
-
-  test('should increment counter', async ({ page }) => {
-    await page.getByRole('button', { name: 'Increment' }).click();
-    await expect(page.getByTestId('counter-value')).toHaveText('1');
-  });
-});
-\`\`\`
-
-MUST NOT:
-- Use deprecated Playwright APIs
-- Include vague assertions like expect(true).toBe(true)
-- Create tests without proper cleanup
-- Use brittle CSS/XPath selectors without fallbacks
-- Mix test frameworks (Jest, Vitest syntax)
-- Generate tests with hardcoded wait times (use waitFor instead)
-- Skip error handling for network/async operations
-- Invent selectors that don't exist in the provided DOM context
-
-Length: 50-150 lines (adjust based on complexity)
-Tone: Professional, clear comments, production-ready code
-
-[EXAMPLES - FEW-SHOT LEARNING]
-Example 1 - Component Interaction Test:
-\`\`\`typescript
-import { test, expect } from '@playwright/test';
-
-const BASE = 'http://localhost:3000';
-
-test.describe('Login Component', () => {
-  test('should successfully login with valid credentials', async ({ page }) => {
-    // Arrange
-    await page.goto(\`\${BASE}/login\`);
-    const email = 'user@example.com';
-    const password = 'securePass123';
-    
-    // Act
-    await page.getByLabel('Email').fill(email);
-    await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Sign In' }).click();
-    
-    // Assert
-    await expect(page).toHaveURL(\`\${BASE}/dashboard\`);
-    await expect(page.getByText('Welcome back')).toBeVisible();
-  });
-});
-\`\`\`
-
-Example 2 - API Response Test:
-\`\`\`typescript
-import { test, expect } from '@playwright/test';
-
-const BASE = 'http://localhost:3000';
-
-test.describe('User API', () => {
-  test('should create new user successfully', async ({ request }) => {
-    // Arrange
-    const userData = { name: 'Test User', email: 'test@example.com' };
-    
-    // Act
-    const response = await request.post(\`\${BASE}/api/users\`, { data: userData });
-    
-    // Assert
-    expect(response.ok()).toBeTruthy();
-    const data = await response.json();
-    expect(data.id).toBeDefined();
-    expect(data.name).toBe(userData.name);
-  });
-});
-\`\`\`
-
-[REASONING APPROACH - CHAIN OF THOUGHT]
-Before generating the test, think through:
-1. What is the core functionality being tested?
-2. What are the preconditions needed?
-3. What actions does the user/system perform?
-4. What are all possible outcomes (success, errors, edge cases)?
-5. What assertions prove the test passes?
-6. Are there any cleanup or teardown steps needed?
-
-[EVALUATION CRITERIA]
-The generated test will be evaluated on:
-✓ Correctness: Tests the requested functionality accurately
-✓ Completeness: Covers success and error cases
-✓ Best Practices: Follows Playwright conventions
-✓ Maintainability: Clear naming, good structure, comments
-✓ Reliability: Uses stable selectors, proper waits
-✓ Type Safety: Proper TypeScript usage
-
-[SELF-CORRECTION]
-After generating the initial test:
-1. Review for missing assertions
-2. Check for flaky patterns (hardcoded waits, brittle selectors)
-3. Verify all async operations use await
-4. Ensure proper error handling
-5. Validate TypeScript types are correct
-
-Now generate the test based on the user request above.
-`.trim();
-  },
-
-  formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge): string {
-    const { formatSiteKnowledge } = require('../site-discovery');
-    return '\n' + formatSiteKnowledge(siteKnowledge);
-  },
-
-  changelog: [
-    'v1.0.0: Initial implementation with GOLDEN framework structure',
-  ],
-
-  performanceMetrics: {
-    successRate: 0, // To be updated after testing
-    avgTokens: 0,
-    avgGenerationTime: 0,
-  }
+    performanceMetrics: {
+        successRate: 0,
+        avgTokens: 0,
+        avgGenerationTime: 0,
+    },
 };
 
 /**
@@ -284,158 +151,131 @@ Now generate the test based on the user request above.
  * Allows for A/B testing and version switching
  */
 export const promptTemplates: Record<string, PromptTemplate> = {
-  'golden-v1': goldenFrameworkTemplate,
-  // Future versions can be added here
+    "golden-v1": goldenFrameworkTemplate,
+    // Future versions can be added here
 };
 
 /**
  * Get the active prompt template
  * Can be overridden via configuration
  */
-export function getPromptTemplate(version = 'golden-v1'): PromptTemplate {
-  const template = promptTemplates[version];
-  if (!template) {
-    throw new Error(`Prompt template version "${version}" not found`);
-  }
-  return template;
+export function getPromptTemplate(version = "golden-v1"): PromptTemplate {
+    const template = promptTemplates[version];
+    if (!template) {
+        throw new Error(`Prompt template version "${version}" not found`);
+    }
+    return template;
 }
 
 /**
  * Build system prompt using the specified template
  */
 export function buildSystemPrompt(
-  context: ContextData,
-  userPrompt: string,
-  templateVersion = 'golden-v1',
-  memoryContext?: MemoryContext
+    context: ContextData,
+    userPrompt: string,
+    templateVersion = "golden-v1",
+    memoryContext?: MemoryContext,
 ): string {
-  const template = getPromptTemplate(templateVersion);
-  let prompt = template.buildPrompt(context, userPrompt);
-  
-  // Append memory context if available
-  if (memoryContext) {
-    prompt += buildMemoryContextSection(memoryContext);
-  }
-  
-  return prompt;
+    const template = getPromptTemplate(templateVersion);
+    let prompt = template.buildPrompt(context, userPrompt);
+
+    // Append memory context if available
+    if (memoryContext) {
+        prompt += buildMemoryContextSection(memoryContext);
+    }
+
+    return prompt;
 }
 
 /**
  * Build a prompt for exploratory Q&A and multi-question handling
  */
 export function buildExplorationPrompt(
-  context: ContextData,
-  userPrompt: string,
-  memoryContext?: MemoryContext,
-  intent: AgentIntent = "explore",
-  goalState?: {
-    activeGoal?: string | null;
-    targetFeature?: string | null;
-    targetUrl?: string | null;
-    missingContext?: string[];
-    nextTool?: string | null;
-  }
+    context: ContextData,
+    userPrompt: string,
+    memoryContext?: MemoryContext,
+    intent: AgentIntent = "explore",
+    goalState?: {
+        activeGoal?: string | null;
+        targetFeature?: string | null;
+        targetUrl?: string | null;
+        missingContext?: string[];
+        nextTool?: string | null;
+    },
 ): string {
-  let prompt = `
-[ROLE]
-You are a senior software engineer and QA engineer helping a teammate understand the product and how to test it.
+    let prompt = `[ROLE]
+QA + senior engineer helping a teammate understand and test the product.
 
-[GOAL]
-Answer the user's questions directly. If there are multiple questions or tasks, handle each in order.
-If a question or task cannot be answered from the provided context, say so and explain what would help.
+[INTENT] ${intent}
+[GOAL] ${goalState?.activeGoal ?? "none"} | feature: ${goalState?.targetFeature ?? "none"} | url: ${goalState?.targetUrl ?? "none"} | nextTool: ${goalState?.nextTool ?? "none"}
+[MISSING] ${(goalState?.missingContext || []).join(", ") || "none"}
 
-[INTENT]
-${intent}
+[RULES]
+- Treat the request as a task even if not a question. Pick the most likely interpretation; only ask a follow-up if missing input blocks progress.
+- Use only the provided context. Do not claim actions you did not take.
+- intent=explain → describe flow; intent=explore → map features to files/components.
+- Multi-part requests → numbered list under "Answers".
 
-[GOAL STATE]
-Active Goal: ${goalState?.activeGoal ?? "none"}
-Target Feature: ${goalState?.targetFeature ?? "none"}
-Target URL: ${goalState?.targetUrl ?? "none"}
-Missing Context: ${(goalState?.missingContext || []).join(", ") || "none"}
-Next Tool: ${goalState?.nextTool ?? "none"}
+[PROJECT] ${context.projectType} (tests: ${context.testDirectory})
 
-[BEHAVIOR]
-- Treat the user's request as a task even if it's not phrased as a question.
-- Default to the most likely interpretation; only ask a follow-up if a missing input blocks progress.
-- Assume the user is not a domain expert; use simple, concrete language.
-- If the request has multiple parts, answer in numbered steps under "Answers".
-- If intent is "explain", focus on how the code works and describe the flow clearly.
-- If intent is "explore", focus on mapping features to relevant files/components.
-
-[CONSTRAINTS]
-- Use only the codebase context and DOM summary provided.
-- Do not claim actions you did not take.
-- Be concise and actionable.
-
-[CONTEXT - PROJECT STRUCTURE]
-Project Type: ${context.projectType}
-Test Directory: ${context.testDirectory}
-
-[CONTEXT - RELEVANT SOURCE FILES]
-${context.files.map(f => `
-File: ${f.path}
-Functions: ${f.functions.map(fn => `${fn.name}(${fn.params.join(', ')})`).join(', ') || 'none'}
-Classes: ${f.classes.map(c => c.name).join(', ') || 'none'}
-Key Imports: ${f.imports.slice(0, 5).map(i => i.source).join(', ') || 'none'}
+[SOURCE FILES]
+${context.files
+    .map(
+        (f) => `File: ${f.path}
+Functions: ${f.functions.map((fn) => `${fn.name}(${fn.params.join(", ")})`).join(", ") || "none"}
+Classes: ${f.classes.map((c) => c.name).join(", ") || "none"}
+Imports: ${
+            f.imports
+                .slice(0, 5)
+                .map((i) => i.source)
+                .join(", ") || "none"
+        }
 ---
-${f.fullContext}
-`).join('\n')}
+${f.fullContext}`,
+    )
+    .join("\n\n")}
 
-[TASK - USER REQUEST]
+[TASK]
 ${userPrompt}
 
 [OUTPUT]
-Provide a short response with these sections:
 Answers:
-- Answer each question or task directly
-- When asked to map functionality, format as "Feature -> components/files"
+- Direct answer per question/task. For mapping, use "Feature -> files".
 Evidence:
-- Cite relevant file paths or DOM observations used
+- Cite file paths or DOM observations actually used.
 Unknowns / Next checks:
-- Note any uncertainties and what to verify next
-If there are no unknowns, write "None".
-`;
+- Uncertainties and what to verify. Write "None" if there are none.`;
 
-  if (memoryContext) {
-    prompt += buildMemoryContextSection(memoryContext);
-  }
+    if (memoryContext) {
+        prompt += buildMemoryContextSection(memoryContext);
+    }
 
-  return prompt;
+    return prompt;
 }
 
 /**
  * Build a prompt section from memory context
  */
 function buildMemoryContextSection(memory: MemoryContext): string {
-  const sections: string[] = [];
-  
-  // Selector preference
-  if (memory.selectorStrategy) {
-    sections.push(`
-[USER PREFERENCES]
-Preferred selector strategy: ${memory.selectorStrategy}
-Always prioritize ${memory.selectorStrategy} selectors when available.`);
-  }
-  
-  // Known-good selectors
-  if (memory.successfulSelectors.length > 0) {
-    sections.push(`
-[KNOWN-GOOD SELECTORS]
-These selectors have worked reliably in this project:
-${memory.successfulSelectors.map(s => `- ${s.element}: ${s.selector} (${s.type})`).join('\n')}
+    const sections: string[] = [];
 
-Use these as reference for similar elements.`);
-  }
-  
-  // Recent failures to avoid
-  if (memory.recentFailures.length > 0) {
-    sections.push(`
-[AVOID THESE PATTERNS]
-Recent test failures - avoid similar mistakes:
-${memory.recentFailures.map(f => `- ${f.testName}: ${f.error}`).join('\n')}`);
-  }
-  
-  return sections.join('\n');
+    if (memory.selectorStrategy) {
+        sections.push(
+            `\n[PREFERRED SELECTOR] ${memory.selectorStrategy} (prioritize when available)`,
+        );
+    }
+
+    if (memory.successfulSelectors.length > 0) {
+        sections.push(`\n[KNOWN-GOOD SELECTORS]
+${memory.successfulSelectors.map((s) => `- ${s.element}: ${s.selector} (${s.type})`).join("\n")}`);
+    }
+
+    if (memory.recentFailures.length > 0) {
+        sections.push(`\n[AVOID — recent failures]
+${memory.recentFailures.map((f) => `- ${f.testName}: ${f.error}`).join("\n")}`);
+    }
+
+    return sections.join("\n");
 }
 
 // ============================================================================
@@ -468,205 +308,118 @@ Please:
  * Build strict JSON classifier prompt for agent intent and goal extraction
  */
 export function buildAgentClassifierPrompt(input: {
-  userPrompt: string;
-  conversationHistory?: Array<{ role: string; content: string }>;
-  storedGoal?: {
-    activeGoal?: string | null;
-    targetFeature?: string | null;
-    targetUrl?: string | null;
-    missingContext?: string[];
-    nextTool?: string | null;
-  };
+    userPrompt: string;
+    conversationHistory?: Array<{ role: string; content: string }>;
+    storedGoal?: {
+        activeGoal?: string | null;
+        targetFeature?: string | null;
+        targetUrl?: string | null;
+        missingContext?: string[];
+        nextTool?: string | null;
+    };
+    pauseReason?: string | null;
 }): string {
-  const historyText =
-    input.conversationHistory && input.conversationHistory.length > 0
-      ? input.conversationHistory
-          .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
-          .join("\n")
-      : "None";
-  const storedGoal = input.storedGoal || {};
-  return `You are a strict JSON-only classifier for a QA agent.
+    const historyText =
+        input.conversationHistory && input.conversationHistory.length > 0
+            ? input.conversationHistory
+                  .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
+                  .join("\n")
+            : "None";
+    const storedGoal = input.storedGoal || {};
 
-Your job: identify the user's current intent and extract a concise goal state.
+    const pauseContext = input.pauseReason
+        ? `\nPause: agent was paused for "${input.pauseReason}". The new message is either a reply to that pause (credentials, "done", "continue") or an unrelated new command. Set isContinuation accordingly.\n`
+        : "";
+
+    return `Classify a QA agent request. Return JSON only.
 
 Rules:
-- Output ONLY valid JSON. No prose.
-- Use double quotes for all keys/strings.
-- If a value is unknown, use null.
-- missingContext must be an array of strings (empty array if none).
-- intent MUST be one of: "explore", "generateTests", "explain".
-- nextTool MUST be one of: "domCapture", "codeSearch", "testGen", "explain", "discoveryRead", "none", or null.
-- Use "discoveryRead" when the user asks for persisted discovery results (discovered pages, snapshots, discovery stats/session, or auth blockers).
+- Valid JSON, double quotes. Unknown → null. missingContext is string[] (use []).
+- intent ∈ explore | generateTests | explain.
+- nextTool ∈ domCapture | codeSearch | testGen | explain | discoveryRead | none | null.
+- discoveryRead when the user asks for persisted discovery data (pages, snapshots, stats, blockers).
+- isContinuation=true ONLY when directly replying to the Pause below; false otherwise or when no Pause.
 
-Context:
-ConversationHistory:
+History:
 ${historyText}
 
-StoredGoal:
-activeGoal: ${storedGoal.activeGoal ?? "null"}
-targetFeature: ${storedGoal.targetFeature ?? "null"}
-targetUrl: ${storedGoal.targetUrl ?? "null"}
-missingContext: ${(storedGoal.missingContext || []).join(", ") || "none"}
-nextTool: ${storedGoal.nextTool ?? "null"}
-
-CurrentUserPrompt:
+StoredGoal: activeGoal=${storedGoal.activeGoal ?? "null"} | feature=${storedGoal.targetFeature ?? "null"} | url=${storedGoal.targetUrl ?? "null"} | nextTool=${storedGoal.nextTool ?? "null"} | missing=${(storedGoal.missingContext || []).join(", ") || "none"}
+${pauseContext}
+CurrentPrompt:
 ${input.userPrompt}
 
-Output JSON schema:
-{
-  "intent": "explore|generateTests|explain",
-  "goal": string|null,
-  "targetFeature": string|null,
-  "targetUrl": string|null,
-  "nextTool": "domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,
-  "missingContext": string[]
-}`;
+Schema:
+{"intent":"explore|generateTests|explain","goal":string|null,"targetFeature":string|null,"targetUrl":string|null,"nextTool":"domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,"missingContext":string[],"shouldRunTests":boolean,"isContinuation":boolean}`;
 }
 
 /**
- * Build intent classification prompt for the orchestrator
+ * Build intent classification prompt for the orchestrator.
  */
 export function buildIntentClassificationPrompt(context: string): string {
-  return `You are an intelligent intent classifier for Raiken, a Playwright test generation assistant.
-
-Analyze the user's request and determine:
-1) The control intent (stop/go/retry/continue/refine/clarify/cancel/new).
-2) The primary task intent (test-generation/chat/help).
-3) The next tool that should be used (domCapture/codeSearch/testGen/explain/discoveryRead/none).
-4) The effective prompt to use if this is a retry/continue/refine.
+    return `Classify a Playwright test-gen agent request.
 
 ${context}
 
-**Control Intents:**
-- **stop**: Immediately stop all actions.
-- **cancel**: Cancel the current task.
-- **go**: Proceed with the current task.
-- **retry**: Redo the last task (e.g., "try again", "retry", "run again").
-- **continue**: Continue the same task or flow.
-- **refine**: Modify/refine the previous request.
-- **clarify**: The user response is ambiguous or missing required info; ask a targeted follow-up.
-- **new**: A brand new request.
+Output four fields:
+1) control: stop | cancel | go | retry | continue | refine | clarify | new
+2) intent: test-generation | chat | help
+3) nextTool: domCapture | codeSearch | testGen | explain | discoveryRead | none
+4) effectivePrompt: for retry/continue, the most recent prior task message (not a control phrase). For refine, the prior task merged with the new request.
 
-If control is **retry** or **continue**, choose the most recent prior user message that represents the actual task (not a control phrase).
-If control is **refine**, combine the new request with the prior task to form an updated effective prompt.
+Definitions:
+- control: stop=halt now; cancel=abandon current; go=proceed; retry=redo last task; continue=resume same flow; refine=modify previous; clarify=ambiguous, ask follow-up; new=fresh request.
+- intent: test-generation=user wants test code produced; chat=questions/explanations about the code; help=questions about Raiken itself.
+- nextTool: domCapture=need live DOM selectors; codeSearch=need files; testGen=enough context, generate now; explain=Q&A; discoveryRead=read persisted discovery data; none=no tool (help/simple reply).
 
-**Intent Categories:**
-
-1. **test-generation** - The user's primary goal is to create, generate, or write test files
-   - They want actual test code produced and saved
-   - Examples: "test this component", "generate tests", "write e2e tests for the login flow", "test the authentication"
-
-2. **chat** - The user wants to have a conversation about code, ask questions, or get explanations
-   - Code explanations, architecture discussions, "how does this work" questions
-   - General questions about their codebase, debugging help, design pattern discussions
-   - Examples: "explain this file", "what does Counter do", "how does authentication work here"
-
-3. **help** - The user needs guidance on how to use Raiken itself
-   - Questions about Raiken's features, capabilities, or how to operate it
-   - Examples: "how do I use Raiken", "what can you do", "how to generate tests"
-
-**Next Tool Selection:**
-
-- **domCapture**: Capture the live DOM from a running application to get accurate, real selectors for test generation. Useful when testing UI interactions.
-  
-- **codeSearch**: Search the codebase to find relevant files and context for the user's request.
-  
-- **testGen**: Proceed directly to test generation when sufficient context is already available.
-  
-- **explain**: Explain code, answer questions, or discuss architecture.
-  
-- **none**: No tool needed (help requests, simple responses).
-
-**Your Task:**
-Use natural language understanding to comprehend what the user wants. Consider:
-- The conversation history and what was discussed before
-- Whether they're asking about testing, explaining, or getting help
-- What context would be most helpful (live DOM, code files, or both)
-
-Think about what a skilled QA engineer would do: if testing a web application, they might want to see the live page. If testing a utility function, they'd want the source code. Use your judgment based on the full context.
-
-Respond with clear reasoning for your decision.`;
+Use the conversation context to disambiguate. Respond with reasoning then the four fields.`;
 }
 
 /**
- * Build page state analysis prompt
+ * Build page state analysis prompt.
  */
 export function buildPageStateAnalysisPrompt(
-  domSummary: string,
-  userIntent: string,
-  targetFunctionality: string
+    domSummary: string,
+    userIntent: string,
+    targetFunctionality: string,
 ): string {
-  return `Analyze this web page to determine if it contains what the user wants to test.
+    return `Decide if this page contains what the user wants to test. Be factual; only describe what is visible.
 
-**User wants to test:** ${userIntent}
-**Target:** ${targetFunctionality}
+User wants to test: ${userIntent}
+Target: ${targetFunctionality}
 
-**Current Page:**
+Page:
 ${domSummary}
 
-**Your task:**
-1. Look at the page elements factually - what type of page is this?
-2. Does this page contain the functionality the user wants to test?
-3. Can we generate tests for the requested functionality on THIS page?
-
-Be factual. Don't speculate about what might be behind this page or what the user might need to do. Just analyze what's visible.
-
-**Common Page Patterns:**
-- Login/Auth: username/password fields, login/submit buttons, forgot password links
-- Dashboard: navigation menus, user info, data cards, functional widgets
-- Landing: hero sections, CTAs, marketing content, feature highlights
-- E-commerce: product grids, add-to-cart buttons, price displays, filters
-- Forms: input fields, validation messages, submit buttons, field labels
-- Settings: toggle switches, dropdown menus, save buttons, sections
-- Profile: avatar, editable fields, account info, action buttons
-- Search Results: search input, result items, pagination, filters
-- Modal/Dialog: overlay, close button, form content, action buttons
-- Error/404: error message, navigation links, retry buttons
-
-Be specific and helpful. If the user wants to test "counter functionality" but we're on a login page, clearly explain this.`;
+Answer:
+1. What kind of page is this (login, dashboard, form, error, etc.)?
+2. Does it contain the requested functionality? yes/no.
+3. If no, name the mismatch concretely (e.g. "wants counter, this is login").`;
 }
 
 /**
- * Build conversational chat prompt for Raiken
+ * Build conversational chat prompt for Raiken.
  */
 export function buildChatPrompt(
-  userPrompt: string,
-  resolvedFiles: string[],
-  fileContextSummary: string
+    userPrompt: string,
+    resolvedFiles: string[],
+    fileContextSummary: string,
 ): string {
-  return `You are Raiken, an intelligent AI assistant for software development. You're knowledgeable, approachable, and genuinely helpful.
+    return `You are Raiken, an assistant for web development and testing. Be concise, accurate, and honest about uncertainty.
 
-**Your Expertise:**
-- Deep understanding of modern web development (React, Vue, Angular, Next.js, etc.)
-- Expert in testing strategies, patterns, and best practices
-- Strong grasp of TypeScript/JavaScript ecosystems
-- Ability to explain complex concepts simply
-- Experience with code architecture and design patterns
+Request: ${userPrompt}
 
-**Personality:**
-- Friendly and conversational, but professional
-- Thoughtful and thorough in explanations
-- Honest about limitations or uncertainties
-- Proactive in offering helpful suggestions
-- Encouraging when users are learning
+Context:
+${
+    resolvedFiles.length > 0
+        ? `Files: ${resolvedFiles.join(", ")}\n\n${fileContextSummary}`
+        : "No files in context. Suggest @ mentions if you need them."
+}
 
-**User's request:** ${userPrompt}
-
-**Available context:**
-${resolvedFiles.length > 0 
-  ? `Files in context: ${resolvedFiles.join(', ')}\n\n${fileContextSummary}` 
-  : 'No specific files mentioned.'}
-
-**Guidelines:**
-- Engage naturally with whatever the user asks about
-- If explaining code, be clear and provide context
-- If discussing architecture, consider tradeoffs and alternatives
-- If they want tests, guide them through the process
-- If files aren't in context, politely suggest using @ mentions
-- Share insights and best practices when relevant
-- Be concise but complete
-
-Respond as a helpful colleague who genuinely wants to help.`;
+Guidance:
+- Answer directly. If explaining code, ground in the provided context.
+- For architecture questions, name tradeoffs.
+- For tests, point at the next concrete step.
+- Be brief but complete.`;
 }
 
 // ============================================================================

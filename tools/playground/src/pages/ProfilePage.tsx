@@ -1,167 +1,78 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import type { ProfileData } from "../types";
+import { useId, useState } from "react";
+import Avatar from "../components/Avatar";
+import { useAuth } from "../contexts/AuthContext";
+import { useToast } from "../contexts/ToastContext";
 
-interface ProfilePageProps {
-    username: string;
-}
+export default function ProfilePage() {
+    const { user } = useAuth();
+    const { push } = useToast();
+    const emailId = useId();
+    const bioId = useId();
+    const [email, setEmail] = useState(user?.email ?? "");
+    const [bio, setBio] = useState("");
+    const [saving, setSaving] = useState(false);
 
-function ProfilePage({ username }: ProfilePageProps) {
-    const [profile, setProfile] = useState<ProfileData>({
-        username,
-        email: `${username.toLowerCase()}@example.com`,
-        bio: "",
-        theme: "light",
-        notifications: true,
-    });
-    const [isEditing, setIsEditing] = useState(false);
-    const [saved, setSaved] = useState(false);
+    if (!user) return null;
 
-    const handleSave = (e: React.FormEvent) => {
+    const submit = async (e: React.FormEvent) => {
         e.preventDefault();
-        setIsEditing(false);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 3000);
+        setSaving(true);
+        // Simulate a save round-trip without persisting.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        setSaving(false);
+        push("success", "Profile saved");
     };
 
     return (
-        <div className="page profile-page" data-testid="profile-page">
-            <div className="page-header">
-                <h1>Profile</h1>
-                <p className="page-subtitle">Manage your account information</p>
-            </div>
-
-            {saved && (
-                <div className="alert alert-success" data-testid="save-success">
-                    Profile saved successfully!
+        <div className="page" data-testid="profile-page">
+            <header className="page-header">
+                <div>
+                    <h1>Profile</h1>
+                    <p className="page-subtitle">Manage your personal details.</p>
                 </div>
-            )}
+            </header>
 
-            <div className="profile-layout">
-                <aside className="profile-sidebar" data-testid="profile-sidebar">
-                    <div className="avatar-section">
-                        <div className="avatar" data-testid="user-avatar">
-                            {username.charAt(0).toUpperCase()}
-                        </div>
-                        <h3>{username}</h3>
-                        <p className="text-muted">{profile.email}</p>
+            <section className="card profile-card">
+                <div className="profile-identity">
+                    <Avatar user={user} size="lg" />
+                    <div>
+                        <h3 data-testid="profile-username">{user.username}</h3>
+                        <span className={`pill pill-role-${user.role}`}>{user.role}</span>
                     </div>
+                </div>
 
-                    <nav className="sidebar-nav" data-testid="sidebar-nav">
-                        <Link to="/profile" className="sidebar-link active" data-testid="sidebar-profile">
-                            👤 Profile Info
-                        </Link>
-                        <Link to="/settings" className="sidebar-link" data-testid="sidebar-settings">
-                            ⚙️ Settings
-                        </Link>
-                        <Link to="/dashboard" className="sidebar-link" data-testid="sidebar-dashboard">
-                            📊 Dashboard
-                        </Link>
-                    </nav>
-                </aside>
-
-                <main className="profile-content">
-                    <div className="card" data-testid="profile-card">
-                        <div className="card-header">
-                            <h2>Profile Information</h2>
-                            {!isEditing && (
-                                <button
-                                    onClick={() => setIsEditing(true)}
-                                    className="btn btn-secondary btn-sm"
-                                    data-testid="edit-profile-button"
-                                >
-                                    Edit
-                                </button>
-                            )}
-                        </div>
-
-                        {isEditing ? (
-                            <form onSubmit={handleSave} data-testid="profile-form">
-                                <div className="form-group">
-                                    <label htmlFor="profile-username">Username</label>
-                                    <input
-                                        id="profile-username"
-                                        type="text"
-                                        value={profile.username}
-                                        onChange={(e) =>
-                                            setProfile({ ...profile, username: e.target.value })
-                                        }
-                                        data-testid="profile-username-input"
-                                    />
-                                </div>
-
-                                <div className="form-group">
-                                    <label htmlFor="profile-email">Email</label>
-                                    <input
-                                        id="profile-email"
-                                        type="email"
-                                        value={profile.email}
-                                        onChange={(e) =>
-                                            setProfile({ ...profile, email: e.target.value })
-                                        }
-                                        data-testid="profile-email-input"
-                                    />
-                                </div>
-
-                                <div className="form-group">
-                                    <label htmlFor="profile-bio">Bio</label>
-                                    <textarea
-                                        id="profile-bio"
-                                        value={profile.bio}
-                                        onChange={(e) =>
-                                            setProfile({ ...profile, bio: e.target.value })
-                                        }
-                                        placeholder="Tell us about yourself..."
-                                        rows={4}
-                                        data-testid="profile-bio-input"
-                                    />
-                                </div>
-
-                                <div className="form-actions">
-                                    <button
-                                        type="submit"
-                                        className="btn btn-primary"
-                                        data-testid="save-profile-button"
-                                    >
-                                        Save Changes
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setIsEditing(false)}
-                                        className="btn btn-secondary"
-                                        data-testid="cancel-edit-button"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </form>
-                        ) : (
-                            <div className="profile-details" data-testid="profile-details">
-                                <div className="detail-row">
-                                    <span className="detail-label">Username</span>
-                                    <span className="detail-value" data-testid="display-username">
-                                        {profile.username}
-                                    </span>
-                                </div>
-                                <div className="detail-row">
-                                    <span className="detail-label">Email</span>
-                                    <span className="detail-value" data-testid="display-email">
-                                        {profile.email}
-                                    </span>
-                                </div>
-                                <div className="detail-row">
-                                    <span className="detail-label">Bio</span>
-                                    <span className="detail-value" data-testid="display-bio">
-                                        {profile.bio || "No bio set"}
-                                    </span>
-                                </div>
-                            </div>
-                        )}
+                <form className="profile-form" onSubmit={submit}>
+                    <div className="form-group">
+                        <label htmlFor={emailId}>Email</label>
+                        <input
+                            id={emailId}
+                            type="email"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            data-testid="profile-email"
+                        />
                     </div>
-                </main>
-            </div>
+                    <div className="form-group">
+                        <label htmlFor={bioId}>Bio</label>
+                        <textarea
+                            id={bioId}
+                            rows={3}
+                            value={bio}
+                            onChange={(e) => setBio(e.target.value)}
+                            placeholder="Tell your team a little about yourself"
+                            data-testid="profile-bio"
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        className="btn btn-primary"
+                        disabled={saving}
+                        data-testid="profile-save"
+                    >
+                        {saving ? "Saving…" : "Save changes"}
+                    </button>
+                </form>
+            </section>
         </div>
     );
 }
-
-export default ProfilePage;

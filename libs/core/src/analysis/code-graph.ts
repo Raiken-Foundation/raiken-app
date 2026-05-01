@@ -4,7 +4,8 @@ import { readFileSync } from 'fs';
 import chokidar, { type FSWatcher } from 'chokidar';
 import ignore, { type Ignore } from 'ignore';
 import { parseSourceFile } from './ast-parser';
-import type { CodeGraphOptions, CodeNode, UpdateEvent, GraphStats, ParsedFile } from '../types';
+import { extractSymbolsFromAst } from './symbol-extractor';
+import type { CodeGraphOptions, CodeNode, UpdateEvent, GraphStats, ParsedFile, ParsedSymbol, GraphEdge } from '../types';
 import { isBinaryFile, isTestDirectory, isTestFile } from '../utils';
 
 export class CodeGraph {
@@ -20,6 +21,9 @@ export class CodeGraph {
   // Performance optimization: Cache resolved import paths and existing file checks
   private importCache = new Map<string, string[]>();
   private fileExistsCache = new Map<string, boolean>();
+  private cachedKeywordIndex: Map<string, string[]> | null = null;
+  /** Per-file intra-file edges (extends/implements) collected during parse. */
+  private intraFileEdges = new Map<string, GraphEdge[]>();
   
   // Cache size limits to prevent unbounded memory growth
   private static readonly CACHE_MAX_SIZE = 5000;
@@ -383,6 +387,19 @@ export class CodeGraph {
     }
   }
 
+  /**
+   * Populate the in-memory graph from pre-loaded nodes (e.g. from database).
+   * Skips file system scanning entirely.
+   */
+  loadFromNodes(nodes: Map<string, CodeNode>): void {
+    this.nodes = new Map(nodes);
+    this.computeTreeHashes();
+
+    if (this.options.enableWatch) {
+      this.startWatching();
+    }
+  }
+
   // Scan entire project (find all files)
   async scanProject(): Promise<void> {
     const ignoreMatcher = await this.getIgnoreMatcher();
@@ -479,8 +496,9 @@ export class CodeGraph {
       for (const dir of directories) {
         await this.traverseDirectory(dir, { ...options, currentDepth: options.currentDepth + 1 });
       }
-    } catch {
-      // Directory read failed
+    } catch (error) {
+      const rel = path.relative(this.rootPath, currentPath);
+      console.warn(`[CodeGraph] Failed to read directory ${rel}:`, (error as Error).message);
     }
   }
 
@@ -658,6 +676,8 @@ export class CodeGraph {
       let parsed: ParsedFile = emptyParsed;
       let ast: unknown | undefined;
       let resolvedImports: string[] = [];
+      let symbols: ParsedSymbol[] = [];
+      let intraFileEdges: GraphEdge[] = [];
 
       if (isCodeFile) {
         try {
@@ -665,7 +685,22 @@ export class CodeGraph {
           parsed = result.parsed;
           ast = result.ast;
           resolvedImports = await this.resolveImports(parsed.imports.map(imp => imp.source), filePath);
-        } catch {
+
+          try {
+            const extracted = extractSymbolsFromAst(ast, filePath);
+            symbols = extracted.symbols;
+            intraFileEdges = extracted.intraFileEdges;
+          } catch (symErr) {
+            if (process.env['DEBUG']) {
+              const rel = path.relative(this.rootPath, filePath);
+              console.warn(`[CodeGraph] Symbol extraction failed for ${rel}:`, (symErr as Error).message);
+            }
+          }
+        } catch (error) {
+          if (process.env['DEBUG']) {
+            const rel = path.relative(this.rootPath, filePath);
+            console.warn(`[CodeGraph] Parse failed for ${rel}:`, (error as Error).message);
+          }
           parsed = emptyParsed;
           ast = undefined;
           resolvedImports = [];
@@ -677,6 +712,8 @@ export class CodeGraph {
         relativePath: path.relative(this.rootPath, filePath),
         parsed,
         ast,
+        symbols,
+        intraFileEdges,
         imports: resolvedImports,
         importedBy: [],
         depth,
@@ -695,8 +732,17 @@ export class CodeGraph {
         }
       };
 
+      // Attach intra-file edges via a non-enumerable side channel so
+      // serialization paths don't accidentally pick them up. They're consumed
+      // by callers that persist the edge set (see CodeGraph.getIntraFileEdges).
+      this.intraFileEdges.set(filePath, intraFileEdges);
+
       return node;
-    } catch {
+    } catch (error) {
+      if (process.env['DEBUG']) {
+        const rel = path.relative(this.rootPath, filePath);
+        console.warn(`[CodeGraph] Could not process ${rel}:`, (error as Error).message);
+      }
       return null;
     }
   }
@@ -868,6 +914,9 @@ export class CodeGraph {
     
     // Invalidate file exists cache for this file
     this.fileExistsCache.delete(filePath);
+
+    // Keyword index must be rebuilt after file changes
+    this.cachedKeywordIndex = null;
   }
   
   /**
@@ -876,6 +925,7 @@ export class CodeGraph {
   clearCaches(): void {
     this.importCache.clear();
     this.fileExistsCache.clear();
+    this.cachedKeywordIndex = null;
   }
   
   /**
@@ -1206,6 +1256,14 @@ export class CodeGraph {
     return Array.from(this.nodes.values());
   }
 
+  /**
+   * Intra-file structural edges (extends/implements) collected during parse.
+   * Used by persistence code to populate the unified graph_edges table.
+   */
+  getIntraFileEdges(filePath: string): GraphEdge[] {
+    return this.intraFileEdges.get(filePath) ?? [];
+  }
+
   getStats(): GraphStats {
     let totalFunctions = 0;
     let totalClasses = 0;
@@ -1291,14 +1349,18 @@ export class CodeGraph {
 
   /**
    * Find files relevant to a query using keyword matching.
+   * Caches the keyword index to avoid rebuilding on every call.
    */
   findRelevantFiles(query: string, limit = 10): string[] {
-    const index = this.buildKeywordIndex();
+    if (!this.cachedKeywordIndex) {
+      this.cachedKeywordIndex = this.buildKeywordIndex();
+    }
+
     const queryWords = this.extractKeywords(query);
     const scores = new Map<string, number>();
     
     for (const word of queryWords) {
-      const matchingFiles = index.get(word.toLowerCase());
+      const matchingFiles = this.cachedKeywordIndex.get(word.toLowerCase());
       if (matchingFiles) {
         for (const file of matchingFiles) {
           scores.set(file, (scores.get(file) || 0) + 1);

@@ -101,6 +101,10 @@ export interface CodeChunk {
     relativePath: string;      // Relative to project root
     parsed: ParsedFile;        // Simplified AST (functions, classes, imports, exports) - for embeddings
     ast?: unknown;             // Complete Babel AST - for test generation
+    /** Symbols extracted from the file (functions, classes, routes, ...). */
+    symbols?: ParsedSymbol[];
+    /** Structural edges declared inside this file (extends/implements). */
+    intraFileEdges?: GraphEdge[];
     imports: string[];         // Files this imports (absolute paths)
     importedBy: string[];      // Files that import this (absolute paths)
     depth: number;             // Distance from entry point
@@ -197,4 +201,77 @@ export interface DBStats {
   total_types: number;
   last_scan: number;
   schema_version: number;
+}
+
+// ============================================================================
+// Symbol Graph Types
+// ============================================================================
+
+export type SymbolKind =
+  | 'function'
+  | 'arrow_function'
+  | 'class'
+  | 'method'
+  | 'interface'
+  | 'type'
+  | 'enum'
+  | 'component'
+  | 'route';
+
+/**
+ * A first-class symbol extracted from a file's AST.
+ * Symbols are queryable units beyond the file level: a single function,
+ * a class method, a route definition, etc.
+ */
+export interface ParsedSymbol {
+  name: string;
+  kind: SymbolKind;
+  startLine: number;
+  endLine: number;
+  isExported: boolean;
+  isAsync?: boolean;
+  signature?: string;
+  /** Name of the parent symbol (e.g. class name for methods) */
+  parent?: string;
+  /** Identifier names referenced inside this symbol's body */
+  callees?: string[];
+  /** JSX/component identifiers referenced inside this symbol's body */
+  rendered?: string[];
+  /** For routes: HTTP method or route framework (e.g. "GET", "page", "api") */
+  routeMeta?: { method?: string; path?: string; kind: 'page' | 'api' | 'handler' };
+}
+
+export type EdgeKind =
+  | 'imports'
+  | 'calls'
+  | 'extends'
+  | 'implements'
+  | 'renders'
+  | 'tests'
+  | 'defines'
+  | 'covers';
+
+/**
+ * Where an edge came from. Used by the query layer to weight evidence.
+ */
+export type EdgeProvenance =
+  | 'static_ast'    // extracted from AST during indexing
+  | 'runtime'       // captured during a live test run
+  | 'manual'        // declared by user (e.g. test_source_map)
+  | 'inferred'      // heuristically derived (semantic, naming)
+  | 'test_run';     // produced by an actual run / coverage data
+
+export interface GraphEdge {
+  kind: EdgeKind;
+  sourceFile: string;
+  targetFile: string;
+  sourceSymbol?: string;
+  targetSymbol?: string;
+  provenance: EdgeProvenance;
+  confidence: number; // 0..1
+  evidence?: {
+    line?: number;
+    snippet?: string;
+    note?: string;
+  };
 }

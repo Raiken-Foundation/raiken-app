@@ -4,7 +4,6 @@
  * Type definitions for autonomous DOM traversal and site discovery.
  */
 
-
 /**
  * Discovered page information
  */
@@ -46,21 +45,114 @@ export interface DiscoveredLink {
 export type LinkStatus = "pending" | "verified" | "broken" | "auth_required";
 
 /**
- * Authentication blocker information
+ * Discovery blocker categories.
+ *
+ * Anything the crawler hits that needs a human (or a pre-baked artifact like
+ * an auth state file) to clear before crawling can continue. Detectors emit
+ * one of these; the dashboard renders category-appropriate resolution UI.
+ *
+ * - `auth_required`     login wall — clear with `raiken auth` or a state file
+ * - `captcha`           bot challenge (Cloudflare, hCaptcha, reCAPTCHA, etc.)
+ * - `consent_wall`      cookie/GDPR overlay intercepting clicks
+ * - `rate_limited`      429 / "too many requests" page
+ * - `geo_blocked`       region-locked
+ * - `interstitial`      generic full-screen modal blocking interaction
+ * - `error_page`        5xx / app crash that needs manual investigation
+ * - `manual`            user-initiated pause ("I want to look around")
+ * - `unknown`           detector confidence too low to classify
  */
-export interface AuthBlocker {
+export type BlockerCategory =
+    | "auth_required"
+    | "captcha"
+    | "consent_wall"
+    | "rate_limited"
+    | "geo_blocked"
+    | "interstitial"
+    | "error_page"
+    | "manual"
+    | "unknown";
+
+/**
+ * How aggressively the crawler should react when a blocker fires.
+ * - `pause`  stop the whole crawl; wait for the user to resolve
+ * - `skip`   record it and move on (e.g. one stale 5xx route on a healthy site)
+ * - `log`    record only; don't even mark the URL broken
+ */
+export type BlockerSeverity = "pause" | "skip" | "log";
+
+/**
+ * How a blocker was eventually resolved by the user.
+ *
+ * - `clear`           "the page is fine now, just retry"
+ * - `skip`            "skip just this URL, continue the rest of the crawl"
+ * - `ignore_category` "don't pause for this category again this session"
+ * - `provide_state`   "here's a Playwright storageState file" (auth flow)
+ * - `handoff`         "I drove a real browser; here's the resulting state"
+ */
+export type BlockerResolution = "clear" | "skip" | "ignore_category" | "provide_state" | "handoff";
+
+/**
+ * Generalised blocker record. Replaces the legacy `AuthBlocker`.
+ *
+ * `evidenceJson` is a free-form JSON blob the detector can use to hand the
+ * dashboard whatever it needs (response body excerpt, iframe selector list,
+ * matched error string, screenshot path, ...). The dashboard treats it as
+ * opaque and just renders a summary.
+ */
+export interface DiscoveryBlocker {
     id?: number;
     projectPath: string;
     url: string;
-    blockerType: AuthBlockerType;
-    detectedElements: string;
+    /** Generalised category — see {@link BlockerCategory}. */
+    category: BlockerCategory;
+    /** What the crawler should do on first sight. */
+    severity: BlockerSeverity;
+    /**
+     * Identifier for the detector that produced this blocker
+     * (e.g. `"auth:login_form"`, `"manual_fallback:captcha_iframe"`).
+     * Used purely for logging / debugging, not behavior.
+     */
+    detectorId: string | null;
+    /** Legacy alias of evidenceJson, kept so old code still reads. */
+    detectedElements: string | null;
+    /** Free-form JSON evidence (matched selectors, status, snippets, ...). */
+    evidenceJson: string | null;
+    /** Optional path to a screenshot taken at detection time. */
+    screenshotPath: string | null;
+    /** How the user (or auto-resolver) cleared this blocker. */
+    resolution: BlockerResolution | null;
+    /**
+     * Free-form note about how resolution happened — e.g. `"raiken auth"`,
+     * `"dashboard handoff"`, `"skipped by user"`.
+     */
+    resolvedVia: string | null;
     resolvedAt: number | null;
+    /** Path to Playwright storageState if `provide_state`/`handoff`. */
     storageStatePath: string | null;
     discoveredAt: number;
 }
 
 /**
- * Types of authentication blockers
+ * Back-compat alias. External callers (and our own legacy method names)
+ * keep referring to `AuthBlocker`; new code should use `DiscoveryBlocker`.
+ *
+ * The historical `blockerType` field is now derived from `detectorId`
+ * (everything after the colon) so `getAuthBlockers` keeps working.
+ */
+export type AuthBlocker = DiscoveryBlocker & {
+    /**
+     * Legacy field; prefer `detectorId` + `category` on new code.
+     *
+     * Optional because `DiscoveryBlocker` rows from non-auth detectors
+     * (captcha, manual pause, error_page, ...) are still valid `AuthBlocker`
+     * shapes for callers that only consume the generic fields.
+     */
+    blockerType?: AuthBlockerType;
+};
+
+/**
+ * Legacy auth-specific blocker type strings, kept for back-compat with
+ * external scripts that destructure `blockerType`.
  */
 export type AuthBlockerType =
     | "url_pattern"
@@ -85,6 +177,18 @@ export interface DiscoverySession {
     queueJson: string | null;
     maxPages?: number | null;
     maxDepth?: number | null;
+    /**
+     * JSON-serialised array of URLs the user explicitly told us to skip after
+     * a blocker fired. Survives a pause/resume cycle so we don't re-block on
+     * the same URL.
+     */
+    skippedUrlsJson?: string | null;
+    /**
+     * JSON-serialised array of {@link BlockerCategory} values the user told
+     * us to log-only for the rest of this session. Detectors still fire, but
+     * the crawler downgrades severity to "log".
+     */
+    ignoredCategoriesJson?: string | null;
 }
 
 /**
@@ -106,6 +210,23 @@ export interface DiscoveryOptions {
     pauseOnAuth?: boolean;
     storageStatePath?: string | null;
     continueSession?: boolean;
+    /**
+     * When `continueSession` is true, throw away Crawlee's persistent
+     * RequestQueue (handled-URL log + pending entries) and re-seed it with
+     * `startUrl`. Use after a fresh auth handoff, captcha solve, or any
+     * resolution that materially changes what the crawler can see — the
+     * post-login DOM at `/` typically exposes a totally different link
+     * graph than the unauthenticated one, and Crawlee's queue would
+     * otherwise short-circuit the re-visit (URL already marked handled).
+     * Discovered pages/links in the database are preserved.
+     */
+    purgeQueueOnResume?: boolean;
+    /**
+     * Hard wall-clock cap on a single discovery run. When reached, the
+     * crawler pauses gracefully (preserving queue state for resume).
+     * Defaults to 30 minutes. Set to 0 to disable.
+     */
+    maxRunTimeMs?: number;
 }
 
 /**
@@ -155,15 +276,21 @@ export interface SiteKnowledge {
 }
 
 /**
- * Discovery event types
+ * Discovery event types.
+ *
+ * `blocker_detected` is the new generalised event. `auth_blocked` is still
+ * emitted alongside it for one release so external listeners (CLI scripts,
+ * the dashboard runtime listener) keep working unchanged.
  */
 export type DiscoveryEventType =
     | "page_discovered"
     | "link_found"
+    | "blocker_detected"
     | "auth_blocked"
     | "session_paused"
     | "session_resumed"
     | "session_completed"
+    | "snapshot_failed"
     | "error";
 
 /**
@@ -181,15 +308,16 @@ export interface DiscoveryEvent {
 export type DiscoveryEventData =
     | { page: DiscoveredPage }
     | { link: DiscoveredLink }
-    | { blocker: AuthBlocker }
-    | { stats: DiscoveryStats }
+    | { blocker: DiscoveryBlocker }
+    | { stats: DiscoveryStats; reason?: "aborted" }
+    | { url: string; message: string }
     | { error: Error };
 
 /**
- * Auth detector result
+ * Auth detector result.
+ * @deprecated Prefer the generic detector pipeline result type.
  */
 export interface AuthDetectorResult {
     detected: boolean;
-    blocker: AuthBlocker | null;
+    blocker: DiscoveryBlocker | null;
 }
-

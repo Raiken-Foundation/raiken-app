@@ -2,32 +2,36 @@
 
 // Agent module
 export * from "./agent/index";
-
-// Browser module
-export * from "./browser/index";
-
 // Analysis module
 export * from "./analysis/index";
-
-// Database module
-export * from "./database/index";
-
-// Testing module
-export * from "./testing/index";
-
-// Site Discovery module
-export * from "./site-discovery/index";
-
+// Browser module
+export * from "./browser/index";
+// CI module
+export * from "./ci/index";
 // Configuration module
 export * from "./config/index";
-
+// Project context (raiken.ctx.md generator)
+export * from "./context/index";
+// Cover (headless test drafter)
+export * from "./cover/index";
+// Database module
+export * from "./database/index";
+// Doctor (test-suite anti-pattern lint)
+export * from "./doctor/index";
+// Integrations module
+export * from "./integrations/index";
 // Orchestrator
 export {
-    runOrchestrator,
-    type RunOrchestratorOptions,
     type OrchestratorResult,
+    type RunOrchestratorOptions,
+    runOrchestrator,
 } from "./orchestrator/index";
-
+// Site Discovery module
+export * from "./site-discovery/index";
+// Testing module
+export * from "./testing/index";
+// Trace (stack-trace → nearest tests)
+export * from "./trace/index";
+export * from "./types";
 // Types and utilities
 export * from "./utils";
-export * from "./types";

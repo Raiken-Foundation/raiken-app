@@ -1,123 +1,11 @@
-export interface RaikenConfig {
-    projectType: string;
-    testDirectory: string;
-    playwrightConfig: string;
-    outputFormats: string[];
-    ai: {
-        provider: 'openrouter' | 'openai';
-        model: string;
-        apiKey?: string;
-    };
-    auth?: {
-        /** Path to Playwright storageState for authenticated sessions */
-        storageStatePath?: string;
-        /** Base URL for the application (used for auth flows) */
-        baseUrl?: string;
-        /** Login page path (relative to baseUrl) */
-        loginPath?: string;
-        /** Test credentials (use environment variables in production) */
-        credentials?: {
-            username?: string;
-            password?: string;
-            /** Environment variable names to use instead of hardcoded values */
-            usernameEnv?: string;
-            passwordEnv?: string;
-        };
-        /** Custom login steps (for complex auth flows) */
-        customLoginScript?: string;
-    };
-    features: {
-        video: boolean;
-        screenshots: boolean;
-        tracing: boolean;
-        network: boolean;
-    };
-    indexing?: {
-        /** Force full project scan for AST/DB indexing */
-        fullScan: boolean;
-    };
-    discovery?: {
-        maxPages?: number;
-        maxDepth?: number;
-        maxConcurrency?: number;
-        timeout?: number;
-        excludePatterns?: string[];
-        pauseOnAuth?: boolean;
-    };
-    browser: {
-        defaultBrowser: 'chromium' | 'firefox' | 'webkit';
-        headless: boolean;
-        timeout: number;
-        retries: number;
-    };
-    /** Autonomy settings - control HITL checkpoints */
-    autonomy?: {
-        /** Auto-save tests without confirmation */
-        autoSaveTests: boolean;
-        /** Auto-run tests without confirmation */
-        autoRunTests: boolean;
-        /** Self-correction behavior: 'suggest' shows diff, 'apply' auto-applies, 'off' disables */
-        autoCorrect: 'suggest' | 'apply' | 'off';
-        /** Learning behavior: 'confirm' asks, 'auto' learns silently, 'off' disables */
-        autoLearn: 'confirm' | 'auto' | 'off';
-        /** Maximum auto-retries on test failure (0 = no retry) */
-        maxRetries: number;
-    };
-}
+import {
+    defaultConfig as coreDefaultConfig,
+    mergeConfig,
+    type RaikenConfig,
+} from "@raiken/core";
 
-export const defaultConfig: RaikenConfig = {
-    projectType: 'generic',
-    testDirectory: 'tests',
-    playwrightConfig: 'playwright.config.ts',
-    outputFormats: ['typescript'],
-    ai: {
-        provider: 'openrouter',
-        model: 'anthropic/claude-3.5-sonnet'
-    },
-    features: {
-        video: true,
-        screenshots: true,
-        tracing: false,
-        network: true
-    },
-    indexing: {
-        fullScan: false
-    },
-    discovery: {
-        maxPages: 100,
-        maxDepth: 5,
-        maxConcurrency: 3,
-        timeout: 30000,
-        excludePatterns: [],
-        pauseOnAuth: true
-    },
-    browser: {
-        defaultBrowser: 'chromium',
-        headless: true,
-        timeout: 30000,
-        retries: 1
-    },
-    autonomy: {
-        autoSaveTests: false,
-        autoRunTests: false,
-        autoCorrect: 'suggest',
-        autoLearn: 'confirm',
-        maxRetries: 2
-    }
-};
-
-export function createConfig(overrides: Partial<RaikenConfig> = {}): RaikenConfig {
-    return {
-        ...defaultConfig,
-        ...overrides,
-        ai: { ...defaultConfig.ai, ...overrides.ai },
-        features: { ...defaultConfig.features, ...overrides.features },
-        browser: { ...defaultConfig.browser, ...overrides.browser },
-        autonomy: { ...defaultConfig.autonomy!, ...(overrides.autonomy || {}) },
-        indexing: { fullScan: overrides.indexing?.fullScan ?? defaultConfig.indexing!.fullScan },
-        discovery: { ...defaultConfig.discovery, ...(overrides.discovery || {}) }
-    };
-}
+export type { RaikenConfig } from "@raiken/core";
+export { configExample, defaultConfig, mergeConfig, validateConfig } from "@raiken/core";
 
 /** Fully-resolved discovery config with no optional fields. */
 export interface ResolvedDiscoveryConfig {
@@ -127,16 +15,21 @@ export interface ResolvedDiscoveryConfig {
     timeout: number;
     excludePatterns: string[];
     pauseOnAuth: boolean;
+    maxRunTimeMs: number;
 }
 
-const DISCOVERY_DEFAULTS: ResolvedDiscoveryConfig = defaultConfig.discovery as ResolvedDiscoveryConfig;
+const DISCOVERY_DEFAULTS: ResolvedDiscoveryConfig =
+    coreDefaultConfig.discovery as ResolvedDiscoveryConfig;
+
+export function createConfig(overrides: Partial<RaikenConfig> = {}): RaikenConfig {
+    return mergeConfig(overrides);
+}
 
 /**
  * Read and validate discovery config from raiken.config.json.
  * Falls back to defaults for any missing or invalid values.
  */
 export function loadDiscoveryConfig(projectPath: string): ResolvedDiscoveryConfig {
-    // Dynamic import of fs + path to avoid bundling issues in browser contexts
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fsSync = require("node:fs") as typeof import("node:fs");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -170,11 +63,48 @@ export function loadDiscoveryConfig(projectPath: string): ResolvedDiscoveryConfi
                 ? d.excludePatterns
                 : DISCOVERY_DEFAULTS.excludePatterns,
             pauseOnAuth:
-                typeof d.pauseOnAuth === "boolean"
-                    ? d.pauseOnAuth
-                    : DISCOVERY_DEFAULTS.pauseOnAuth,
+                typeof d.pauseOnAuth === "boolean" ? d.pauseOnAuth : DISCOVERY_DEFAULTS.pauseOnAuth,
+            maxRunTimeMs:
+                typeof d.maxRunTimeMs === "number" && d.maxRunTimeMs >= 0
+                    ? d.maxRunTimeMs
+                    : DISCOVERY_DEFAULTS.maxRunTimeMs,
         };
     } catch {
         return { ...DISCOVERY_DEFAULTS };
     }
+}
+
+/**
+ * Resolve the auth storage state path for a project.
+ * Checks raiken.config.json auth.storageStatePath first, then falls back to .raiken/auth-state.json.
+ * Returns null if neither exists.
+ */
+export function resolveAuthStorageStatePath(projectPath: string): string | null {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsSync = require("node:fs") as typeof import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pathMod = require("node:path") as typeof import("node:path");
+
+    try {
+        const configPath = pathMod.join(projectPath, "raiken.config.json");
+        const raw = fsSync.readFileSync(configPath, "utf-8");
+        const parsed = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
+        if (parsed.auth?.storageStatePath) {
+            const resolved = pathMod.isAbsolute(parsed.auth.storageStatePath)
+                ? parsed.auth.storageStatePath
+                : pathMod.join(projectPath, parsed.auth.storageStatePath);
+            if (fsSync.existsSync(resolved)) {
+                return resolved;
+            }
+        }
+    } catch {
+        // config missing or invalid
+    }
+
+    const fallbackPath = pathMod.join(projectPath, ".raiken", "auth-state.json");
+    if (fsSync.existsSync(fallbackPath)) {
+        return fallbackPath;
+    }
+
+    return null;
 }

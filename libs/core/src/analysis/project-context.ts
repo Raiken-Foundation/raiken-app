@@ -1,6 +1,9 @@
+import * as path from "path";
 import { CodeGraph } from "./code-graph";
 import { CodeGraphDB } from "../database/db";
-import type { CodeNode } from "../types";
+import { EmbeddingsGenerator } from "../database/embeddings";
+import { fullAstToSearchableText } from "./ast-parser";
+import type { CodeNode, UpdateEvent } from "../types";
 
 /**
  * File change information from the orchestrator
@@ -104,16 +107,13 @@ export class ProjectContext {
             maxDepth: 15,
         });
 
-        // Check if DB already has files
         const db = new CodeGraphDB(this.projectPath);
-        const existingFiles = db.getFiles();
+        const saved = db.loadGraph();
 
-        if (existingFiles.length > 0) {
-            // Load from DB instead of rescanning
-            console.log(`Loading ${existingFiles.length} files from database...`);
-            await this.graph.scanProject(); // Still need to populate graph
+        if (saved && saved.nodes.size > 0) {
+            console.log(`Loading ${saved.nodes.size} files from database...`);
+            this.graph.loadFromNodes(saved.nodes);
         } else {
-            // Full scan
             console.log("Scanning project...");
             await this.graph.scanProject();
         }
@@ -372,11 +372,14 @@ export class ProjectContext {
             this.keywordIndex = this.graph.buildKeywordIndex();
             this.modules = this.graph.getModules();
         } else {
-            // Incremental refresh - update only changed files
+            // Incremental refresh - re-parse changed files then update keywords
             console.log(`Incremental refresh: ${changedFiles.length} files`);
 
-            // Update keyword index for changed files only
             for (const filePath of changedFiles) {
+                const absPath = path.isAbsolute(filePath)
+                    ? filePath
+                    : path.join(this.projectPath, filePath);
+                await this.graph.updateFile(absPath);
                 this.updateKeywordsForFile(filePath);
             }
 
@@ -397,9 +400,14 @@ export class ProjectContext {
      * Update keywords for a single file
      */
     private updateKeywordsForFile(filePath: string): void {
-        // Remove old keywords for this file
+        const absPath = path.isAbsolute(filePath)
+            ? filePath
+            : path.join(this.projectPath, filePath);
+        const relPath = path.relative(this.projectPath, absPath);
+
+        // Remove old keywords for this file (match against both path forms)
         for (const [keyword, files] of this.keywordIndex) {
-            const filtered = files.filter((f) => f !== filePath);
+            const filtered = files.filter((f) => f !== filePath && f !== relPath);
             if (filtered.length === 0) {
                 this.keywordIndex.delete(keyword);
             } else if (filtered.length !== files.length) {
@@ -409,17 +417,142 @@ export class ProjectContext {
 
         // Add new keywords from updated file
         if (this.graph) {
-            const node = this.graph.getNode(filePath);
+            const node = this.graph.getNode(absPath);
             if (node) {
+                const indexKey = node.relativePath;
                 const keywords = this.extractKeywordsFromNode(node);
                 for (const keyword of keywords) {
                     const existing = this.keywordIndex.get(keyword) || [];
-                    if (!existing.includes(filePath)) {
-                        existing.push(filePath);
+                    if (!existing.includes(indexKey)) {
+                        existing.push(indexKey);
                     }
                     this.keywordIndex.set(keyword, existing);
                 }
             }
+        }
+    }
+
+    // =========================================================================
+    // Live Watch Integration
+    // =========================================================================
+
+    /**
+     * Start file watching on the project's CodeGraph.
+     * Watcher events update both in-memory state and the DB.
+     */
+    startWatching(): void {
+        if (!this.graph) return;
+
+        this.graph.destroy();
+        this.graph = new CodeGraph(this.projectPath, {
+            includeTests: false,
+            useGitignore: true,
+            maxDepth: 15,
+            enableWatch: true,
+            onUpdate: (event) => this.handleWatchEvent(event),
+        });
+
+        const db = new CodeGraphDB(this.projectPath);
+        const saved = db.loadGraph();
+        if (saved && saved.nodes.size > 0) {
+            this.graph.loadFromNodes(saved.nodes);
+        }
+        db.close();
+    }
+
+    /**
+     * Handle a file change event from the CodeGraph watcher.
+     * Persists changes to DB and updates in-memory indexes.
+     */
+    private handleWatchEvent(event: UpdateEvent): void {
+        const db = new CodeGraphDB(this.projectPath);
+        try {
+            if (event.type === "remove") {
+                db.removeFile(event.filePath);
+            } else {
+                const node = this.graph?.getNode(event.filePath);
+                if (node) {
+                    db.upsertFile(node, "watch");
+                    this.updateEmbeddingForFile(db, event.filePath);
+                }
+            }
+
+            this.updateKeywordsForFile(event.filePath);
+            this.modules = this.graph?.getModules() ?? [];
+            this.lastScanTime = Date.now();
+
+            const changeType: FileChange["type"] =
+                event.type === "add"
+                    ? "added"
+                    : event.type === "remove"
+                      ? "deleted"
+                      : "modified";
+
+            this.notifyChanges([
+                { path: event.filePath, type: changeType, contentChanged: true },
+            ]);
+        } catch (err) {
+            console.warn(
+                `[ProjectContext] Watch event failed for ${event.filePath}:`,
+                err instanceof Error ? err.message : err,
+            );
+        } finally {
+            db.close();
+        }
+    }
+
+    /**
+     * Regenerate the embedding for a single file that just changed.
+     */
+    private updateEmbeddingForFile(db: CodeGraphDB, filePath: string): void {
+        const fileId = db.getFileId(filePath);
+        if (fileId === null) return;
+
+        const fileRecord = db.getFile(filePath);
+        if (!fileRecord?.ast) return;
+
+        let ast: unknown;
+        try {
+            ast = JSON.parse(fileRecord.ast);
+        } catch {
+            return;
+        }
+
+        const searchableText = fullAstToSearchableText(ast, fileRecord.relative_path);
+        if (!searchableText || searchableText.trim().length === 0) return;
+
+        const embGen = EmbeddingsGenerator.getInstance();
+        if (!embGen.isReady()) return;
+
+        const chunks = [{ type: "file" as const, name: fileRecord.relative_path, text: searchableText }];
+        embGen
+            .generateEmbeddingsBatch(chunks.map((c) => c.text))
+            .then((embeddings) => {
+                const withEmbeddings = chunks.map((chunk, i) => ({
+                    ...chunk,
+                    embedding: embeddings[i],
+                }));
+                const freshDb = new CodeGraphDB(this.projectPath);
+                try {
+                    freshDb.saveEmbeddings(fileId, withEmbeddings);
+                } finally {
+                    freshDb.close();
+                }
+            })
+            .catch((err) => {
+                console.warn(
+                    `[ProjectContext] Embedding update failed for ${filePath}:`,
+                    err instanceof Error ? err.message : err,
+                );
+            });
+    }
+
+    /**
+     * Stop file watching (cleanup).
+     */
+    stopWatching(): void {
+        if (this.graph) {
+            this.graph.stopWatching();
         }
     }
 
@@ -510,6 +643,7 @@ export class ProjectContext {
      * Destroy the context and release resources
      */
     destroy(): void {
+        this.stopWatching();
         if (this.graph) {
             this.graph.destroy();
             this.graph = null;

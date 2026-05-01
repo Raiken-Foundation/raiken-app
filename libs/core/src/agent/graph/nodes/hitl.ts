@@ -1,5 +1,6 @@
 import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
+import type { TestRunResult } from "../../../testing/runner";
 
 export const createHitlSaveNode =
     ({ callTool }: AgentNodeDeps) =>
@@ -18,6 +19,13 @@ export const createHitlSaveNode =
             content: state.testDraft,
             testName: fileName,
         });
+
+        if (!saveResult.success) {
+            return {
+                summary: `Failed to save test file: ${saveResult.message || "unknown error"}`,
+            };
+        }
+
         const savedPath = (saveResult.data as { path?: string } | undefined)?.path || null;
         if (saveResult.hitlRequired) {
             return {
@@ -44,6 +52,25 @@ export const createHitlRunNode =
                 shouldPause: true,
                 awaitUserMessage: `Waiting for approval to run ${state.savedTestPath}.`,
             };
+        }
+
+        if (!runResult.success) {
+            return {
+                testRunResult: [{
+                    testFile: state.savedTestPath,
+                    testName: "unknown",
+                    status: "error" as const,
+                    duration: 0,
+                    error: { message: runResult.message || "Test run failed" },
+                }] satisfies TestRunResult[],
+            };
+        }
+
+        const results = Array.isArray(runResult.data)
+            ? (runResult.data as TestRunResult[])
+            : null;
+        if (results) {
+            return { testRunResult: results };
         }
         return {};
     };

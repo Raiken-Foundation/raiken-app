@@ -1,164 +1,144 @@
 /**
  * Auth Detector Tests
+ *
+ * Drives the auth detector through its public surface (`detectAuth`) and
+ * a stub `Page`/`Response`. The previous test reached into private
+ * methods on a class; that class is now a thin shim over `detectors/auth.ts`,
+ * so we test the module directly.
  */
 
-import { describe, it, expect } from "vitest";
-import { AuthDetector } from "../auth-detector";
+import { describe, expect, it } from "vitest";
 
-describe("AuthDetector", () => {
-    const detector = new AuthDetector("/test/project");
+import { detectAuth } from "../detectors/auth";
 
-    describe("URL Pattern Detection", () => {
-        it("should detect /login URL", () => {
-            const result = (detector as any).checkUrlPatterns(
-                "http://localhost:3000/login"
-            );
-            expect(result).toBe(true);
+const PROJECT_PATH = "/test/project";
+
+interface FakeLocator {
+    count: () => Promise<number>;
+    first: () => FakeLocator;
+    textContent?: () => Promise<string | null>;
+}
+
+function makePage(opts: {
+    content?: string;
+    locators?: Record<string, FakeLocator>;
+}) {
+    const locators = opts.locators ?? {};
+    const defaultLocator: FakeLocator = {
+        count: async () => 0,
+        first() {
+            return this;
+        },
+        textContent: async () => null,
+    };
+    return {
+        content: async () => opts.content ?? "<html><body></body></html>",
+        locator(selector: string) {
+            return locators[selector] ?? defaultLocator;
+        },
+    } as unknown as import("playwright").Page;
+}
+
+function makeResponse(status: number) {
+    return { status: () => status } as unknown as import("playwright").Response;
+}
+
+describe("detectAuth", () => {
+    it("flags a 401 response as auth_required (http_status)", async () => {
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/api/me",
+            page: makePage({}),
+            response: makeResponse(401),
         });
-
-        it("should detect /signin URL", () => {
-            const result = (detector as any).checkUrlPatterns(
-                "http://localhost:3000/signin"
-            );
-            expect(result).toBe(true);
-        });
-
-        it("should detect /auth URL", () => {
-            const result = (detector as any).checkUrlPatterns(
-                "http://localhost:3000/auth"
-            );
-            expect(result).toBe(true);
-        });
-
-        it("should not detect regular URLs", () => {
-            const result = (detector as any).checkUrlPatterns(
-                "http://localhost:3000/dashboard"
-            );
-            expect(result).toBe(false);
-        });
+        expect(blocker?.category).toBe("auth_required");
+        expect(blocker?.detectorId).toBe("auth:http_status");
+        expect(blocker?.blockerType).toBe("http_status");
     });
 
-    describe("OAuth Detection", () => {
-        it("should detect Google OAuth button", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><button>Sign in with Google</button></body></html>",
-            };
-
-            const result = await (detector as any).checkOAuthButtons(mockPage);
-            expect(result).toBeTruthy();
-            expect(result?.provider).toBe("Google");
+    it("flags a 403 response too", async () => {
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/api/secret",
+            page: makePage({}),
+            response: makeResponse(403),
         });
-
-        it("should detect GitHub OAuth button", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><button>Sign in with GitHub</button></body></html>",
-            };
-
-            const result = await (detector as any).checkOAuthButtons(mockPage);
-            expect(result).toBeTruthy();
-            expect(result?.provider).toBe("GitHub");
-        });
-
-        it("should return null for non-OAuth pages", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><button>Submit</button></body></html>",
-            };
-
-            const result = await (detector as any).checkOAuthButtons(mockPage);
-            expect(result).toBeNull();
-        });
+        expect(blocker?.detectorId).toBe("auth:http_status");
     });
 
-    describe("Error Message Detection", () => {
-        it("should detect 'Access denied' message", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><div class='error'>Access denied</div></body></html>",
-                locator: () => ({
-                    first: () => ({
-                        count: async () => 0,
-                        textContent: async () => null,
-                    }),
-                }),
-            };
-
-            const result = await (detector as any).checkErrorMessages(mockPage);
-            expect(result).toBeTruthy();
-            expect(result?.message).toContain("Access denied");
+    it("ignores 200 responses", async () => {
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000",
+            page: makePage({}),
+            response: makeResponse(200),
         });
-
-        it("should detect 'Unauthorized' message", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><div>Unauthorized access</div></body></html>",
-                locator: () => ({
-                    first: () => ({
-                        count: async () => 0,
-                        textContent: async () => null,
-                    }),
-                }),
-            };
-
-            const result = await (detector as any).checkErrorMessages(mockPage);
-            expect(result).toBeTruthy();
-            expect(result?.message).toContain("Unauthorized");
-        });
-
-        it("should return null for normal pages", async () => {
-            const mockPage = {
-                content: async () =>
-                    "<html><body><div>Welcome to the dashboard</div></body></html>",
-                locator: () => ({
-                    first: () => ({
-                        count: async () => 0,
-                        textContent: async () => null,
-                    }),
-                }),
-            };
-
-            const result = await (detector as any).checkErrorMessages(mockPage);
-            expect(result).toBeNull();
-        });
+        expect(blocker).toBeNull();
     });
 
-    describe("HTTP Status Detection", () => {
-        it("should detect 401 status", () => {
-            const mockResponse = {
-                status: () => 401,
-            };
-
-            const result = (detector as any).checkHttpStatus(mockResponse);
-            expect(result).toBe(true);
+    it("detects an explicit auth error message in page content", async () => {
+        const page = makePage({
+            content: "<html><body><div>Please log in to continue.</div></body></html>",
         });
-
-        it("should detect 403 status", () => {
-            const mockResponse = {
-                status: () => 403,
-            };
-
-            const result = (detector as any).checkHttpStatus(mockResponse);
-            expect(result).toBe(true);
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/dashboard",
+            page,
         });
+        expect(blocker?.detectorId).toBe("auth:error_message");
+    });
 
-        it("should not detect 200 status", () => {
-            const mockResponse = {
-                status: () => 200,
-            };
-
-            const result = (detector as any).checkHttpStatus(mockResponse);
-            expect(result).toBe(false);
+    it("does NOT pause on a marketing page that just hosts a 'Sign in with Google' button", async () => {
+        // The OAuth check only fires when the URL also looks login-y.
+        const page = makePage({
+            content: "<html><body><a>Sign in with Google</a></body></html>",
         });
-
-        it("should not detect 404 status", () => {
-            const mockResponse = {
-                status: () => 404,
-            };
-
-            const result = (detector as any).checkHttpStatus(mockResponse);
-            expect(result).toBe(false);
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/marketing",
+            page,
         });
+        expect(blocker).toBeNull();
+    });
+
+    it("DOES pause on a /login page that exposes a 'Sign in with Google' button", async () => {
+        const page = makePage({
+            content: "<html><body><a>Sign in with Google</a></body></html>",
+        });
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/login",
+            page,
+        });
+        expect(blocker?.detectorId).toBe("auth:oauth_button");
+    });
+
+    it("detects a login form (password + submit)", async () => {
+        const passwordLocator: FakeLocator = {
+            count: async () => 1,
+            first() {
+                return this;
+            },
+        };
+        const submitLocator: FakeLocator = {
+            count: async () => 1,
+            first() {
+                return this;
+            },
+        };
+        const page = makePage({
+            content: "<html><body><form><input type='password'/><button type='submit'>Go</button></form></body></html>",
+            locators: {
+                'input[type="password"]': passwordLocator,
+                'button[type="submit"]': submitLocator,
+            },
+        });
+        const blocker = await detectAuth({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/dashboard",
+            page,
+        });
+        // No URL pattern match: detector_id should be auth:login_form.
+        expect(blocker?.detectorId).toBe("auth:login_form");
     });
 });

@@ -8,11 +8,11 @@ export interface InterruptionInfo {
     requiresUser: boolean;
     actionSelector?: string;
     fieldSelectors?: {
-        username?: string;
-        email?: string;
-        password?: string;
-        code?: string;
-        submit?: string;
+        username?: string[];
+        email?: string[];
+        password?: string[];
+        code?: string[];
+        submit?: string[];
     };
 }
 
@@ -27,7 +27,11 @@ export interface Credentials {
 export interface SummaryElement {
     role: string;
     name: string;
+    type?: string;
+    /** First/primary selector (for backward compat) */
     selector?: string;
+    /** All DOM-derived selectors for this element */
+    selectors: string[];
 }
 
 export function extractUrlFromText(text: string): string | undefined {
@@ -35,129 +39,6 @@ export function extractUrlFromText(text: string): string | undefined {
     return match ? match[0] : undefined;
 }
 
-export function isTestGenerationRequest(prompt: string): boolean {
-    const lowered = prompt.toLowerCase();
-    if (/(generate|write|create|build).*(test|tests|spec|specs|playwright)/.test(lowered)) {
-        return true;
-    }
-    if (/playwright/.test(lowered) && /\btest\b/.test(lowered)) {
-        return true;
-    }
-    return false;
-}
-
-export function isExplanationRequest(prompt: string): boolean {
-    const lowered = prompt.toLowerCase();
-    return /\b(explain|understand|walk me through|break down|overview|architecture|what does|how does|why does|describe)\b/.test(
-        lowered
-    );
-}
-
-function isContinuationPrompt(prompt: string): boolean {
-    const lowered = prompt.trim().toLowerCase();
-    if (!lowered) return false;
-    const wordCount = lowered.split(/\s+/).length;
-    if (wordCount <= 3 && /^(yes|yeah|yep|ok|okay|sure|cool|great|thanks)$/i.test(lowered)) {
-        return true;
-    }
-    return /\b(go ahead|continue|proceed|do it|do that|same|as before|that works|try again|retry|run it|run them|carry on|please continue)\b/i.test(
-        lowered
-    );
-}
-
-function getLastMeaningfulUserPrompt(
-    conversationHistory?: Array<{ role: string; content: string }>
-): string | undefined {
-    if (!conversationHistory || conversationHistory.length === 0) return undefined;
-    for (let i = conversationHistory.length - 1; i >= 0; i -= 1) {
-        const msg = conversationHistory[i];
-        if (msg.role !== "user") continue;
-        const content = msg.content.trim();
-        if (!content) continue;
-        if (isContinuationPrompt(content)) continue;
-        return content;
-    }
-    return undefined;
-}
-
-export function inferIntent(
-    userPrompt: string,
-    conversationHistory?: Array<{ role: string; content: string }>,
-    storedIntent?: AgentIntent | null
-): AgentIntent {
-    if (isTestGenerationRequest(userPrompt)) return "generateTests";
-    if (isExplanationRequest(userPrompt)) return "explain";
-    if (!isContinuationPrompt(userPrompt)) return "explore";
-    const previousUserPrompt = getLastMeaningfulUserPrompt(conversationHistory);
-    if (previousUserPrompt && isTestGenerationRequest(previousUserPrompt)) {
-        return "generateTests";
-    }
-    if (previousUserPrompt && isExplanationRequest(previousUserPrompt)) {
-        return "explain";
-    }
-    if (storedIntent) return storedIntent;
-    return "explore";
-}
-
-export function shouldRunTests(prompt: string): boolean {
-    const lowered = prompt.toLowerCase();
-    return /(run|execute|start).*(test|tests|spec|specs)/.test(lowered);
-}
-
-export function extractCredentials(
-    userPrompt: string,
-    conversationHistory?: Array<{ role: string; content: string }>
-): Credentials {
-    const historyText = conversationHistory?.map((msg) => msg.content).join("\n") || "";
-    const combined = `${historyText}\n${userPrompt}`;
-    const useDefaults = /use default|default credentials|any credentials|test credentials|use test login/i.test(
-        combined
-    );
-
-    const sanitizeValue = (value?: string) => value?.replace(/[.,;:)\]]$/, "");
-    const extractValue = (patterns: RegExp[]) => {
-        for (const pattern of patterns) {
-            const match = combined.match(pattern);
-            if (match?.[1]) {
-                return sanitizeValue(match[1]);
-            }
-        }
-        return undefined;
-    };
-
-    const username = extractValue([
-        /\busername\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-        /\buser name\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-        /\blogin\s+(?:as|with)\s+["']?([^\s,"']+)/i,
-        /\bsign in\s+(?:as|with)\s+["']?([^\s,"']+)/i,
-        /\blog in\s+(?:as|with)\s+["']?([^\s,"']+)/i,
-        /\buser\s*[:=]\s*["']?([^\s,"']+)/i,
-        /\busername\b\s+["']?([^\s,"']+)/i,
-    ]);
-
-    const email = extractValue([
-        /\bemail\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-        /\bemail\b\s+["']?([^\s,"']+)/i,
-        /\blogin\s+with\s+email\s+["']?([^\s,"']+)/i,
-    ]);
-
-    const password = extractValue([
-        /\bpassword\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-        /\bpasscode\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-        /\bpin\b\s*(?:is|=|:)?\s*["']?([^\s,"']+)/i,
-    ]);
-
-    const codeMatch = combined.match(/(code|otp|verification)\s*[:=]?\s*([0-9]{4,8})/i);
-    const code = codeMatch?.[2];
-
-    return {
-        username: username || (useDefaults ? "testuser" : undefined),
-        email: email || (useDefaults ? "test@example.com" : undefined),
-        password: password || (useDefaults ? "password123" : undefined),
-        code,
-        useDefaults,
-    };
-}
 
 export function parseSummaryElements(summary: string): SummaryElement[] {
     const elements: SummaryElement[] = [];
@@ -175,18 +56,25 @@ export function parseSummaryElements(summary: string): SummaryElement[] {
         if (!inElements || !line.startsWith("• ")) {
             continue;
         }
-        const match = line.match(/^•\s+([^:]+):\s+"(.*)"$/);
+        const match = line.match(/^•\s+([^:]+):\s+"(.*)"(?:\s+\[type=(\S+)\])?$/);
         if (!match) {
             continue;
         }
         const role = match[1].trim();
         const name = match[2].trim();
+        const type = match[3] || undefined;
         const nextLine = (lines[i + 1] || "").trim();
-        const selectorMatch = nextLine.match(/^Selector:\s+(.+)$/);
+        // Parse all selectors (pipe-delimited) or single selector
+        const selectorsMatch = nextLine.match(/^Selectors?:\s+(.+)$/);
+        const allSelectors = selectorsMatch
+            ? selectorsMatch[1].split(" | ").map((s) => s.trim()).filter(Boolean)
+            : [];
         elements.push({
             role,
             name,
-            selector: selectorMatch?.[1],
+            type,
+            selector: allSelectors[0],
+            selectors: allSelectors,
         });
     }
     return elements;
@@ -234,109 +122,156 @@ export function findSelector(elements: SummaryElement[], nameRegex: RegExp, role
     return undefined;
 }
 
-export function detectInterruption(
-    summary: string,
+/**
+ * Extract the page title from a formatted DOM summary.
+ */
+export function extractPageTitle(summary: string): string {
+    const titleMatch = summary.match(/Page Title:\s*(.+)/i);
+    return (titleMatch?.[1] || "").trim();
+}
+
+// =========================================================================
+// Structural Signals (fast pre-filter for LLM interruption classification)
+// =========================================================================
+
+export interface StructuralSignals {
+    hasPasswordField: boolean;
+    hasEmailOrUserField: boolean;
+    hasCodeField: boolean;
+    hasBlockingOverlay: boolean;
+    isDeadEnd: boolean;
+    elementCount: number;
+    pageTitle: string;
+    passwordSelectors: string[];
+    identitySelectors: string[];
+    codeFieldSelectors: string[];
+}
+
+const INPUT_ROLES = ["textbox", "combobox"];
+
+/**
+ * Find a password field by its HTML type attribute (type=password).
+ * This is the universal, reliable way to detect password inputs
+ * regardless of labels, names, or placeholder text.
+ */
+function findPasswordElement(elements: SummaryElement[]): SummaryElement | null {
+    return elements.find(
+        (el) => INPUT_ROLES.includes(el.role) && el.type === "password"
+    ) || null;
+}
+
+/**
+ * Find the identity field (email, username, phone, etc.) by looking for
+ * the text/email input that appears near a password field. On login forms,
+ * this is typically the input immediately before the password field.
+ * Falls back to any text/email input if no password field exists.
+ */
+function findIdentityElement(elements: SummaryElement[], passwordEl: SummaryElement | null): SummaryElement | null {
+    const textInputs = elements.filter(
+        (el) => INPUT_ROLES.includes(el.role) && el.type !== "password" && el.type !== "checkbox"
+    );
+
+    if (passwordEl) {
+        const passwordIndex = elements.indexOf(passwordEl);
+        // Look for the closest text input before the password field
+        let closest: SummaryElement | null = null;
+        let closestDistance = Infinity;
+        for (const input of textInputs) {
+            const idx = elements.indexOf(input);
+            const dist = passwordIndex - idx;
+            if (dist > 0 && dist < closestDistance) {
+                closestDistance = dist;
+                closest = input;
+            }
+        }
+        if (closest) return closest;
+    }
+
+    // No password field or nothing before it; return the first text input
+    return textInputs.length > 0 ? textInputs[0] : null;
+}
+
+/**
+ * Find a verification code input (OTP). Checked by type first, then
+ * by whether it's a short numeric input on a page with few elements.
+ */
+function findCodeElement(elements: SummaryElement[]): SummaryElement | null {
+    // type=tel or type=number on a dead-end page is often an OTP field
+    const telOrNumber = elements.find(
+        (el) => INPUT_ROLES.includes(el.role) && (el.type === "tel" || el.type === "number")
+    );
+    if (telOrNumber && elements.length <= 10) return telOrNumber;
+
+    // Fallback: any textbox whose name/placeholder hints at a code
+    return elements.find(
+        (el) => INPUT_ROLES.includes(el.role) && /code|otp|verification|token/i.test(el.name)
+    ) || null;
+}
+
+/**
+ * Extract structural signals from parsed interactive elements.
+ * Uses HTML input types (type=password) rather than label text to
+ * identify fields. This works regardless of language or naming conventions.
+ */
+/**
+ * Collect all selectors from a SummaryElement, using every DOM-derived
+ * selector that was captured during page collection.
+ */
+function collectSelectors(el: SummaryElement | null): string[] {
+    if (!el) return [];
+    return el.selectors.length > 0 ? [...el.selectors] : el.selector ? [el.selector] : [];
+}
+
+export function getStructuralSignals(
     elements: SummaryElement[],
-    credentials: Credentials
-): InterruptionInfo | null {
-    const lowered = summary.toLowerCase();
+    pageTitle: string,
+    hasBlockingOverlay = false
+): StructuralSignals {
+    const passwordEl = findPasswordElement(elements);
+    const identityEl = findIdentityElement(elements, passwordEl);
+    const codeEl = findCodeElement(elements);
 
-    if (/captcha|robot|unusual traffic|verify you are human/.test(lowered)) {
-        return {
-            type: "captcha",
-            message: "Captcha detected. Please complete it and let me know when to continue.",
-            requiresUser: true,
-        };
-    }
+    const hasPasswordField = passwordEl !== null;
+    const hasEmailOrUserField = identityEl !== null && hasPasswordField;
+    const hasCodeField = codeEl !== null;
 
-    if (/paywall|subscribe|subscription|upgrade|purchase|pricing/.test(lowered)) {
-        return {
-            type: "paywall",
-            message: "Paywall or subscription prompt detected. Please resolve it and let me know when to continue.",
-            requiresUser: true,
-        };
-    }
+    return {
+        hasPasswordField,
+        hasEmailOrUserField,
+        hasCodeField,
+        hasBlockingOverlay,
+        isDeadEnd: elements.length <= 3,
+        elementCount: elements.length,
+        pageTitle,
+        passwordSelectors: collectSelectors(passwordEl),
+        identitySelectors: hasPasswordField ? collectSelectors(identityEl) : [],
+        codeFieldSelectors: collectSelectors(codeEl),
+    };
+}
 
-    if (/error|maintenance|unavailable|access denied|forbidden|something went wrong/.test(lowered)) {
-        return {
-            type: "error",
-            message: "An error or maintenance message is blocking progress. Please resolve it and let me know when to continue.",
-            requiresUser: true,
-        };
-    }
+/**
+ * Decide whether the page warrants an LLM classification call.
+ * This is intentionally generous (some false triggers are fine) to avoid
+ * missing real blockers. The LLM will filter out non-blockers.
+ */
+export function shouldClassifyInterruption(signals: StructuralSignals): boolean {
+    if (signals.hasPasswordField) return true;
+    if (signals.hasCodeField) return true;
+    if (signals.hasBlockingOverlay) return true;
+    if (signals.isDeadEnd) return true;
+    return false;
+}
 
-    const hasConsent = /cookie|consent|privacy/.test(lowered);
-    if (hasConsent) {
-        const consentSelector = findSelector(elements, /(accept|agree|allow|ok|continue|close|dismiss)/i, ["button"]);
-        return {
-            type: "consent",
-            message: "Cookie consent detected. Attempting to resolve automatically.",
-            requiresUser: !consentSelector,
-            actionSelector: consentSelector,
-        };
-    }
-
-    const otpSelector = findSelector(elements, /(code|otp|verification)/i, ["textbox", "combobox"]);
-    if (/verification code|one-time|otp|two-factor|2fa|security code/.test(lowered) || otpSelector) {
-        return {
-            type: "otp",
-            message: "Verification code required. Please provide the code.",
-            requiresUser: !credentials.code,
-            fieldSelectors: {
-                code: otpSelector,
-                submit: findSelector(
-                    elements,
-                    /(verify|submit|continue|confirm|login|sign in)/i,
-                    ["button"]
-                ),
-            },
-        };
-    }
-
-    const passwordSelector = findSelector(elements, /(password|passcode|pin)/i, ["textbox", "combobox"]);
-    const emailOrUserField = findSelector(elements, /(email|username|user name)/i, [
-        "textbox",
-        "combobox",
-    ]);
-
-    // Only treat as an auth wall if the page has actual credential input fields
-    // (a "Login" link in a navbar is NOT an auth wall)
-    const isAuthForm = Boolean(passwordSelector && emailOrUserField);
-
-    if (isAuthForm) {
-        const needsUsernameOrEmail = !credentials.username && !credentials.email;
-        const needsPassword = Boolean(passwordSelector && !credentials.password);
-        const requiresUser = (needsUsernameOrEmail || needsPassword) && !credentials.useDefaults;
-        return {
-            type: "auth",
-            message: requiresUser
-                ? "This page requires authentication. You can provide credentials in the chat, e.g.:\n" +
-                  "  `email: you@example.com password: secret`\n" +
-                  "Or say `use default credentials` to try test defaults."
-                : "Authentication detected. Attempting to log in automatically.",
-            requiresUser,
-            fieldSelectors: {
-                username: findSelector(elements, /(username|user name|name)/i, ["textbox", "combobox"]),
-                email: findSelector(elements, /email/i, ["textbox", "combobox"]),
-                password: passwordSelector,
-                submit: findSelector(
-                    elements,
-                    /(login|log in|sign in|continue|submit|confirm)/i,
-                    ["button"]
-                ),
-            },
-        };
-    }
-
-    if (/dialog|modal|overlay/.test(lowered)) {
-        return {
-            type: "unknown",
-            message: "A blocking dialog or overlay was detected. Please resolve it and let me know when to continue.",
-            requiresUser: true,
-        };
-    }
-
-    return null;
+/**
+ * Quick structural check used after login submission to verify the auth
+ * form is gone. Does NOT use the LLM -- just checks whether password +
+ * email/username fields still exist on the page.
+ */
+export function hasAuthFormFields(elements: SummaryElement[]): boolean {
+    const passwordEl = findPasswordElement(elements);
+    if (!passwordEl) return false;
+    const identityEl = findIdentityElement(elements, passwordEl);
+    return identityEl !== null;
 }
 
 export function buildSummary(state: {

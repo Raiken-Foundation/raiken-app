@@ -1,30 +1,45 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 
 export interface TestFileItem {
     id: string;
     name: string;
     path: string;
     directory: string;
-    status: "fresh" | "stale" | "broken";
+    status?: "fresh" | "stale" | "broken";
 }
 
 interface FilesPanelProps {
     files: TestFileItem[];
     activeFilePath?: string;
     onFileSelect?: (filePath: string) => void;
+    /**
+     * Re-fetch the file list from disk. The button is hidden when omitted so
+     * callers that have no refresh story (e.g. tests, storybook) don't render
+     * a no-op control.
+     */
+    onRefresh?: () => void;
+    /** Show a spinning state on the refresh button while a fetch is in flight. */
+    isRefreshing?: boolean;
 }
 
 const STATUS_META = {
-    fresh: { label: "Passing", color: "#22c55e", bg: "rgba(34,197,94,0.08)", border: "rgba(34,197,94,0.2)" },
-    stale: { label: "Stale", color: "#eab308", bg: "rgba(234,179,8,0.08)", border: "rgba(234,179,8,0.2)" },
-    broken: { label: "Failing", color: "#ef4444", bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.2)" },
+    fresh: { label: "passing" },
+    stale: { label: "stale" },
+    broken: { label: "failing" },
 } as const;
 
 function StatusDot({ status }: { status: TestFileItem["status"] }) {
+    if (!status) return null;
     return <span className={`fp-dot fp-dot--${status}`} aria-label={STATUS_META[status].label} />;
 }
 
-export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelProps) {
+export function FilesPanel({
+    files,
+    activeFilePath,
+    onFileSelect,
+    onRefresh,
+    isRefreshing = false,
+}: FilesPanelProps) {
     const [filter, setFilter] = useState("");
     const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 
@@ -60,18 +75,42 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
             return next;
         });
 
+    const refreshButton = onRefresh ? (
+        <button
+            type="button"
+            className={`fp-refresh ${isRefreshing ? "spinning" : ""}`}
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            aria-label="refresh file list"
+            title="refresh file list"
+        >
+            <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+            >
+                <path d="M21 12a9 9 0 1 1-3.51-7.13" />
+                <polyline points="21 3 21 9 15 9" />
+            </svg>
+        </button>
+    ) : null;
+
     if (files.length === 0) {
         return (
             <div className="fp">
                 <div className="fp-header">
-                    <span className="fp-title">Test Files</span>
+                    <span className="fp-brand-dot" aria-hidden="true" />
+                    <span className="fp-title">files</span>
+                    <span className="fp-spacer" />
+                    {refreshButton}
                 </div>
                 <div className="fp-empty">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <p className="fp-empty-title">No test files yet</p>
-                    <p className="fp-empty-hint">Use the AI chat to generate your first test</p>
+                    <p className="fp-empty-title">no test files yet</p>
+                    <p className="fp-empty-hint">use the agent to draft your first spec.</p>
                 </div>
                 <style>{STYLES}</style>
             </div>
@@ -81,25 +120,39 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
     return (
         <div className="fp">
             <div className="fp-header">
-                <span className="fp-title">Test Files</span>
+                <span className="fp-brand-dot" aria-hidden="true" />
+                <span className="fp-title">files</span>
+                <span className="fp-spacer" />
                 <span className="fp-count">{files.length}</span>
+                {refreshButton}
             </div>
 
             <div className="fp-search-wrap">
-                <svg className="fp-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="M21 21l-4.35-4.35" />
-                </svg>
+                <span className="fp-search-prompt" aria-hidden="true">
+                    /
+                </span>
                 <input
                     className="fp-search"
                     type="text"
-                    placeholder="Filter files..."
+                    placeholder="filter…"
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
                 />
                 {filter && (
-                    <button type="button" className="fp-search-clear" onClick={() => setFilter("")} aria-label="Clear filter">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <button
+                        type="button"
+                        className="fp-search-clear"
+                        onClick={() => setFilter("")}
+                        aria-label="clear filter"
+                        title="clear filter"
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            aria-hidden="true"
+                        >
                             <path d="M6 18L18 6M6 6l12 12" />
                         </svg>
                     </button>
@@ -111,21 +164,19 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
                     const isCollapsed = collapsedDirs.has(dir);
                     return (
                         <div key={dir} className="fp-dir">
-                            <button type="button" className="fp-dir-header" onClick={() => toggleDir(dir)}>
-                                <svg
+                            <button
+                                type="button"
+                                className="fp-dir-header"
+                                onClick={() => toggleDir(dir)}
+                                aria-expanded={!isCollapsed}
+                            >
+                                <span
                                     className={`fp-chevron ${isCollapsed ? "collapsed" : ""}`}
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
                                     aria-hidden="true"
                                 >
-                                    <path d="M19 9l-7 7-7-7" />
-                                </svg>
-                                <svg className="fp-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                                    <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                                </svg>
-                                <span className="fp-dir-name">{dir}</span>
+                                    ▾
+                                </span>
+                                <span className="fp-dir-name">{dir || "."}</span>
                                 <span className="fp-dir-count">{dirFiles.length}</span>
                             </button>
                             {!isCollapsed &&
@@ -135,6 +186,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
                                         key={file.path}
                                         className={`fp-file ${activeFilePath === file.path ? "selected" : ""}`}
                                         onClick={() => onFileSelect?.(file.path)}
+                                        title={file.path}
                                     >
                                         <StatusDot status={file.status} />
                                         <span className="fp-file-name">{file.name}</span>
@@ -145,7 +197,7 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
                 })}
 
                 {filtered.length === 0 && filter && (
-                    <div className="fp-no-results">No files match &ldquo;{filter}&rdquo;</div>
+                    <div className="fp-no-results">no files match &ldquo;{filter}&rdquo;</div>
                 )}
             </div>
 
@@ -153,7 +205,8 @@ export function FilesPanel({ files, activeFilePath, onFileSelect }: FilesPanelPr
                 {(["fresh", "stale", "broken"] as const).map((s) => (
                     <span key={s} className={`fp-stat fp-stat--${s}`}>
                         <span className="fp-stat-dot" />
-                        {counts[s]}
+                        <span className="fp-stat-val">{counts[s]}</span>
+                        <span className="fp-stat-label">{STATUS_META[s].label}</span>
                     </span>
                 ))}
             </div>
@@ -170,137 +223,179 @@ const STYLES = `
         flex-direction: column;
         min-height: 0;
         overflow: hidden;
+        background: var(--bg);
+        font-family: var(--mono);
+        color: var(--ink);
     }
 
     .fp-header {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        padding: 0.875rem 1rem;
-        border-bottom: 1px solid #1f1f1f;
+        gap: 0.4375rem;
+        padding: 0 0.75rem;
+        height: 28px;
+        background: var(--bg-bar);
+        border-bottom: 1px solid var(--hair);
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-dim);
+        flex-shrink: 0;
     }
-
+    .fp-brand-dot {
+        width: 6px;
+        height: 6px;
+        background: var(--accent);
+        flex-shrink: 0;
+    }
     .fp-title {
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: #e5e7eb;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 11px;
+    }
+    .fp-spacer { flex: 1; }
+    .fp-count {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-faint);
+        font-variant-numeric: tabular-nums;
     }
 
-    .fp-count {
-        margin-left: auto;
-        font-size: 0.6875rem;
-        font-weight: 500;
-        color: #9ca3af;
-        background: #1f1f1f;
-        padding: 0.125rem 0.5rem;
-        border-radius: 9999px;
+    .fp-refresh {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        margin-left: 0.375rem;
+        padding: 0;
+        background: transparent;
+        border: 0;
+        color: var(--ink-faint);
+        cursor: pointer;
+        transition: color 0.1s;
+    }
+    .fp-refresh:hover:not(:disabled) {
+        color: var(--ink);
+    }
+    .fp-refresh:disabled {
+        cursor: progress;
+    }
+    .fp-refresh:focus-visible {
+        outline: 1px solid var(--accent-dim);
+        outline-offset: 1px;
+    }
+    .fp-refresh svg {
+        width: 12px;
+        height: 12px;
+    }
+    .fp-refresh.spinning svg {
+        animation: fp-spin 0.7s linear infinite;
+    }
+    @keyframes fp-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
     }
 
     .fp-search-wrap {
         position: relative;
-        padding: 0.5rem 0.75rem;
+        display: flex;
+        align-items: center;
+        padding: 0;
+        margin: 0.5rem 0.625rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--hair);
+    }
+    .fp-search-wrap:focus-within {
+        border-color: var(--accent-dim);
     }
 
-    .fp-search-icon {
-        position: absolute;
-        left: 1.125rem;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 0.875rem;
-        height: 0.875rem;
-        color: #6b7280;
-        pointer-events: none;
+    .fp-search-prompt {
+        padding: 0 0.5rem;
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 12px;
+        user-select: none;
     }
 
     .fp-search {
-        width: 100%;
-        padding: 0.375rem 1.75rem 0.375rem 1.75rem;
-        background: #141414;
-        border: 1px solid #2a2a2a;
-        border-radius: 6px;
-        color: #e5e7eb;
-        font-size: 0.8125rem;
+        flex: 1;
+        padding: 0.3125rem 0.4375rem 0.3125rem 0;
+        background: transparent;
+        border: 0;
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: 12px;
         outline: none;
-        transition: border-color 0.15s;
     }
-
     .fp-search::placeholder {
-        color: #4b5563;
-    }
-
-    .fp-search:focus {
-        border-color: #3b82f6;
+        color: var(--ink-faint);
     }
 
     .fp-search-clear {
-        position: absolute;
-        right: 1.125rem;
-        top: 50%;
-        transform: translateY(-50%);
         display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        margin-right: 2px;
         padding: 0;
-        background: none;
-        border: none;
-        color: #6b7280;
+        background: transparent;
+        border: 0;
+        color: var(--ink-faint);
         cursor: pointer;
     }
-
     .fp-search-clear:hover {
-        color: #e5e7eb;
+        color: var(--ink);
     }
-
     .fp-search-clear svg {
-        width: 0.75rem;
-        height: 0.75rem;
+        width: 10px;
+        height: 10px;
     }
 
     .fp-list {
         flex: 1;
         overflow-y: auto;
-        padding: 0.25rem 0;
+        padding: 0.125rem 0 0.5rem;
     }
 
     .fp-dir + .fp-dir {
-        margin-top: 0.125rem;
+        margin-top: 0;
     }
 
     .fp-dir-header {
         display: flex;
         align-items: center;
-        gap: 0.375rem;
+        gap: 0.4375rem;
         width: 100%;
-        padding: 0.375rem 0.75rem;
+        padding: 0.3125rem 0.75rem;
         background: transparent;
-        border: none;
-        color: #9ca3af;
-        font-size: 0.75rem;
+        border: 0;
+        color: var(--ink-faint);
+        font-family: var(--mono);
+        font-size: 11px;
         cursor: pointer;
         text-align: left;
-        transition: color 0.15s;
+        transition: color 0.1s;
     }
-
     .fp-dir-header:hover {
-        color: #e5e7eb;
+        color: var(--ink-dim);
+    }
+    .fp-dir-header:focus-visible {
+        outline: 0;
+        background: var(--bg-hover);
     }
 
     .fp-chevron {
-        width: 0.75rem;
-        height: 0.75rem;
-        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 10px;
+        color: var(--ink-mute);
+        font-size: 10px;
         transition: transform 0.15s;
     }
-
     .fp-chevron.collapsed {
         transform: rotate(-90deg);
-    }
-
-    .fp-folder {
-        width: 0.875rem;
-        height: 0.875rem;
-        flex-shrink: 0;
-        color: #6b7280;
     }
 
     .fp-dir-name {
@@ -308,37 +403,48 @@ const STYLES = `
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        color: var(--ink-dim);
     }
 
     .fp-dir-count {
-        font-size: 0.6875rem;
-        color: #4b5563;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--ink-mute);
+        font-variant-numeric: tabular-nums;
     }
 
     .fp-file {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 0.5rem;
         width: 100%;
-        padding: 0.3125rem 0.75rem 0.3125rem 2rem;
+        padding: 0.25rem 0.75rem 0.25rem 1.75rem;
         background: transparent;
-        border: none;
-        color: #d1d5db;
-        font-size: 0.8125rem;
+        border: 0;
+        color: var(--ink-dim);
+        font-family: var(--mono);
+        font-size: 12px;
         cursor: pointer;
         text-align: left;
-        border-left: 2px solid transparent;
-        transition: all 0.1s;
+        transition: color 0.1s, background 0.1s;
     }
-
     .fp-file:hover {
-        background: rgba(255,255,255,0.04);
+        background: var(--bg-hover);
+        color: var(--ink);
     }
-
     .fp-file.selected {
-        background: rgba(59,130,246,0.1);
-        border-left-color: #3b82f6;
-        color: #e5e7eb;
+        background: var(--accent-soft);
+        color: var(--ink);
+    }
+    .fp-file.selected::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: var(--accent);
     }
 
     .fp-file-name {
@@ -348,50 +454,58 @@ const STYLES = `
     }
 
     .fp-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        flex-shrink: 0;
-    }
-
-    .fp-dot--fresh { background: ${STATUS_META.fresh.color}; }
-    .fp-dot--stale { background: ${STATUS_META.stale.color}; }
-    .fp-dot--broken { background: ${STATUS_META.broken.color}; }
-
-    .fp-status-bar {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        padding: 0.5rem 0.75rem;
-        border-top: 1px solid #1f1f1f;
-    }
-
-    .fp-stat {
-        display: flex;
-        align-items: center;
-        gap: 0.3rem;
-        font-size: 0.6875rem;
-        font-variant-numeric: tabular-nums;
-    }
-
-    .fp-stat-dot {
         width: 6px;
         height: 6px;
         border-radius: 50%;
+        flex-shrink: 0;
     }
+    .fp-dot--fresh { background: var(--pass); }
+    .fp-dot--stale { background: var(--warn); }
+    .fp-dot--broken { background: var(--fail); }
 
-    .fp-stat--fresh { color: ${STATUS_META.fresh.color}; }
-    .fp-stat--fresh .fp-stat-dot { background: ${STATUS_META.fresh.color}; }
-    .fp-stat--stale { color: ${STATUS_META.stale.color}; }
-    .fp-stat--stale .fp-stat-dot { background: ${STATUS_META.stale.color}; }
-    .fp-stat--broken { color: ${STATUS_META.broken.color}; }
-    .fp-stat--broken .fp-stat-dot { background: ${STATUS_META.broken.color}; }
+    .fp-status-bar {
+        display: flex;
+        align-items: baseline;
+        gap: 0;
+        border-top: 1px solid var(--hair);
+        background: var(--bg-bar);
+        font-family: var(--mono);
+        font-size: 11px;
+        flex-shrink: 0;
+    }
+    .fp-stat {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 0.375rem;
+        padding: 0.375rem 0.625rem;
+        border-right: 1px solid var(--hair);
+        font-variant-numeric: tabular-nums;
+    }
+    .fp-stat:last-child { border-right: 0; }
+    .fp-stat-dot {
+        width: 6px;
+        height: 6px;
+        align-self: center;
+    }
+    .fp-stat-val {
+        color: var(--ink);
+    }
+    .fp-stat-label {
+        color: var(--ink-faint);
+    }
+    .fp-stat--fresh .fp-stat-dot { background: var(--pass); }
+    .fp-stat--fresh .fp-stat-val { color: var(--pass); }
+    .fp-stat--stale .fp-stat-dot { background: var(--warn); }
+    .fp-stat--stale .fp-stat-val { color: var(--warn); }
+    .fp-stat--broken .fp-stat-dot { background: var(--fail); }
+    .fp-stat--broken .fp-stat-val { color: var(--fail); }
 
     .fp-no-results {
-        padding: 1.5rem 1rem;
+        padding: 1rem;
         text-align: center;
-        color: #6b7280;
-        font-size: 0.8125rem;
+        color: var(--ink-faint);
+        font-family: var(--mono);
+        font-size: 11.5px;
     }
 
     .fp-empty {
@@ -400,27 +514,19 @@ const STYLES = `
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 0.75rem;
+        gap: 0.375rem;
         padding: 2rem 1rem;
         text-align: center;
+        font-family: var(--mono);
     }
-
-    .fp-empty svg {
-        width: 3rem;
-        height: 3rem;
-        color: #374151;
-    }
-
     .fp-empty-title {
         margin: 0;
-        font-size: 0.875rem;
-        font-weight: 500;
-        color: #9ca3af;
+        font-size: 12.5px;
+        color: var(--ink-dim);
     }
-
     .fp-empty-hint {
         margin: 0;
-        font-size: 0.8125rem;
-        color: #4b5563;
+        font-size: 11.5px;
+        color: var(--ink-faint);
     }
 `;

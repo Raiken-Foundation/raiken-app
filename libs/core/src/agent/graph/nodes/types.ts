@@ -40,6 +40,7 @@ export interface AgentNodeDeps {
             missingContext?: string[];
             nextTool?: string | null;
         };
+        pauseReason?: string | null;
     }) => string;
     getMemoryContext: () => MemoryContext | undefined;
     getActiveIntent?: () => "explore" | "generateTests" | "explain" | null;

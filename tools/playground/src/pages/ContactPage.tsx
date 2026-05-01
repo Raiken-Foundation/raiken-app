@@ -1,229 +1,126 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { validateEmail } from "../utils";
+import { useId, useState } from "react";
+import { useToast } from "../contexts/ToastContext";
+import type { ContactMessage } from "../types";
 
-function ContactPage() {
-    const [form, setForm] = useState({
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export default function ContactPage() {
+    const { push } = useToast();
+    const [form, setForm] = useState<ContactMessage>({
         name: "",
         email: "",
         subject: "",
         message: "",
     });
-    const [errors, setErrors] = useState<Record<string, string>>({});
+    const [errors, setErrors] = useState<Partial<Record<keyof ContactMessage, string>>>({});
     const [submitted, setSubmitted] = useState(false);
+    const nameId = useId();
+    const emailId = useId();
+    const subjectId = useId();
+    const messageId = useId();
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        const newErrors: Record<string, string> = {};
-
-        if (!form.name.trim()) {
-            newErrors.name = "Name is required";
-        }
-        if (!form.email.trim()) {
-            newErrors.email = "Email is required";
-        } else if (!validateEmail(form.email)) {
-            newErrors.email = "Invalid email format";
-        }
-        if (!form.subject.trim()) {
-            newErrors.subject = "Subject is required";
-        }
-        if (!form.message.trim()) {
-            newErrors.message = "Message is required";
-        } else if (form.message.trim().length < 10) {
-            newErrors.message = "Message must be at least 10 characters";
-        }
-
-        if (Object.keys(newErrors).length > 0) {
-            setErrors(newErrors);
-            return;
-        }
-
-        setErrors({});
-        setSubmitted(true);
+    const update = <K extends keyof ContactMessage>(key: K, value: ContactMessage[K]) => {
+        setForm((prev) => ({ ...prev, [key]: value }));
     };
 
-    if (submitted) {
-        return (
-            <div className="page contact-page" data-testid="contact-page">
-                <div className="page-header">
-                    <h1>Contact Us</h1>
-                </div>
-                <div className="card success-card" data-testid="contact-success">
-                    <span className="success-icon">✅</span>
-                    <h2>Message Sent!</h2>
-                    <p>
-                        Thank you for reaching out, {form.name}. We'll get back
-                        to you at {form.email} shortly.
-                    </p>
-                    <div className="form-actions">
-                        <button
-                            onClick={() => {
-                                setSubmitted(false);
-                                setForm({
-                                    name: "",
-                                    email: "",
-                                    subject: "",
-                                    message: "",
-                                });
-                            }}
-                            className="btn btn-primary"
-                            data-testid="send-another"
-                        >
-                            Send Another Message
-                        </button>
-                        <Link
-                            to="/"
-                            className="btn btn-secondary"
-                            data-testid="back-home"
-                        >
-                            Back to Home
-                        </Link>
-                    </div>
-                </div>
-            </div>
-        );
-    }
+    const submit = (e: React.FormEvent) => {
+        e.preventDefault();
+        const next: typeof errors = {};
+        if (form.name.trim().length < 2) next.name = "Name is required";
+        if (!EMAIL.test(form.email)) next.email = "Enter a valid email";
+        if (form.subject.trim().length < 3) next.subject = "Subject is required";
+        if (form.message.trim().length < 10)
+            next.message = "Message must be at least 10 characters";
+        setErrors(next);
+        if (Object.keys(next).length === 0) {
+            setSubmitted(true);
+            push("success", "Message sent");
+            setForm({ name: "", email: "", subject: "", message: "" });
+        }
+    };
 
     return (
-        <div className="page contact-page" data-testid="contact-page">
-            <div className="page-header">
-                <h1>Contact Us</h1>
-                <p className="page-subtitle">
-                    Have a question or feedback? We'd love to hear from you.
-                </p>
-            </div>
+        <div className="page" data-testid="contact-page">
+            <header className="page-header">
+                <div>
+                    <h1>Contact</h1>
+                    <p className="page-subtitle">
+                        Drop us a note. (Nothing is actually sent — this is a playground.)
+                    </p>
+                </div>
+            </header>
 
-            <div className="contact-layout">
-                <div className="contact-info" data-testid="contact-info">
-                    <div className="info-card">
-                        <span className="info-icon">📧</span>
-                        <h3>Email</h3>
-                        <p>support@raiken.dev</p>
+            {submitted && (
+                <output className="alert alert-success" data-testid="contact-success">
+                    Thanks! We'll be in touch shortly.
+                </output>
+            )}
+
+            <form className="card contact-form" onSubmit={submit} noValidate>
+                <div className="form-row">
+                    <div className="form-group">
+                        <label htmlFor={nameId}>Name</label>
+                        <input
+                            id={nameId}
+                            value={form.name}
+                            onChange={(e) => update("name", e.target.value)}
+                            data-testid="contact-name"
+                        />
+                        {errors.name && (
+                            <span className="form-error" data-testid="contact-name-error">
+                                {errors.name}
+                            </span>
+                        )}
                     </div>
-                    <div className="info-card">
-                        <span className="info-icon">💬</span>
-                        <h3>Chat</h3>
-                        <p>Available Mon-Fri, 9am-5pm</p>
-                    </div>
-                    <div className="info-card">
-                        <span className="info-icon">📍</span>
-                        <h3>Location</h3>
-                        <p>San Francisco, CA</p>
+                    <div className="form-group">
+                        <label htmlFor={emailId}>Email</label>
+                        <input
+                            id={emailId}
+                            type="email"
+                            value={form.email}
+                            onChange={(e) => update("email", e.target.value)}
+                            data-testid="contact-email"
+                        />
+                        {errors.email && (
+                            <span className="form-error" data-testid="contact-email-error">
+                                {errors.email}
+                            </span>
+                        )}
                     </div>
                 </div>
-
-                <form
-                    onSubmit={handleSubmit}
-                    className="card contact-form"
-                    data-testid="contact-form"
-                >
-                    <h2>Send a Message</h2>
-
-                    <div className="form-row">
-                        <div className="form-group">
-                            <label htmlFor="contact-name">Name *</label>
-                            <input
-                                id="contact-name"
-                                type="text"
-                                value={form.name}
-                                onChange={(e) =>
-                                    setForm({ ...form, name: e.target.value })
-                                }
-                                placeholder="Your name"
-                                data-testid="contact-name-input"
-                            />
-                            {errors.name && (
-                                <span
-                                    className="error"
-                                    data-testid="contact-name-error"
-                                >
-                                    {errors.name}
-                                </span>
-                            )}
-                        </div>
-
-                        <div className="form-group">
-                            <label htmlFor="contact-email">Email *</label>
-                            <input
-                                id="contact-email"
-                                type="email"
-                                value={form.email}
-                                onChange={(e) =>
-                                    setForm({ ...form, email: e.target.value })
-                                }
-                                placeholder="your@email.com"
-                                data-testid="contact-email-input"
-                            />
-                            {errors.email && (
-                                <span
-                                    className="error"
-                                    data-testid="contact-email-error"
-                                >
-                                    {errors.email}
-                                </span>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="form-group">
-                        <label htmlFor="contact-subject">Subject *</label>
-                        <select
-                            id="contact-subject"
-                            value={form.subject}
-                            onChange={(e) =>
-                                setForm({ ...form, subject: e.target.value })
-                            }
-                            data-testid="contact-subject-select"
-                        >
-                            <option value="">Select a topic...</option>
-                            <option value="general">General Inquiry</option>
-                            <option value="bug">Bug Report</option>
-                            <option value="feature">Feature Request</option>
-                            <option value="support">Technical Support</option>
-                        </select>
-                        {errors.subject && (
-                            <span
-                                className="error"
-                                data-testid="contact-subject-error"
-                            >
-                                {errors.subject}
-                            </span>
-                        )}
-                    </div>
-
-                    <div className="form-group">
-                        <label htmlFor="contact-message">Message *</label>
-                        <textarea
-                            id="contact-message"
-                            value={form.message}
-                            onChange={(e) =>
-                                setForm({ ...form, message: e.target.value })
-                            }
-                            placeholder="Describe your question or feedback..."
-                            rows={6}
-                            data-testid="contact-message-input"
-                        />
-                        {errors.message && (
-                            <span
-                                className="error"
-                                data-testid="contact-message-error"
-                            >
-                                {errors.message}
-                            </span>
-                        )}
-                    </div>
-
-                    <button
-                        type="submit"
-                        className="btn btn-primary btn-full"
-                        data-testid="contact-submit"
-                    >
-                        Send Message
-                    </button>
-                </form>
-            </div>
+                <div className="form-group">
+                    <label htmlFor={subjectId}>Subject</label>
+                    <input
+                        id={subjectId}
+                        value={form.subject}
+                        onChange={(e) => update("subject", e.target.value)}
+                        data-testid="contact-subject"
+                    />
+                    {errors.subject && (
+                        <span className="form-error" data-testid="contact-subject-error">
+                            {errors.subject}
+                        </span>
+                    )}
+                </div>
+                <div className="form-group">
+                    <label htmlFor={messageId}>Message</label>
+                    <textarea
+                        id={messageId}
+                        rows={5}
+                        value={form.message}
+                        onChange={(e) => update("message", e.target.value)}
+                        data-testid="contact-message"
+                    />
+                    {errors.message && (
+                        <span className="form-error" data-testid="contact-message-error">
+                            {errors.message}
+                        </span>
+                    )}
+                </div>
+                <button type="submit" className="btn btn-primary" data-testid="contact-submit">
+                    Send message
+                </button>
+            </form>
         </div>
     );
 }
-
-export default ContactPage;

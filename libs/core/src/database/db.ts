@@ -3,8 +3,9 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import { load as loadSqliteVec } from 'sqlite-vec';
-import type { CodeNode, ParsedFile } from '../types';
+import type { CodeNode, ParsedFile, ParsedSymbol, GraphEdge, EdgeKind, EdgeProvenance, SymbolKind } from '../types';
 import type { DBEntryPoint, DBFileNode, DBDependency, DBStats } from '../types';
+import { buildEdgesForNode } from '../analysis/symbol-extractor';
 
 // ============================================================================
 // Custom Errors
@@ -32,14 +33,14 @@ export class DatabaseError extends Error {
  * - Retry logic for busy database
  * - Streaming for large datasets
  * 
- * SCHEMA VERSION: 1
+ * SCHEMA VERSION: 6
  */
 export class CodeGraphDB {
   private db: Database.Database;
   private projectPath: string;
   private readonly dbPath: string;
   
-  private static readonly SCHEMA_VERSION = 5;
+  private static readonly SCHEMA_VERSION = 6;
   private static readonly RETRY_ATTEMPTS = 3;
   private static readonly RETRY_DELAY_MS = 100;
 
@@ -85,8 +86,22 @@ export class CodeGraphDB {
       if (error instanceof DatabaseError) {
         throw error;
       }
+      const msg = (error as Error).message || '';
+      if (msg.includes('malformed') || msg.includes('corrupt') || msg.includes('not a database')) {
+        const backupPath = `${this.dbPath}.corrupt.${Date.now()}`;
+        try {
+          const fsSync = require('node:fs');
+          if (fsSync.existsSync(this.dbPath)) {
+            fsSync.renameSync(this.dbPath, backupPath);
+          }
+        } catch { /* best-effort backup */ }
+        throw new DatabaseError(
+          `Database is corrupted. The broken file has been backed up to ${backupPath}. Restart Raiken to create a fresh database. Your code graph will be rebuilt automatically.`,
+          error as Error
+        );
+      }
       throw new DatabaseError(
-        `Failed to initialize CodeGraphDB at ${this.dbPath}: ${(error as Error).message}`,
+        `Failed to initialize CodeGraphDB at ${this.dbPath}: ${msg}`,
         error as Error
       );
     }
@@ -114,16 +129,80 @@ export class CodeGraphDB {
     // Fresh database - create v1 schema and migrate to latest
     if (currentVersion === 0) {
       this.createV1Schema();
-      this.ensureEmbeddingsSchema();
-      this.ensureKeywordIndexSchema();
-      this.ensureMemorySchema();
-      this.ensureDependencyColumns();
-      this.ensureFileColumns();
       this.setUserVersion(1);
     }
 
     // Run migrations
     this.runMigrations();
+
+    // Idempotent schema extensions (safe to run on every startup)
+    this.ensureEmbeddingsSchema();
+    this.ensureKeywordIndexSchema();
+    this.ensureMemorySchema();
+    this.ensureDependencyColumns();
+    this.ensureFileColumns();
+    this.ensureSymbolGraphSchema();
+  }
+
+  /**
+   * Symbol-level + edge graph schema.
+   *
+   * `symbols` holds first-class units (functions, classes, methods, routes, ...).
+   * `graph_edges` is a unified edge table: every relationship between files or
+   * symbols carries provenance + a 0..1 confidence so callers can weight
+   * evidence (static AST vs. runtime vs. inferred).
+   */
+  private ensureSymbolGraphSchema(): void {
+    this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS symbols (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          start_line INTEGER NOT NULL,
+          end_line INTEGER NOT NULL,
+          is_exported INTEGER DEFAULT 0,
+          is_async INTEGER DEFAULT 0,
+          parent TEXT,
+          signature TEXT,
+          callees TEXT,
+          rendered TEXT,
+          route_meta TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_symbols_project ON symbols(project_path);
+        CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
+        CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+        CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_symbols_unique
+          ON symbols(project_path, file_path, name, kind, start_line);
+      `);
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS graph_edges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          source_file TEXT NOT NULL,
+          target_file TEXT NOT NULL,
+          source_symbol TEXT,
+          target_symbol TEXT,
+          provenance TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 1.0,
+          evidence TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_edges_project ON graph_edges(project_path);
+        CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_file);
+        CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_file);
+        CREATE INDEX IF NOT EXISTS idx_edges_kind ON graph_edges(kind);
+        CREATE INDEX IF NOT EXISTS idx_edges_provenance ON graph_edges(provenance);
+      `);
+    })();
   }
 
   /**
@@ -150,6 +229,11 @@ export class CodeGraphDB {
     if (currentVersion < 5) {
       this.migrateToV5();
       this.setUserVersion(5);
+    }
+
+    if (currentVersion < 6) {
+      this.migrateToV6();
+      this.setUserVersion(6);
     }
   }
 
@@ -269,6 +353,97 @@ export class CodeGraphDB {
       }
       if (!columnNames.includes('max_depth')) {
         this.db.exec(`ALTER TABLE discovery_sessions ADD COLUMN max_depth INTEGER`);
+      }
+    })();
+  }
+
+  /**
+   * Migration to v6 - Generic discovery blockers.
+   *
+   * Replaces the `auth_blockers` table with `discovery_blockers`, broadening
+   * the abstraction so the crawler can record any reason it had to stop on a
+   * page (auth wall, captcha, consent banner, rate-limit page, etc.) and the
+   * dashboard can offer category-appropriate resolution actions.
+   *
+   * Migration is forward-only and copy-then-drop, so a v5 -> v6 upgrade
+   * preserves every existing `auth_blockers` row as a `discovery_blockers`
+   * row with `category='auth_required'`.
+   *
+   * Also extends `discovery_sessions` with two session-scoped columns that
+   * survive a pause/resume cycle: `skipped_urls_json` (URLs the user told us
+   * to skip after a blocker) and `ignored_categories_json` (blocker
+   * categories the user told us to log-only for the rest of this session).
+   */
+  private migrateToV6(): void {
+    this.db.transaction(() => {
+      const tables = this.db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table'`)
+        .all() as Array<{ name: string }>;
+      const tableNames = new Set(tables.map(t => t.name));
+
+      // 1. Create the new generalised table.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS discovery_blockers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          url TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'auth_required',
+          severity TEXT NOT NULL DEFAULT 'pause',
+          detector_id TEXT,
+          detected_elements TEXT,
+          evidence_json TEXT,
+          screenshot_path TEXT,
+          resolution TEXT,
+          resolved_via TEXT,
+          resolved_at INTEGER,
+          storage_state_path TEXT,
+          discovered_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_blockers_project ON discovery_blockers(project_path);
+        CREATE INDEX IF NOT EXISTS idx_blockers_unresolved
+          ON discovery_blockers(project_path, resolved_at);
+      `);
+
+      // 2. Copy existing rows from auth_blockers, preserving original ids so
+      //    in-flight references (e.g. the legacy `getAuthBlockers` query in
+      //    the dashboard) keep pointing at the same blocker.
+      if (tableNames.has('auth_blockers')) {
+        this.db.exec(`
+          INSERT INTO discovery_blockers (
+            id, project_path, url, category, severity,
+            detector_id, detected_elements, evidence_json,
+            screenshot_path, resolution, resolved_via,
+            resolved_at, storage_state_path, discovered_at
+          )
+          SELECT
+            id, project_path, url, 'auth_required', 'pause',
+            'auth:' || COALESCE(blocker_type, 'unknown'),
+            detected_elements, NULL,
+            NULL,
+            CASE WHEN resolved_at IS NULL THEN NULL ELSE 'provide_state' END,
+            CASE WHEN resolved_at IS NULL THEN NULL ELSE 'auth_command' END,
+            resolved_at, storage_state_path, discovered_at
+          FROM auth_blockers;
+        `);
+
+        // 3. Drop the legacy table. SiteKnowledgeDB exposes back-compat
+        //    method names so callers don't break.
+        this.db.exec(`DROP TABLE auth_blockers;`);
+      }
+
+      // 4. Session-scoped resolution memory.
+      const sessionInfo = this.db
+        .prepare(`PRAGMA table_info(discovery_sessions)`)
+        .all() as Array<{ name: string }>;
+      const sessionColumns = new Set(sessionInfo.map(c => c.name));
+      if (!sessionColumns.has('skipped_urls_json')) {
+        this.db.exec(`ALTER TABLE discovery_sessions ADD COLUMN skipped_urls_json TEXT`);
+      }
+      if (!sessionColumns.has('ignored_categories_json')) {
+        this.db.exec(
+          `ALTER TABLE discovery_sessions ADD COLUMN ignored_categories_json TEXT`,
+        );
       }
     })();
   }
@@ -485,6 +660,21 @@ export class CodeGraphDB {
         CREATE INDEX IF NOT EXISTS idx_outcomes_status ON test_outcomes(status);
         CREATE INDEX IF NOT EXISTS idx_outcomes_file ON test_outcomes(test_file);
       `);
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS test_source_map (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_path TEXT NOT NULL,
+          test_file TEXT NOT NULL,
+          source_file TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          UNIQUE(project_path, test_file, source_file)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tsm_project ON test_source_map(project_path);
+        CREATE INDEX IF NOT EXISTS idx_tsm_source ON test_source_map(source_file);
+        CREATE INDEX IF NOT EXISTS idx_tsm_test ON test_source_map(test_file);
+      `);
     })();
   }
 
@@ -520,10 +710,10 @@ export class CodeGraphDB {
     } catch (error: unknown) {
       const sqliteError = error as { code?: string };
       if (sqliteError.code === 'SQLITE_BUSY' && retries > 0) {
-        // Synchronous sleep using Atomics.wait (doesn't burn CPU like busy-wait)
-        const sharedBuffer = new SharedArrayBuffer(4);
-        const int32 = new Int32Array(sharedBuffer);
-        Atomics.wait(int32, 0, 0, CodeGraphDB.RETRY_DELAY_MS);
+        const start = Date.now();
+        while (Date.now() - start < CodeGraphDB.RETRY_DELAY_MS) {
+            // spin-wait; better-sqlite3 is synchronous so we can't await
+        }
         return this.runWithRetry(fn, retries - 1);
       }
       throw new DatabaseError(
@@ -629,6 +819,15 @@ export class CodeGraphDB {
             
             insertDep.run(this.projectPath, filePath, targetFile, importType, now);
           }
+
+          // Persist symbol-level data and unified edges for this file.
+          if (node.symbols && node.symbols.length > 0) {
+            this.replaceFileSymbolsInTransaction(filePath, node.symbols, now);
+          }
+          const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
+          if (edges.length > 0) {
+            this.replaceFileEdgesInTransaction(filePath, edges, now);
+          }
         }
 
         // Insert entry points
@@ -719,6 +918,20 @@ export class CodeGraphDB {
           insertDep.run(this.projectPath, node.filePath, targetFile, 'static', now);
         }
 
+        // Persist symbol-level data and unified edges for this file.
+        if (node.symbols && node.symbols.length > 0) {
+          this.replaceFileSymbolsInTransaction(node.filePath, node.symbols, now);
+        } else {
+          // Even if there are no symbols (e.g. binary or parse failure), make
+          // sure we don't leave stale rows behind.
+          this.db.prepare(`
+            DELETE FROM symbols WHERE project_path = ? AND file_path = ?
+          `).run(this.projectPath, node.filePath);
+        }
+
+        const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
+        this.replaceFileEdgesInTransaction(node.filePath, edges, now);
+
         // Recalculate stats
         this.recalculateStats();
       });
@@ -733,8 +946,24 @@ export class CodeGraphDB {
   removeFile(filePath: string): void {
     this.runWithRetry(() => {
       const transaction = this.db.transaction(() => {
+        // Clean vec_embeddings before deleting the file (no FK cascade on virtual table)
+        const embeddingIds = (this.db.prepare(`
+          SELECT e.id FROM embeddings e
+          JOIN files f ON e.file_id = f.id
+          WHERE f.project_path = ? AND f.file_path = ?
+        `).all(this.projectPath, filePath) as Array<{ id: number }>).map(r => r.id);
+
+        if (embeddingIds.length > 0) {
+          const deleteVec = this.db.prepare(`DELETE FROM vec_embeddings WHERE rowid = ?`);
+          for (const id of embeddingIds) {
+            deleteVec.run(id);
+          }
+        }
+
         this.db.prepare(`DELETE FROM files WHERE project_path = ? AND file_path = ?`).run(this.projectPath, filePath);
         this.db.prepare(`DELETE FROM dependencies WHERE project_path = ? AND (source_file = ? OR target_file = ?)`).run(this.projectPath, filePath, filePath);
+        this.db.prepare(`DELETE FROM symbols WHERE project_path = ? AND file_path = ?`).run(this.projectPath, filePath);
+        this.db.prepare(`DELETE FROM graph_edges WHERE project_path = ? AND (source_file = ? OR target_file = ?)`).run(this.projectPath, filePath, filePath);
         this.recalculateStats();
       });
 
@@ -816,6 +1045,13 @@ export class CodeGraphDB {
         parsed = { functions: [], classes: [], imports: [], exports: [], types: [] };
       }
 
+      let ast: unknown | undefined;
+      try {
+        ast = file.ast ? JSON.parse(file.ast) : undefined;
+      } catch {
+        ast = undefined;
+      }
+
       nodes.set(file.file_path, {
         filePath: file.file_path,
         relativePath: file.relative_path,
@@ -828,6 +1064,7 @@ export class CodeGraphDB {
         importedBy: [],
         lastModified: file.last_indexed,
         parsed,
+        ast,
         meta: {
           extension: path.extname(file.file_path),
           isTest: /\.(test|spec)\.[jt]sx?$/.test(file.file_path),
@@ -986,10 +1223,26 @@ export class CodeGraphDB {
   clearProject(): void {
     this.runWithRetry(() => {
       const transaction = this.db.transaction(() => {
+        // Clean vec_embeddings before deleting files (no FK cascade on virtual table)
+        const embeddingIds = (this.db.prepare(`
+          SELECT e.id FROM embeddings e
+          JOIN files f ON e.file_id = f.id
+          WHERE f.project_path = ?
+        `).all(this.projectPath) as Array<{ id: number }>).map(r => r.id);
+
+        if (embeddingIds.length > 0) {
+          const deleteVec = this.db.prepare(`DELETE FROM vec_embeddings WHERE rowid = ?`);
+          for (const id of embeddingIds) {
+            deleteVec.run(id);
+          }
+        }
+
         this.db.prepare('DELETE FROM files WHERE project_path = ?').run(this.projectPath);
         this.db.prepare('DELETE FROM dependencies WHERE project_path = ?').run(this.projectPath);
         this.db.prepare('DELETE FROM entry_points WHERE project_path = ?').run(this.projectPath);
         this.db.prepare('DELETE FROM stats WHERE project_path = ?').run(this.projectPath);
+        this.db.prepare('DELETE FROM symbols WHERE project_path = ?').run(this.projectPath);
+        this.db.prepare('DELETE FROM graph_edges WHERE project_path = ?').run(this.projectPath);
       });
 
       transaction();
@@ -1018,8 +1271,11 @@ export class CodeGraphDB {
    * Get row count for a specific table.
    */
   getTableCount(tableName: string): number {
+    if (!this.isValidTableName(tableName)) {
+      return 0;
+    }
     try {
-      const result = this.db.prepare(`SELECT COUNT(*) as count FROM ${tableName}`).get() as { count: number };
+      const result = this.db.prepare(`SELECT COUNT(*) as count FROM "${tableName}"`).get() as { count: number };
       return result.count;
     } catch {
       return 0;
@@ -1030,15 +1286,22 @@ export class CodeGraphDB {
    * Query a table with pagination.
    */
   queryTable(tableName: string, limit: number, offset: number): unknown[] {
+    if (!this.isValidTableName(tableName)) {
+      return [];
+    }
     try {
       return this.db.prepare(`
-        SELECT * FROM ${tableName}
+        SELECT * FROM "${tableName}"
         LIMIT ? OFFSET ?
       `).all(limit, offset);
     } catch (error) {
       console.error(`Error querying table ${tableName}:`, error);
       return [];
     }
+  }
+
+  private isValidTableName(name: string): boolean {
+    return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
   }
 
   /**
@@ -1273,6 +1536,17 @@ export class CodeGraphDB {
   }
 
   /**
+   * Get the DB file record ID for a given file path.
+   * Returns null if the file is not in the database.
+   */
+  getFileId(filePath: string): number | null {
+    const result = this.db.prepare(`
+      SELECT id FROM files WHERE project_path = ? AND file_path = ?
+    `).get(this.projectPath, filePath) as { id: number } | undefined;
+    return result?.id ?? null;
+  }
+
+  /**
    * Check if a file has embeddings.
    * 
    * @param fileId - The database ID of the file
@@ -1456,8 +1730,14 @@ export class CodeGraphDB {
 
   /**
    * Record a failed selector usage.
+   * Inserts a row on first-ever failure so "this selector never works" is
+   * observable rather than silently dropped.
    */
-  recordSelectorFailure(elementDescription: string, selector: string): void {
+  recordSelectorFailure(
+    elementDescription: string,
+    selector: string,
+    selectorType: string = "other",
+  ): void {
     this.runWithRetry(() => {
       const now = Date.now();
       const existing = this.db.prepare(`
@@ -1471,8 +1751,12 @@ export class CodeGraphDB {
           SET failure_count = ?, last_used = ?
           WHERE id = ?
         `).run(existing.failure_count + 1, now, existing.id);
+      } else {
+        this.db.prepare(`
+          INSERT INTO selector_history (project_path, element_description, selector, selector_type, success_count, failure_count, last_used, created_at)
+          VALUES (?, ?, ?, ?, 0, 1, ?, ?)
+        `).run(this.projectPath, elementDescription, selector, selectorType, now, now);
       }
-      // If selector doesn't exist, we don't create a failure-only record
     });
   }
 
@@ -1643,6 +1927,388 @@ export class CodeGraphDB {
   }
 
   /**
+   * Record which source files a generated test covers.
+   */
+  recordTestSourceFiles(testFile: string, sourceFiles: string[]): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        const now = Date.now();
+        const stmt = this.db.prepare(`
+          INSERT OR IGNORE INTO test_source_map (project_path, test_file, source_file, created_at)
+          VALUES (?, ?, ?, ?)
+        `);
+        for (const src of sourceFiles) {
+          stmt.run(this.projectPath, testFile, src, now);
+        }
+      });
+      transaction();
+    });
+  }
+
+  /**
+   * Given a list of changed source files, return the test files that cover them.
+   * Uses both the explicit test_source_map and the dependency graph (dependents).
+   */
+  getAffectedTests(changedSourceFiles: string[]): Array<{
+    testFile: string;
+    reason: 'source_map' | 'dependency';
+    sourceFile: string;
+  }> {
+    if (changedSourceFiles.length === 0) return [];
+
+    const results: Array<{ testFile: string; reason: 'source_map' | 'dependency'; sourceFile: string }> = [];
+    const seen = new Set<string>();
+
+    for (const srcFile of changedSourceFiles) {
+      const mapped = this.db.prepare(`
+        SELECT test_file FROM test_source_map
+        WHERE project_path = ? AND source_file = ?
+      `).all(this.projectPath, srcFile) as Array<{ test_file: string }>;
+
+      for (const row of mapped) {
+        const key = `${row.test_file}::${srcFile}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          results.push({ testFile: row.test_file, reason: 'source_map', sourceFile: srcFile });
+        }
+      }
+
+      const dependents = this.db.prepare(`
+        SELECT source_file FROM dependencies
+        WHERE project_path = ? AND target_file = ?
+      `).all(this.projectPath, srcFile) as Array<{ source_file: string }>;
+
+      for (const dep of dependents) {
+        if (this.isTestFilePath(dep.source_file)) {
+          const key = `${dep.source_file}::${srcFile}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            results.push({ testFile: dep.source_file, reason: 'dependency', sourceFile: srcFile });
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  private isTestFilePath(filePath: string): boolean {
+    const lower = filePath.toLowerCase();
+    return /\.(spec|test|e2e)\.[jt]sx?$/.test(lower)
+      || lower.includes('/tests/')
+      || lower.includes('/test/')
+      || lower.includes('/__tests__/')
+      || lower.includes('/e2e/');
+  }
+
+  // ==========================================================================
+  // Symbol Graph Operations
+  // ==========================================================================
+
+  /**
+   * Replace all symbols for a single file. Atomic: deletes prior rows, then
+   * inserts the new set in one transaction.
+   */
+  replaceFileSymbols(filePath: string, symbols: ParsedSymbol[]): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        this.replaceFileSymbolsInTransaction(filePath, symbols, Date.now());
+      });
+      transaction();
+    });
+  }
+
+  /**
+   * Internal helper used inside a larger transaction. Does NOT open its own
+   * transaction — caller is responsible for atomicity.
+   */
+  private replaceFileSymbolsInTransaction(filePath: string, symbols: ParsedSymbol[], now: number): void {
+    this.db.prepare(`
+      DELETE FROM symbols WHERE project_path = ? AND file_path = ?
+    `).run(this.projectPath, filePath);
+
+    if (symbols.length === 0) return;
+
+    const insert = this.db.prepare(`
+      INSERT OR REPLACE INTO symbols (
+        project_path, file_path, name, kind, start_line, end_line,
+        is_exported, is_async, parent, signature, callees, rendered, route_meta, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const s of symbols) {
+      insert.run(
+        this.projectPath,
+        filePath,
+        s.name,
+        s.kind,
+        s.startLine,
+        s.endLine,
+        s.isExported ? 1 : 0,
+        s.isAsync ? 1 : 0,
+        s.parent ?? null,
+        s.signature ?? null,
+        s.callees && s.callees.length ? JSON.stringify(s.callees) : null,
+        s.rendered && s.rendered.length ? JSON.stringify(s.rendered) : null,
+        s.routeMeta ? JSON.stringify(s.routeMeta) : null,
+        now,
+      );
+    }
+  }
+
+  /**
+   * Get all symbols defined in a file.
+   */
+  getFileSymbols(filePath: string): ParsedSymbol[] {
+    const rows = this.db.prepare(`
+      SELECT name, kind, start_line, end_line, is_exported, is_async, parent, signature, callees, rendered, route_meta
+      FROM symbols
+      WHERE project_path = ? AND file_path = ?
+      ORDER BY start_line ASC
+    `).all(this.projectPath, filePath) as Array<{
+      name: string;
+      kind: string;
+      start_line: number;
+      end_line: number;
+      is_exported: number;
+      is_async: number;
+      parent: string | null;
+      signature: string | null;
+      callees: string | null;
+      rendered: string | null;
+      route_meta: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      name: row.name,
+      kind: row.kind as SymbolKind,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      isExported: row.is_exported === 1,
+      isAsync: row.is_async === 1,
+      parent: row.parent ?? undefined,
+      signature: row.signature ?? undefined,
+      callees: row.callees ? safeJsonArray(row.callees) : undefined,
+      rendered: row.rendered ? safeJsonArray(row.rendered) : undefined,
+      routeMeta: row.route_meta ? safeJsonObject<ParsedSymbol['routeMeta']>(row.route_meta) : undefined,
+    }));
+  }
+
+  /**
+   * Find symbols by name (exact or LIKE), optionally filtered by kind.
+   * Useful for resolving "function X is referenced" → which symbol(s) it points to.
+   */
+  findSymbolsByName(name: string, opts?: { kinds?: SymbolKind[]; like?: boolean; limit?: number }): Array<{
+    file: string;
+    symbol: ParsedSymbol;
+  }> {
+    const limit = opts?.limit ?? 25;
+    const op = opts?.like ? 'LIKE' : '=';
+    const params: Array<string | number> = [this.projectPath, name];
+
+    let sql = `
+      SELECT file_path, name, kind, start_line, end_line, is_exported, is_async, parent, signature, callees, rendered, route_meta
+      FROM symbols
+      WHERE project_path = ? AND name ${op} ?
+    `;
+
+    if (opts?.kinds && opts.kinds.length > 0) {
+      const placeholders = opts.kinds.map(() => '?').join(',');
+      sql += ` AND kind IN (${placeholders})`;
+      params.push(...opts.kinds);
+    }
+
+    sql += ` LIMIT ?`;
+    params.push(limit);
+
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      file_path: string;
+      name: string;
+      kind: string;
+      start_line: number;
+      end_line: number;
+      is_exported: number;
+      is_async: number;
+      parent: string | null;
+      signature: string | null;
+      callees: string | null;
+      rendered: string | null;
+      route_meta: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      file: row.file_path,
+      symbol: {
+        name: row.name,
+        kind: row.kind as SymbolKind,
+        startLine: row.start_line,
+        endLine: row.end_line,
+        isExported: row.is_exported === 1,
+        isAsync: row.is_async === 1,
+        parent: row.parent ?? undefined,
+        signature: row.signature ?? undefined,
+        callees: row.callees ? safeJsonArray(row.callees) : undefined,
+        rendered: row.rendered ? safeJsonArray(row.rendered) : undefined,
+        routeMeta: row.route_meta ? safeJsonObject<ParsedSymbol['routeMeta']>(row.route_meta) : undefined,
+      },
+    }));
+  }
+
+  /**
+   * Replace all edges originating from a given source file. Idempotent for
+   * incremental updates — caller passes the current edges for the file.
+   */
+  replaceFileEdges(sourceFile: string, edges: GraphEdge[], kinds?: EdgeKind[]): void {
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        this.replaceFileEdgesInTransaction(sourceFile, edges, Date.now(), kinds);
+      });
+      transaction();
+    });
+  }
+
+  private replaceFileEdgesInTransaction(
+    sourceFile: string,
+    edges: GraphEdge[],
+    now: number,
+    kinds?: EdgeKind[],
+  ): void {
+    // By default we replace every static_ast edge originating from this file.
+    // Runtime/test_run edges live alongside and are NOT touched here.
+    if (kinds && kinds.length > 0) {
+      const placeholders = kinds.map(() => '?').join(',');
+      this.db.prepare(`
+        DELETE FROM graph_edges
+        WHERE project_path = ? AND source_file = ? AND kind IN (${placeholders}) AND provenance = 'static_ast'
+      `).run(this.projectPath, sourceFile, ...kinds);
+    } else {
+      this.db.prepare(`
+        DELETE FROM graph_edges WHERE project_path = ? AND source_file = ? AND provenance = 'static_ast'
+      `).run(this.projectPath, sourceFile);
+    }
+
+    if (edges.length === 0) return;
+
+    const insert = this.db.prepare(`
+      INSERT INTO graph_edges (
+        project_path, kind, source_file, target_file, source_symbol, target_symbol,
+        provenance, confidence, evidence, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const e of edges) {
+      insert.run(
+        this.projectPath,
+        e.kind,
+        e.sourceFile,
+        e.targetFile,
+        e.sourceSymbol ?? null,
+        e.targetSymbol ?? null,
+        e.provenance,
+        e.confidence,
+        e.evidence ? JSON.stringify(e.evidence) : null,
+        now,
+      );
+    }
+  }
+
+  /**
+   * Add edges without removing existing ones. Used by runtime/coverage feedback.
+   */
+  addEdges(edges: GraphEdge[]): void {
+    if (edges.length === 0) return;
+    this.runWithRetry(() => {
+      const transaction = this.db.transaction(() => {
+        const insert = this.db.prepare(`
+          INSERT INTO graph_edges (
+            project_path, kind, source_file, target_file, source_symbol, target_symbol,
+            provenance, confidence, evidence, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const now = Date.now();
+        for (const e of edges) {
+          insert.run(
+            this.projectPath,
+            e.kind,
+            e.sourceFile,
+            e.targetFile,
+            e.sourceSymbol ?? null,
+            e.targetSymbol ?? null,
+            e.provenance,
+            e.confidence,
+            e.evidence ? JSON.stringify(e.evidence) : null,
+            now,
+          );
+        }
+      });
+      transaction();
+    });
+  }
+
+  /**
+   * Find edges that target any of the given files. Used to resolve
+   * "what depends on these changed files" with explicit provenance.
+   */
+  getIncomingEdges(targetFiles: string[], opts?: { kinds?: EdgeKind[] }): GraphEdge[] {
+    if (targetFiles.length === 0) return [];
+
+    const placeholders = targetFiles.map(() => '?').join(',');
+    let sql = `
+      SELECT kind, source_file, target_file, source_symbol, target_symbol, provenance, confidence, evidence
+      FROM graph_edges
+      WHERE project_path = ? AND target_file IN (${placeholders})
+    `;
+    const params: Array<string | number> = [this.projectPath, ...targetFiles];
+
+    if (opts?.kinds && opts.kinds.length > 0) {
+      const kindPlaceholders = opts.kinds.map(() => '?').join(',');
+      sql += ` AND kind IN (${kindPlaceholders})`;
+      params.push(...opts.kinds);
+    }
+
+    sql += ` ORDER BY confidence DESC`;
+
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      kind: string;
+      source_file: string;
+      target_file: string;
+      source_symbol: string | null;
+      target_symbol: string | null;
+      provenance: string;
+      confidence: number;
+      evidence: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      kind: row.kind as EdgeKind,
+      sourceFile: row.source_file,
+      targetFile: row.target_file,
+      sourceSymbol: row.source_symbol ?? undefined,
+      targetSymbol: row.target_symbol ?? undefined,
+      provenance: row.provenance as EdgeProvenance,
+      confidence: row.confidence,
+      evidence: row.evidence ? safeJsonObject<GraphEdge['evidence']>(row.evidence) : undefined,
+    }));
+  }
+
+  /**
+   * Compact stats for the symbol graph (used by `raiken status` / dashboard).
+   */
+  getSymbolGraphStats(): { symbols: number; edges: number; edgesByKind: Record<string, number> } {
+    const sym = this.db.prepare(`SELECT COUNT(*) as c FROM symbols WHERE project_path = ?`).get(this.projectPath) as { c: number };
+    const edg = this.db.prepare(`SELECT COUNT(*) as c FROM graph_edges WHERE project_path = ?`).get(this.projectPath) as { c: number };
+    const byKind = this.db.prepare(`
+      SELECT kind, COUNT(*) as c FROM graph_edges WHERE project_path = ? GROUP BY kind
+    `).all(this.projectPath) as Array<{ kind: string; c: number }>;
+
+    return {
+      symbols: sym.c,
+      edges: edg.c,
+      edgesByKind: Object.fromEntries(byKind.map((r) => [r.kind, r.c])),
+    };
+  }
+
+  /**
    * Close the database connection.
    */
   close(): void {
@@ -1674,9 +2340,42 @@ export class CodeGraphDB {
   }
 
   /**
+   * Prune old selector history and test outcomes to prevent unbounded growth.
+   */
+  pruneHistory(maxSelectors = 500, maxOutcomes = 200): void {
+    this.runWithRetry(() => {
+      this.db.exec(`
+        DELETE FROM selector_history WHERE id NOT IN (
+          SELECT id FROM selector_history ORDER BY last_used DESC LIMIT ${maxSelectors}
+        );
+        DELETE FROM test_outcomes WHERE id NOT IN (
+          SELECT id FROM test_outcomes ORDER BY created_at DESC LIMIT ${maxOutcomes}
+        );
+      `);
+    });
+  }
+
+  /**
    * Generate a content hash for a file.
    */
   static hashContent(content: string): string {
     return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+  }
+}
+
+function safeJsonArray(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function safeJsonObject<T>(raw: string): T | undefined {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
   }
 }

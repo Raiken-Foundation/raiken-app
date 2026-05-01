@@ -5,7 +5,7 @@ import { appRouter } from "@raiken/shared";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
 import { detectProject } from "./project-detector";
-import { runOrchestrator, ProjectContext, CodeGraphDB, EntryPointDetector, CodeGraph, AgentMemory } from "@raiken/core";
+import { runOrchestrator, ProjectContext, CodeGraphDB, EntryPointDetector, CodeGraph, AgentMemory, getCurrentBranch, parseTicketFromBranch } from "@raiken/core";
 
 export async function startServer(port = 7101) {
     const app = fastify({ logger: true });
@@ -77,6 +77,10 @@ export async function startServer(port = 7101) {
         const projectContext = ProjectContext.getInstance(projectPath);
         await projectContext.initialize();
         
+        // Start live file watching for incremental index updates
+        projectContext.startWatching();
+        console.log('👁️  File watcher active (incremental indexing enabled)');
+        
         // Log project understanding stats
         const modules = projectContext.getModules();
         if (modules.length > 0) {
@@ -96,6 +100,23 @@ export async function startServer(port = 7101) {
             console.log(`🧠 Memory: ${prefCount} preferences loaded`);
         }
         
+        // Auto-detect ticket from current branch (non-blocking)
+        const branch = getCurrentBranch(projectPath);
+        if (branch) {
+            let integrationConfig: Record<string, unknown> | undefined;
+            try {
+                const cfgPath = path.join(projectPath, 'raiken.config.json');
+                integrationConfig = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'))?.integrations;
+            } catch { /* no config */ }
+
+            const parsed = parseTicketFromBranch(branch, integrationConfig as Parameters<typeof parseTicketFromBranch>[1]);
+            if (parsed) {
+                console.log(`🎫 Ticket detected: ${parsed.ticketId} (${parsed.provider}) from branch "${branch}"`);
+            } else {
+                console.log(`🌿 Branch: ${branch} (no ticket ID detected)`);
+            }
+        }
+
     } catch (error) {
         console.warn('⚠️  Failed to initialize project context:', error);
     }
@@ -108,6 +129,21 @@ export async function startServer(port = 7101) {
                 projectPath: process.cwd()
             })
         },
+    });
+
+    app.get('/api/artifact', async (request, reply) => {
+        const { path: filePath } = request.query as { path?: string };
+        if (!filePath) {
+            return reply.code(400).send({ error: 'path query parameter is required' });
+        }
+        const resolved = path.resolve(projectPath, filePath);
+        if (!resolved.startsWith(path.resolve(projectPath) + path.sep) && resolved !== path.resolve(projectPath)) {
+            return reply.code(403).send({ error: 'forbidden' });
+        }
+        if (!fs.existsSync(resolved)) {
+            return reply.code(404).send({ error: 'artifact not found' });
+        }
+        return reply.sendFile(path.basename(resolved), path.dirname(resolved));
     });
 
     app.get('/api/project-info', async (request, reply) => {

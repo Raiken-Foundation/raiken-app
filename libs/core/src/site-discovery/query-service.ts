@@ -85,6 +85,17 @@ export class DiscoveryQueryService {
         return this.getSiteDb().getUnresolvedBlockers();
     }
 
+    /**
+     * All blockers (resolved and unresolved). Used by the auto-resume
+     * path to inspect *how* the most recent blockers were resolved
+     * (handoff, provide_state, clear, ...) so the resume can pick the
+     * right start URL and decide whether to purge Crawlee's persistent
+     * queue.
+     */
+    getAllBlockers(): AuthBlocker[] {
+        return this.getSiteDb().getAllBlockers();
+    }
+
     listPages(options?: { limit?: number; offset?: number }): DiscoveryPageList {
         const limit = toPositiveInt(options?.limit, 50, 500);
         const offset = toNonNegativeInt(options?.offset, 0);

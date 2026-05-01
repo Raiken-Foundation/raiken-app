@@ -44,24 +44,25 @@
                 "parallel": false
             }
         },
-        "build": {
-            "executor": "nx:run-commands",
-            "outputs": ["{workspaceRoot}/dist/apps/cli"],
-            "dependsOn": ["build:esbuild", "copy-dashboard"],
-            "options": {
-                "commands": ["echo '✅ CLI build complete with dashboard assets'"],
-                "parallel": false
-            }
-        },
         "install-deps": {
             "executor": "nx:run-commands",
-            "outputs": ["{workspaceRoot}/dist/apps/cli/node_modules"],
+            "cache": false,
+            "dependsOn": ["copy-dashboard"],
             "options": {
                 "commands": [
-                    "echo '📦 Installing CLI dependencies for development...'",
+                    "echo '📦 Installing CLI dependencies into dist/apps/cli...'",
                     "cd dist/apps/cli && npm install --silent --legacy-peer-deps",
                     "echo '✅ Dependencies installed!'"
                 ],
+                "parallel": false
+            }
+        },
+        "build": {
+            "executor": "nx:run-commands",
+            "outputs": ["{workspaceRoot}/dist/apps/cli"],
+            "dependsOn": ["install-deps"],
+            "options": {
+                "commands": ["echo '✅ CLI build complete with dashboard assets'"],
                 "parallel": false
             }
         },
@@ -70,16 +71,14 @@
             "outputs": ["{workspaceRoot}/dist/apps/cli"],
             "dependsOn": ["build"],
             "options": {
-                "commands": [
-                    "nx run cli:install-deps"
-                ],
+                "commands": ["echo '✅ CLI dev build ready'"],
                 "parallel": false
             }
         },
         "serve": {
             "executor": "nx:run-commands",
             "defaultConfiguration": "development",
-            "dependsOn": ["build:dev"],
+            "dependsOn": ["build"],
             "options": {
                 "command": "node dist/apps/cli/bin.cjs start"
             }

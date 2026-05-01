@@ -1,6 +1,7 @@
 import { Annotation } from "@langchain/langgraph";
 import type { ContextData } from "../prompts";
 import type { AgentIntent, InterruptionInfo } from "./utils";
+import type { TestRunResult } from "../../testing/runner";
 
 export const GraphState = Annotation.Root({
     userPrompt: Annotation<string>({
@@ -52,7 +53,13 @@ export const GraphState = Annotation.Root({
         default: () => [],
     }),
     pageSummaries: Annotation<string[]>({
-        value: (left, right) => left.concat(right),
+        value: (left, right) => {
+            const merged = left.concat(right);
+            const MAX_PAGE_SUMMARIES = 30;
+            return merged.length > MAX_PAGE_SUMMARIES
+                ? merged.slice(merged.length - MAX_PAGE_SUMMARIES)
+                : merged;
+        },
         default: () => [],
     }),
     interruption: Annotation<InterruptionInfo | null>({
@@ -84,6 +91,30 @@ export const GraphState = Annotation.Root({
         default: () => null,
     }),
     context: Annotation<ContextData | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
+    maxExplorePages: Annotation<number | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
+    testRunResult: Annotation<TestRunResult[] | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
+    repairAttempts: Annotation<number>({
+        value: (_left, right) => right,
+        default: () => 0,
+    }),
+    pauseReason: Annotation<string | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
+    pendingPagesVisited: Annotation<string[]>({
+        value: (_left, right) => right,
+        default: () => [],
+    }),
+    pendingCurrentUrl: Annotation<string | null>({
         value: (_left, right) => right,
         default: () => null,
     }),

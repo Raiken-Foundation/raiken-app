@@ -1,115 +1,117 @@
-import { useState } from "react";
-import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
-import Navbar from "./components/Navbar";
-import LoginForm from "./components/LoginForm";
-import HomePage from "./pages/HomePage";
-import DashboardPage from "./pages/DashboardPage";
-import ProfilePage from "./pages/ProfilePage";
-import SettingsPage from "./pages/SettingsPage";
-import AboutPage from "./pages/AboutPage";
-import ContactPage from "./pages/ContactPage";
-import NotFoundPage from "./pages/NotFoundPage";
+import type { ReactNode } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-function ProtectedRoute({
-    isLoggedIn,
-    children,
-}: {
-    isLoggedIn: boolean;
-    children: React.ReactNode;
-}) {
+import Navbar from "./components/Navbar";
+import Toaster from "./components/Toaster";
+import { useAuth } from "./contexts/AuthContext";
+import { useToast } from "./contexts/ToastContext";
+import AboutPage from "./pages/AboutPage";
+import ActivityPage from "./pages/ActivityPage";
+import ContactPage from "./pages/ContactPage";
+import DashboardPage from "./pages/DashboardPage";
+import HomePage from "./pages/HomePage";
+import LoginPage from "./pages/LoginPage";
+import NotFoundPage from "./pages/NotFoundPage";
+import ProfilePage from "./pages/ProfilePage";
+import ProjectDetailPage from "./pages/ProjectDetailPage";
+import ProjectsListPage from "./pages/ProjectsListPage";
+import SettingsPage from "./pages/SettingsPage";
+
+function ProtectedRoute({ children }: { children: ReactNode }) {
+    const { isLoggedIn } = useAuth();
+    const location = useLocation();
     if (!isLoggedIn) {
-        return <Navigate to="/login" replace />;
+        return <Navigate to="/login" replace state={{ from: location }} />;
     }
     return <>{children}</>;
 }
 
-function App() {
-    const [isLoggedIn, setIsLoggedIn] = useState(false);
-    const [username, setUsername] = useState("");
-    const navigate = useNavigate();
+export default function App() {
+    const { isLoggedIn, logout } = useAuth();
+    const { push } = useToast();
     const location = useLocation();
+    const navigate = useNavigate();
 
-    const handleLogin = (user: string) => {
-        setIsLoggedIn(true);
-        setUsername(user);
-        navigate("/dashboard");
-    };
+    const showNavbar = isLoggedIn && location.pathname !== "/login";
 
     const handleLogout = () => {
-        setIsLoggedIn(false);
-        setUsername("");
-        navigate("/");
+        logout();
+        push("info", "Signed out");
+        navigate("/login", { replace: true });
     };
-
-    // Hide navbar on login page
-    const showNavbar = location.pathname !== "/login";
 
     return (
         <div className="app-layout">
-            {showNavbar && (
-                <Navbar
-                    isLoggedIn={isLoggedIn}
-                    username={username}
-                    onLogout={handleLogout}
-                />
-            )}
+            {showNavbar && <Navbar onLogout={handleLogout} />}
 
             <main className="app-content">
                 <Routes>
-                    {/* Public routes */}
-                    <Route
-                        path="/"
-                        element={<HomePage isLoggedIn={isLoggedIn} />}
-                    />
+                    <Route path="/" element={<HomePage />} />
                     <Route path="/about" element={<AboutPage />} />
                     <Route path="/contact" element={<ContactPage />} />
                     <Route
                         path="/login"
-                        element={
-                            isLoggedIn ? (
-                                <Navigate to="/dashboard" replace />
-                            ) : (
-                                <LoginForm onLogin={handleLogin} />
-                            )
-                        }
+                        element={isLoggedIn ? <Navigate to="/dashboard" replace /> : <LoginPage />}
                     />
 
-                    {/* Protected routes */}
                     <Route
                         path="/dashboard"
                         element={
-                            <ProtectedRoute isLoggedIn={isLoggedIn}>
-                                <DashboardPage username={username} />
+                            <ProtectedRoute>
+                                <DashboardPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/projects"
+                        element={
+                            <ProtectedRoute>
+                                <ProjectsListPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/projects/:slug"
+                        element={
+                            <ProtectedRoute>
+                                <ProjectDetailPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/activity"
+                        element={
+                            <ProtectedRoute>
+                                <ActivityPage />
                             </ProtectedRoute>
                         }
                     />
                     <Route
                         path="/profile"
                         element={
-                            <ProtectedRoute isLoggedIn={isLoggedIn}>
-                                <ProfilePage username={username} />
+                            <ProtectedRoute>
+                                <ProfilePage />
                             </ProtectedRoute>
                         }
                     />
                     <Route
                         path="/settings"
                         element={
-                            <ProtectedRoute isLoggedIn={isLoggedIn}>
+                            <ProtectedRoute>
                                 <SettingsPage />
                             </ProtectedRoute>
                         }
                     />
 
-                    {/* 404 */}
                     <Route path="*" element={<NotFoundPage />} />
                 </Routes>
             </main>
 
+            <Toaster />
+
             <footer className="app-footer" data-testid="app-footer">
-                <p>&copy; 2026 Raiken Playground. Built for E2E testing.</p>
+                <p>Atlas Tracker — built as a Raiken playground. Mock data resets on refresh.</p>
             </footer>
         </div>
     );
 }
-
-export default App;

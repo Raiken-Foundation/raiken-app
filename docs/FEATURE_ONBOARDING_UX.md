@@ -1,50 +1,17 @@
-# Onboarding and UX Improvements (Planned)
+# Onboarding and UX Improvements (Remaining)
 
-This document captures the proposed onboarding and UX improvements for Raiken. It is a
-planning reference only; implementation will follow later.
+> **Status:** Active. Items here map to specific priorities in `ROADMAP.md`:
+> - `raiken doctor` → P1-7
+> - `npx raiken` zero-install → P1-8
+> - SSO auth guidance → part of P1 auth work
+> - First-run dashboard tour → P2-11 (downgraded; CLI-first workflow makes the dashboard secondary)
+> - Consistent next-step guidance → P2-10
+> - Structured log output (`--json`) → P2-9
+> - Quickstart and troubleshooting docs → polish alongside P0 items
+>
+> Items marked as done have been removed. This file tracks only what is still pending.
 
-## Goals
-
-- Reduce time-to-first-value to under 5 minutes.
-- Make CLI onboarding self-guided and safe by default.
-- Provide clear, actionable next steps after every command.
-- Align UI and CLI terminology for consistency.
-
-## Non-Goals
-
-- Replacing the current CLI with a GUI-only experience.
-- Introducing vendor lock-in or cloud-only workflows.
-- Implementing new core features (this is UX and onboarding only).
-
-## User Journey (Target)
-
-1) Install + init
-2) Authenticate (if needed)
-3) Discover
-4) Generate tests
-5) Review results in dashboard
-
-## CLI Onboarding (Planned)
-
-### `raiken init` wizard
-
-The init command should become an interactive wizard that:
-
-- Detects project type and test framework
-- Asks for base URL (dev server)
-- Asks auth type: none, username/password, SSO/provider
-- Writes `raiken.config.json` with safe defaults
-- Adds `.raiken/` and `storage/` to `.gitignore`
-
-### Next-step guidance
-
-Every command should print the next 1-2 commands to run, for example:
-
-```
-Next steps:
-1) raiken auth --url http://localhost:3000/login
-2) raiken discover http://localhost:3000
-```
+## CLI
 
 ### `raiken doctor`
 
@@ -58,14 +25,15 @@ Add a diagnostic command to validate:
 
 Output should be clean and actionable.
 
-## Auth UX Improvements
+### Consistent next-step guidance
 
-### Auth detection in discover
+Every command should print the next 1-2 commands to run. Some commands already do this, but coverage is inconsistent.
 
-If auth is detected, prompt:
+### Structured log output
 
-- "Run auth now? (Y/n)"
-- If yes, launch `raiken auth` automatically
+Add a `--json` flag for machine-readable CLI output for CI integrations.
+
+## Auth UX
 
 ### SSO guidance
 
@@ -75,41 +43,9 @@ When SSO is detected, show a short checklist:
 - Confirm logged-in state
 - Press Enter to save session state
 
-## Discovery UX Improvements
+Currently only basic login forms are guided; SSO flows need clearer instructions.
 
-### Summary output
-
-After discovery, show a structured summary:
-
-- Pages discovered
-- Verified links
-- Broken links
-- Auth blockers
-- Time elapsed
-
-### Safe defaults
-
-Default `excludePatterns` should include routes like:
-
-```
-/logout
-/delete
-/admin
-/billing
-/danger
-```
-
-These should be documented in the config template.
-
-### Failure transparency
-
-If discovery ends early, say why:
-
-- Auth pause
-- Max depth/pages reached
-- Network errors
-
-## Dashboard UX Improvements
+## Dashboard
 
 ### First-run tour
 
@@ -119,29 +55,21 @@ On first dashboard visit:
 - Show verified navigation paths
 - Provide a "Generate a test" CTA
 
-### Discovery view
-
-Include:
-
-- Verified navigation paths
-- Working selectors
-- Auth blockers
-- Broken links
-
 ### Test generation transparency
 
-Show which discovery artifacts were used in the test (paths/selectors).
+Show which discovery artifacts (paths, selectors, pages) were used to generate a test so users can trace AI decisions.
 
-## Docs Improvements
+## Docs
 
 ### Quickstart
 
 Create a single 5-minute quickstart with these steps:
 
-1) `raiken init`
-2) `raiken auth`
-3) `raiken discover`
-4) `raiken start`
+1. `npm install -g raiken`
+2. `raiken init`
+3. `raiken auth` (if needed)
+4. `raiken discover http://localhost:3000`
+5. `raiken start`
 
 ### Troubleshooting tree
 
@@ -150,6 +78,7 @@ Provide a decision tree for common issues:
 - Auth failures
 - Empty discovery results
 - Missing selectors
+- Native module build errors (`better-sqlite3`, `sharp`)
 
 ## Telemetry (Optional)
 
@@ -162,12 +91,4 @@ If added, it should be:
 ## Open Questions
 
 - Should `raiken init` run in non-interactive mode for CI?
-- Should `raiken discover` default to a safe-crawl mode?
 - Should CLI logs be more structured (JSON option)?
-
-## Acceptance Criteria (for future implementation)
-
-- First-time user can reach "discover" in under 5 minutes
-- Auth guidance works for both password and SSO flows
-- Dashboard shows discovery data without manual steps
-- No ambiguous errors in the CLI output

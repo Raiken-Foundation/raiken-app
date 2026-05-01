@@ -1,0 +1,161 @@
+# raiken-cover.yml
+#
+# Drop this file into your project at .github/workflows/raiken-cover.yml.
+#
+# What it does:
+#   Lets reviewers (or the PR author) trigger test generation by commenting
+#   on a PR with the syntax:
+#
+#       /raiken cover <target>
+#
+#   where <target> is one of:
+#       AC-2                              acceptance criterion #2 of the linked ticket
+#       LoginForm                         a code symbol resolved via the graph
+#       "user can sign in with SSO"       a free-text scenario (quote it!)
+#
+#   The action will:
+#     1. Check out the PR branch.
+#     2. Run `raiken cover <target>` to draft a Playwright test.
+#     3. Commit the new file back to the PR branch.
+#     4. Reply with a comment pointing at the new test.
+#
+# Required secrets:
+#   OPENROUTER_API_KEY  - For the LLM call (omit to fall back to scaffold mode).
+#   GITHUB_TOKEN        - Provided automatically; permissions configured below.
+
+name: raiken cover
+
+on:
+    issue_comment:
+        types: [created]
+
+permissions:
+    contents: write
+    pull-requests: write
+
+jobs:
+    cover:
+        # Only respond on PR comments that start with the trigger.
+        if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/raiken cover')
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: React to comment (acknowledge)
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      await github.rest.reactions.createForIssueComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          comment_id: context.payload.comment.id,
+                          content: 'eyes',
+                      });
+
+            - name: Resolve PR head ref
+              id: pr
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const pr = await github.rest.pulls.get({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          pull_number: context.issue.number,
+                      });
+                      core.setOutput('head_ref', pr.data.head.ref);
+                      core.setOutput('head_repo', pr.data.head.repo.full_name);
+
+            - name: Checkout PR branch
+              uses: actions/checkout@v4
+              with:
+                  repository: ${{ steps.pr.outputs.head_repo }}
+                  ref: ${{ steps.pr.outputs.head_ref }}
+                  fetch-depth: 0
+                  token: ${{ secrets.GITHUB_TOKEN }}
+
+            # pnpm must be installed BEFORE setup-node for the pnpm cache to work.
+            - name: Install pnpm
+              uses: pnpm/action-setup@v3
+              with:
+                  version: 9
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Parse target from comment
+              id: parse
+              env:
+                  # Route the untrusted comment body through an env var to avoid
+                  # shell injection (never inline github.event.* into `run:`).
+                  COMMENT: ${{ github.event.comment.body }}
+              run: |
+                  # Strip the `/raiken cover ` prefix and any leading/trailing whitespace.
+                  target="$(printf '%s' "$COMMENT" | head -n1 | sed -E 's|^/raiken cover[[:space:]]+||')"
+                  if [ -z "$target" ]; then
+                      echo "::error::No target after /raiken cover"
+                      exit 1
+                  fi
+                  # Use a heredoc delimiter so special chars in $target can't break out
+                  # of GITHUB_OUTPUT. See: GH docs on "multiline strings".
+                  {
+                    echo "target<<RAIKEN_EOF"
+                    printf '%s\n' "$target"
+                    echo "RAIKEN_EOF"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Run raiken cover
+              id: cover
+              env:
+                  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # Again: pass the target via env, NOT interpolated into the shell.
+                  TARGET: ${{ steps.parse.outputs.target }}
+              run: |
+                  pnpm exec raiken cover "$TARGET" --json > cover-result.json
+                  cat cover-result.json
+                  OUT_PATH="$(node -e "process.stdout.write(require('./cover-result.json').outputPath)")"
+                  echo "outputPath=$OUT_PATH" >> "$GITHUB_OUTPUT"
+
+            - name: Commit drafted test
+              env:
+                  OUT_PATH: ${{ steps.cover.outputs.outputPath }}
+                  TARGET: ${{ steps.parse.outputs.target }}
+                  HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+              run: |
+                  git config user.name "raiken[bot]"
+                  git config user.email "raiken-bot@users.noreply.github.com"
+                  git add -- "$OUT_PATH"
+                  git commit -m "test: draft via /raiken cover ${TARGET}"
+                  git push origin "HEAD:${HEAD_REF}"
+
+            - name: Reply with link to drafted test
+              uses: actions/github-script@v7
+              env:
+                  TARGET: ${{ steps.parse.outputs.target }}
+                  OUT_PATH: ${{ steps.cover.outputs.outputPath }}
+              with:
+                  script: |
+                      const target = process.env.TARGET;
+                      const file = process.env.OUT_PATH;
+                      await github.rest.issues.createComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          issue_number: context.issue.number,
+                          body: [
+                              '### ✍️ raiken cover',
+                              '',
+                              `Drafted a test for **${target}**: \`${file}\``,
+                              '',
+                              'Review the diff and run it locally with:',
+                              '```bash',
+                              `npx playwright test ${file}`,
+                              '```',
+                              '',
+                              '_The draft is a starting point — replace TODOs and verify the assertions before merging._',
+                          ].join('\n'),
+                      });

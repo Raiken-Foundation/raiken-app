@@ -1,9 +1,11 @@
 # Feature: Collaborative Test Graph
 
-> **Status:** Planned  
-> **Priority:** Medium‑High  
-> **Complexity:** High  
-> **Dependencies:** Auth, real‑time sync, shared graph storage, model execution
+> **Status:** Deferred (as of Feb 2026)
+> **Priority:** Out of scope for current phase
+> **Complexity:** High
+> **Dependencies:** `FEATURE_CLOUD_ACCOUNTS.md` (also deferred), real‑time sync, shared graph storage, model execution
+>
+> **Why deferred:** This is a team-collaboration product pattern that competes with Linear, GitHub PRs, and Notion for team-level test coordination. Raiken's wedge is single-developer, local-first, code-explainable test generation — not multiplayer editing. Engineering cost is months; demand is unproven. See `ROADMAP.md` → Deferred.
 
 ---
 

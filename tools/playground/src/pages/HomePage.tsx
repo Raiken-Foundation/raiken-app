@@ -1,86 +1,74 @@
 import { Link } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 
-interface HomePageProps {
-    isLoggedIn: boolean;
-}
-
-function HomePage({ isLoggedIn }: HomePageProps) {
+export default function HomePage() {
+    const { isLoggedIn } = useAuth();
     return (
         <div className="page home-page" data-testid="home-page">
             <section className="hero">
-                <h1>Welcome to Raiken Playground</h1>
+                <h1>Atlas Tracker</h1>
                 <p className="hero-subtitle">
-                    A multi-page test application for E2E testing with
-                    autonomous site discovery
+                    A small project & task tracker — built as a Raiken playground.
                 </p>
-
                 <div className="hero-actions">
                     {isLoggedIn ? (
                         <Link
                             to="/dashboard"
-                            className="btn btn-primary btn-lg"
-                            data-testid="go-to-dashboard"
+                            className="btn btn-primary"
+                            data-testid="hero-dashboard"
                         >
-                            Go to Dashboard
+                            Open dashboard
                         </Link>
                     ) : (
-                        <Link
-                            to="/login"
-                            className="btn btn-primary btn-lg"
-                            data-testid="go-to-login"
-                        >
-                            Get Started
+                        <Link to="/login" className="btn btn-primary" data-testid="hero-login">
+                            Sign in to continue
                         </Link>
                     )}
-                    <Link
-                        to="/about"
-                        className="btn btn-secondary btn-lg"
-                        data-testid="learn-more"
-                    >
-                        Learn More
+                    <Link to="/about" className="btn btn-secondary" data-testid="hero-about">
+                        Learn more
                     </Link>
                 </div>
             </section>
 
-            <section className="features-grid" data-testid="features-grid">
-                <div className="feature-card">
-                    <span className="feature-icon">📊</span>
-                    <h3>Dashboard</h3>
-                    <p>View your activity stats, recent items, and quick actions.</p>
-                    <Link to={isLoggedIn ? "/dashboard" : "/login"} className="feature-link" data-testid="feature-dashboard">
-                        Explore Dashboard →
-                    </Link>
-                </div>
-
-                <div className="feature-card">
-                    <span className="feature-icon">✅</span>
-                    <h3>Todo Manager</h3>
-                    <p>Create, filter, and manage your tasks with ease.</p>
-                    <Link to={isLoggedIn ? "/dashboard" : "/login"} className="feature-link" data-testid="feature-todos">
-                        Manage Todos →
-                    </Link>
-                </div>
-
-                <div className="feature-card">
-                    <span className="feature-icon">👤</span>
-                    <h3>Profile</h3>
-                    <p>Customize your profile and manage your account.</p>
-                    <Link to={isLoggedIn ? "/profile" : "/login"} className="feature-link" data-testid="feature-profile">
-                        Edit Profile →
-                    </Link>
-                </div>
-
-                <div className="feature-card">
-                    <span className="feature-icon">⚙️</span>
-                    <h3>Settings</h3>
-                    <p>Configure themes, notifications, and preferences.</p>
-                    <Link to={isLoggedIn ? "/settings" : "/login"} className="feature-link" data-testid="feature-settings">
-                        Open Settings →
-                    </Link>
-                </div>
+            <section className="feature-grid" data-testid="feature-grid">
+                <Feature
+                    title="Projects"
+                    description="Search, sort, paginate and create projects."
+                    testId="feature-projects"
+                />
+                <Feature
+                    title="Tasks"
+                    description="Filter by status, change progress, delete (admin)."
+                    testId="feature-tasks"
+                />
+                <Feature
+                    title="Activity feed"
+                    description="Every state change is recorded for the audit trail."
+                    testId="feature-activity"
+                />
+                <Feature
+                    title="Permissions"
+                    description="Admins can mutate; members read and contribute."
+                    testId="feature-perms"
+                />
             </section>
         </div>
     );
 }
 
-export default HomePage;
+function Feature({
+    title,
+    description,
+    testId,
+}: {
+    title: string;
+    description: string;
+    testId: string;
+}) {
+    return (
+        <article className="feature-card" data-testid={testId}>
+            <h3>{title}</h3>
+            <p>{description}</p>
+        </article>
+    );
+}

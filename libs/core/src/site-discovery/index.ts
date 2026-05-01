@@ -8,6 +8,8 @@ export * from "./types";
 export * from "./db";
 export * from "./auth-detector";
 export * from "./crawler";
+export * from "./detectors";
 export * from "./knowledge-loader";
+export * from "./manual-handoff";
 export * from "./query-service";
 export * from "./url-utils";

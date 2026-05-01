@@ -5,30 +5,54 @@
  * Integrates with AuthDetector and persists results to database.
  */
 
-import {
-    PlaywrightCrawler,
-    RequestQueue,
-    Configuration,
-    type PlaywrightCrawlingContext,
-} from "crawlee";
 import { EventEmitter } from "node:events";
-import * as path from "node:path";
 import * as fs from "node:fs";
-import type { BrowserContext, Page } from "playwright";
+import * as path from "node:path";
+import {
+    Configuration,
+    MemoryStorage,
+    PlaywrightCrawler,
+    type PlaywrightCrawlingContext,
+    RequestQueue,
+} from "crawlee";
+import type { Page, Response } from "playwright";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "./db";
-import { AuthDetector } from "./auth-detector";
-import type {
-    DiscoveryOptions,
-    DiscoveryStats,
-} from "./types";
+import {
+    type BlockerDetector,
+    createAuthDetector,
+    createManualFallbackDetector,
+    runBlockerPipeline,
+} from "./detectors";
+import { buildLinkSelector, safeOrigin } from "./link-utils";
+import type { BlockerCategory, DiscoveryBlocker, DiscoveryOptions, DiscoveryStats } from "./types";
 import { normalizeUrl } from "./url-utils";
+
+type StorageStateCookie = {
+    name: string;
+    value: string;
+    domain?: string;
+    path?: string;
+    url?: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: "Strict" | "Lax" | "None";
+};
+
+type StorageStateInput = {
+    cookies?: StorageStateCookie[];
+    origins?: Array<{
+        origin: string;
+        localStorage?: Array<{ name: string; value: string }>;
+    }>;
+};
 
 export class SiteDiscovery extends EventEmitter {
     private crawler: PlaywrightCrawler | null = null;
     private db: CodeGraphDB;
     private siteDb: SiteKnowledgeDB;
-    private authDetector: AuthDetector;
+    private detectors: BlockerDetector[];
     private options: Required<DiscoveryOptions>;
     private sessionId: number | null = null;
     private stats: DiscoveryStats;
@@ -41,16 +65,61 @@ export class SiteDiscovery extends EventEmitter {
         uniqueKey?: string;
         userData?: Record<string, unknown>;
     }> | null = null;
-    private storageState: {
-        cookies?: Array<Record<string, unknown>>;
-        origins?: Array<{
+    /**
+     * Sanitised storage state ready to hand directly to
+     * `browser.newContext({ storageState })` via Crawlee's
+     * `prePageCreateHooks`. Applying it at context-creation time (rather than
+     * via `addInitScript` after navigation) is critical: it guarantees both
+     * cookies AND localStorage are seeded *before* the SPA's first script
+     * runs. With the previous addInitScript approach, SPAs that read auth
+     * tokens from localStorage on mount saw an empty store on the very first
+     * navigation, redirected to /login, and tripped the AuthDetector — even
+     * though the saved auth-state.json was perfectly valid.
+     */
+    private playwrightStorageState: {
+        cookies: StorageStateCookie[];
+        origins: Array<{
             origin: string;
-            localStorage?: Array<{ name: string; value: string }>;
-            sessionStorage?: Array<{ name: string; value: string }>;
+            localStorage: Array<{ name: string; value: string }>;
         }>;
     } | null = null;
-    private storageStateApplied = new WeakSet<BrowserContext>();
     private storageStateWarningEmitted = false;
+    /** Set once a request returns a real authenticated page. */
+    private hasSeenAuthenticatedSuccess = false;
+    private crawleeStorageDir: string | null = null;
+    private wallClockTimer: NodeJS.Timeout | null = null;
+    private aborted = false;
+    private snapshotFailureReports = 0;
+    private compiledExcludeMatchers: Array<(url: string) => boolean> = [];
+    /**
+     * Session-scoped resolution memory.
+     *
+     * `skippedUrls`         URLs the user told us to skip after a blocker.
+     * `ignoredCategories`   blocker categories downgraded to `severity: "log"`
+     *                       for the rest of this session ("don't pause for
+     *                       captchas again, just record them").
+     *
+     * Both survive a pause/resume cycle via the `discovery_sessions` row
+     * (`skipped_urls_json` / `ignored_categories_json` columns).
+     */
+    private skippedUrls = new Set<string>();
+    private ignoredCategories = new Set<BlockerCategory>();
+
+    /**
+     * URLs currently being processed by a worker. Acts as a short-lived
+     * lock so two concurrent workers don't both render the same page.
+     * Cleared in a `finally` so a thrown handler always releases its
+     * slot; otherwise the URL would be permanently un-retryable.
+     */
+    private inFlightUrls = new Set<string>();
+
+    /**
+     * Records *why* a URL never produced a discovered page. Populated by
+     * the failed-request handler (Playwright nav errors, retry exhaustion,
+     * SSL failures, anti-bot blocks where the browser process died, ...)
+     * and surfaced in the user-facing "No pages discovered" diagnostic.
+     */
+    private failedRequests: Array<{ url: string; reason: string; status: number | null }> = [];
 
     constructor(options: DiscoveryOptions) {
         super();
@@ -67,17 +136,20 @@ export class SiteDiscovery extends EventEmitter {
             pauseOnAuth: options.pauseOnAuth ?? true,
             storageStatePath: options.storageStatePath ?? null,
             continueSession: options.continueSession ?? false,
+            purgeQueueOnResume: options.purgeQueueOnResume ?? false,
+            maxRunTimeMs: options.maxRunTimeMs ?? 30 * 60 * 1000,
         };
+
+        this.compiledExcludeMatchers = this.options.excludePatterns.map(compileExcludeMatcher);
 
         // Initialize database
         this.db = new CodeGraphDB(this.options.projectPath);
-        this.siteDb = new SiteKnowledgeDB(
-            this.db.getRawDatabase(),
-            this.options.projectPath
-        );
+        this.siteDb = new SiteKnowledgeDB(this.db.getRawDatabase(), this.options.projectPath);
 
-        // Initialize auth detector
-        this.authDetector = new AuthDetector(this.options.projectPath);
+        // Initialise the blocker detector pipeline. Order is by `priority`
+        // — the manual-fallback detector runs first so a 5xx page or a
+        // captcha iframe wins over a same-page auth signal.
+        this.detectors = [createManualFallbackDetector(), createAuthDetector()];
 
         // Initialize stats
         this.stats = {
@@ -97,11 +169,59 @@ export class SiteDiscovery extends EventEmitter {
      */
     async start(): Promise<void> {
         try {
-            // Direct Crawlee's file-based storage into .raiken/crawlee/
+            // Direct Crawlee's file-based storage into .raiken/crawlee/.
+            // We keep the directory around for diagnostic dumps but
+            // disable on-disk persistence below.
             const crawleeDir = path.join(this.options.projectPath, ".raiken", "crawlee");
             fs.mkdirSync(crawleeDir, { recursive: true });
             process.env["CRAWLEE_STORAGE_DIR"] = crawleeDir;
-            Configuration.getGlobalConfig().set("purgeOnStart", !this.options.continueSession);
+            this.crawleeStorageDir = crawleeDir;
+
+            // CRITICAL: install a fresh, in-memory-only `MemoryStorage`
+            // for *every* discovery run.
+            //
+            // Why this is the right shape of the fix (and the previous
+            // attempts weren't):
+            //
+            // Crawlee's storage client is a process-global singleton.
+            // Within a long-lived CLI server we run many discovery
+            // sessions back-to-back, and the singleton accumulates state:
+            //
+            //   1. The default `RequestQueue` keeps "URL already handled"
+            //      markers from prior runs, so a second crawl on the
+            //      same start URL drains immediately with 0 pages.
+            //
+            //   2. The default `KeyValueStore` holds a live in-memory
+            //      handle to `SDK_SESSION_POOL_STATE.json` from a prior
+            //      run's SessionPool. Any subsequent purge-on-disk
+            //      attempt yanks the file out from under that handle
+            //      and the next read/write throws
+            //      `Could not find file at .../SDK_SESSION_POOL_STATE.json`,
+            //      crashing the new crawl.
+            //
+            // Both problems vanish when each run gets a brand-new
+            // `MemoryStorage`. The old one (with all its stale handles
+            // and "handled URL" log) is dereferenced and GCed; the new
+            // one has empty in-memory caches and never touches disk
+            // (`persistStorage: false`), so there's nothing on disk to
+            // race with the prior run's references.
+            //
+            // We deliberately drop `persistStorage` because Crawlee's
+            // on-disk persistence is redundant for us: cross-process
+            // resume goes through our own `crawl_session_queue` table
+            // in SQLite (see `crawl-session-store.ts`), and within a
+            // single run an in-memory queue is strictly faster.
+            const fresh = new MemoryStorage({
+                localDataDirectory: crawleeDir,
+                persistStorage: false,
+            });
+            Configuration.getGlobalConfig().useStorageClient(fresh);
+            // Belt-and-braces: even with our fresh client, leave
+            // `purgeOnStart` enabled so any code path that fetches a
+            // *cached* singleton (e.g. inside Crawlee internals that
+            // pre-resolved the client at module load) still gets a
+            // clean slate.
+            Configuration.getGlobalConfig().set("purgeOnStart", true);
 
             // Check if resuming a session
             if (this.options.continueSession) {
@@ -125,45 +245,195 @@ export class SiteDiscovery extends EventEmitter {
                         url: request.url,
                         uniqueKey: request.uniqueKey,
                         userData: request.userData,
-                    }))
+                    })),
                 );
             }
 
-            // Create Crawlee crawler
+            // Navigation timeout governs a single goto(); the request handler
+            // does navigation + DOM extraction + link enqueue, so it gets a
+            // generous multiple. Without this, slow pages timeout mid-extract
+            // and we lose the snapshot.
+            const navTimeoutSecs = Math.max(this.options.timeout, 5_000) / 1000;
+            const handlerTimeoutSecs = Math.max(navTimeoutSecs * 3, 60);
+
+            const storageStateForContext = this.playwrightStorageState;
+
+            // Crawlee's `maxRequestsPerCrawl` counts EVERY dispatched request
+            // — including ones we reject (excluded patterns, blockers, off-
+            // origin redirects, dedup misses). If we set it equal to
+            // `maxPages` then a site with many gated routes hits the cap
+            // long before we've discovered `maxPages` *real* pages. Give
+            // Crawlee 50% headroom (with a floor of +10) and enforce the
+            // hard cap ourselves in `handleRequest`.
+            const crawleeRequestCap = Math.max(
+                Math.ceil(this.options.maxPages * 1.5),
+                this.options.maxPages + 10,
+            );
+
             this.crawler = new PlaywrightCrawler({
-                maxRequestsPerCrawl: this.options.maxPages,
+                maxRequestsPerCrawl: crawleeRequestCap,
                 maxConcurrency: this.options.maxConcurrency,
-                requestHandlerTimeoutSecs: this.options.timeout / 1000,
+                requestHandlerTimeoutSecs: handlerTimeoutSecs,
+                navigationTimeoutSecs: navTimeoutSecs,
                 headless: true,
                 requestQueue: this.requestQueue,
                 launchContext: {
-                    launchOptions: {
-                        // Basic launch options (no storageState here — it's a context option)
-                    },
+                    launchOptions: {},
+                    // `pageOptions.storageState` is only honored by Playwright's
+                    // `browser.newContext()` path, which Crawlee uses when each
+                    // page gets its own (incognito) context. With shared
+                    // contexts (the default), `pageOptions` is `undefined` and
+                    // the hook below is a no-op.
+                    ...(storageStateForContext ? { useIncognitoPages: true } : {}),
                 },
-                preNavigationHooks: this.storageState
-                    ? [
-                          async ({ page }) => {
-                              await this.applyStorageState(page);
-                          },
-                      ]
-                    : [],
+                browserPoolOptions: storageStateForContext
+                    ? {
+                          prePageCreateHooks: [
+                              (_pageId, _browserController, pageOptions) => {
+                                  if (pageOptions) {
+                                      (pageOptions as { storageState?: unknown }).storageState =
+                                          storageStateForContext;
+                                  }
+                              },
+                          ],
+                      }
+                    : undefined,
+                // Capture nav-level failures (DNS errors, SSL errors, retry
+                // exhaustion, anti-bot blocks that crash the page, ...).
+                // Without this, Crawlee silently drops failed requests and
+                // we'd report "0 pages discovered" with no diagnostic.
+                failedRequestHandler: async ({ request, response }, error) => {
+                    const status =
+                        typeof response?.status === "function" ? response.status() : null;
+                    const reason = this.summariseFailure(error, status);
+                    this.failedRequests.push({ url: request.url, reason, status });
+                    this.emit("warning", {
+                        type: "warning",
+                        data: {
+                            url: request.url,
+                            message: `Request failed: ${reason}`,
+                            status,
+                        },
+                        timestamp: Date.now(),
+                    });
+                },
             });
 
             // Bind request handler to this instance
-            this.crawler.router.addDefaultHandler(
-                this.handleRequest.bind(this)
-            );
+            this.crawler.router.addDefaultHandler(this.handleRequest.bind(this));
 
-            // Start crawling
+            // Start crawling. On resume:
+            //   - With a hydrated queue (normal continue), let Crawlee
+            //     drain it; don't double-seed startUrl.
+            //   - Without one (or with `purgeQueueOnResume`), seed startUrl
+            //     so the crawler has something to do.
             const startUrls =
-                this.options.continueSession && this.queuedRequests?.length
+                this.options.continueSession &&
+                this.queuedRequests?.length &&
+                !this.options.purgeQueueOnResume
                     ? []
                     : [this.options.startUrl];
-            await this.crawler.run(startUrls);
+
+            // On resume with no live queue, detect the dead-end case: Crawlee's
+            // on-disk RequestQueue may already have this URL marked handled, in
+            // which case `run()` returns instantly with no pages processed and
+            // no user-visible signal. Pre-check the queue and surface a clear
+            // event + mark the session complete so the UI stops spinning.
+            if (this.options.continueSession) {
+                const queueIsEmpty = await this.requestQueue.isEmpty();
+                const nothingToDo =
+                    queueIsEmpty &&
+                    (!this.queuedRequests || this.queuedRequests.length === 0) &&
+                    startUrls.length === 0;
+                if (nothingToDo) {
+                    // The dashboard surfaces this in the timeline; printing
+                    // to stdout would noise up the CLI for non-TTY agent
+                    // mode (background jobs, CI runs).
+                    this.emit("warning", {
+                        type: "warning",
+                        data: {
+                            url: this.options.startUrl,
+                            message:
+                                "Resume requested but no pending work remained in the queue. Marking session complete.",
+                        },
+                        timestamp: Date.now(),
+                    });
+                    this.stats.status = "completed";
+                    this.stats.elapsedMs = Date.now() - this.stats.startedAt;
+                    if (this.sessionId) {
+                        this.siteDb.updateSession(this.sessionId, {
+                            status: "completed",
+                            completedAt: Date.now(),
+                            pagesDiscovered: this.stats.pagesDiscovered,
+                            linksFound: this.stats.linksFound,
+                        });
+                    }
+                    this.emit("session_completed", {
+                        type: "session_completed",
+                        data: { stats: this.stats },
+                        timestamp: Date.now(),
+                    });
+                    return;
+                }
+            }
+
+            // Wall-clock cap: even with maxPages/maxDepth honored, a slow site
+            // with thousands of in-scope links can crawl far longer than the
+            // user expects. Pause gracefully when we hit the deadline.
+            this.armWallClockTimer();
+
+            try {
+                await this.crawler.run(startUrls);
+            } finally {
+                this.disarmWallClockTimer();
+            }
 
             if (this.isPaused) {
                 this.stats.elapsedMs = Date.now() - this.stats.startedAt;
+                return;
+            }
+
+            if (this.aborted) {
+                this.stats.elapsedMs = Date.now() - this.stats.startedAt;
+                this.stats.status = "completed";
+                if (this.sessionId) {
+                    this.siteDb.updateSession(this.sessionId, {
+                        status: "completed",
+                        completedAt: Date.now(),
+                        pagesDiscovered: this.stats.pagesDiscovered,
+                        linksFound: this.stats.linksFound,
+                    });
+                }
+                this.emit("session_completed", {
+                    type: "session_completed",
+                    data: { stats: this.stats, reason: "aborted" },
+                    timestamp: Date.now(),
+                });
+                return;
+            }
+
+            // S6: a fresh crawl that completes with zero pages discovered is
+            // almost always a bogus start URL, network error, or 100%-excluded
+            // host — surface it as an error instead of a "complete" success.
+            // We append whatever diagnostic context we managed to capture
+            // (failed requests + reasons, blockers detected) so the user gets
+            // an actionable message instead of a generic "is the URL
+            // reachable" prompt.
+            const isFreshCrawl = !this.options.continueSession;
+            if (isFreshCrawl && this.stats.pagesDiscovered === 0) {
+                const message = this.buildEmptyCrawlError();
+                this.stats.status = "failed";
+                if (this.sessionId) {
+                    this.siteDb.updateSession(this.sessionId, {
+                        status: "failed",
+                        completedAt: Date.now(),
+                    });
+                }
+                this.emit("error", {
+                    type: "error",
+                    data: { error: new Error(message) },
+                    timestamp: Date.now(),
+                });
                 return;
             }
 
@@ -186,6 +456,7 @@ export class SiteDiscovery extends EventEmitter {
                 timestamp: Date.now(),
             });
         } catch (error) {
+            this.disarmWallClockTimer();
             this.stats.status = "failed";
             this.emit("error", {
                 type: "error",
@@ -193,6 +464,56 @@ export class SiteDiscovery extends EventEmitter {
                 timestamp: Date.now(),
             });
             throw error;
+        }
+    }
+
+    /**
+     * Abort the current crawl. Marks the session complete (no resume) and
+     * tears down the crawler. Intended for the dashboard "Stop" button when
+     * the user wants to keep what was found but stop crawling further.
+     */
+    async abort(): Promise<void> {
+        this.aborted = true;
+        this.stats.status = "completed";
+        this.disarmWallClockTimer();
+        if (this.sessionId) {
+            this.siteDb.updateSession(this.sessionId, {
+                status: "completed",
+                completedAt: Date.now(),
+                pagesDiscovered: this.stats.pagesDiscovered,
+                linksFound: this.stats.linksFound,
+            });
+        }
+        if (this.crawler) {
+            try {
+                await this.crawler.teardown();
+            } catch {
+                // ignore teardown errors during abort
+            }
+        }
+    }
+
+    private armWallClockTimer(): void {
+        const cap = this.options.maxRunTimeMs;
+        if (!cap || cap <= 0) return;
+        this.wallClockTimer = setTimeout(() => {
+            console.warn(
+                `⏱️  Discovery hit wall-clock cap of ${Math.round(cap / 1000)}s — pausing.`,
+            );
+            void this.pause().catch(() => {
+                // pause failures shouldn't crash the timer
+            });
+        }, cap);
+        // Don't keep the process alive solely for this timer.
+        if (typeof this.wallClockTimer.unref === "function") {
+            this.wallClockTimer.unref();
+        }
+    }
+
+    private disarmWallClockTimer(): void {
+        if (this.wallClockTimer) {
+            clearTimeout(this.wallClockTimer);
+            this.wallClockTimer = null;
         }
     }
 
@@ -217,9 +538,16 @@ export class SiteDiscovery extends EventEmitter {
             timestamp: Date.now(),
         });
 
-        // Gracefully stop the crawler
+        // Gracefully stop the crawler. Guarded for the same reason as
+        // `close()` — Crawlee's `teardown` throws if `sessionPool` was
+        // never created, e.g. when `pause()` is called before `run()`
+        // finished its setup phase.
         if (this.crawler) {
-            await this.crawler.teardown();
+            try {
+                await this.crawler.teardown();
+            } catch {
+                // Best-effort cleanup; don't bring the session down with us.
+            }
         }
     }
 
@@ -238,7 +566,14 @@ export class SiteDiscovery extends EventEmitter {
         this.stats.linksFound = activeSession.linksFound;
         this.stats.startedAt = activeSession.startedAt;
 
-        const resumeUrl = activeSession.blockedAtUrl || activeSession.startUrl;
+        // When the caller asked us to start fresh (typical after a real
+        // auth handoff: the post-login DOM exposes a totally different
+        // link graph), resume from the original session start URL rather
+        // than the pause point. Otherwise default to "retry the URL we
+        // paused on, then keep draining the queue".
+        const resumeUrl = this.options.purgeQueueOnResume
+            ? activeSession.startUrl
+            : activeSession.blockedAtUrl || activeSession.startUrl;
         if (!resumeUrl) {
             throw new Error("Active session missing start URL");
         }
@@ -251,7 +586,7 @@ export class SiteDiscovery extends EventEmitter {
             this.options.maxDepth = activeSession.maxDepth;
         }
 
-        if (activeSession.queueJson) {
+        if (activeSession.queueJson && !this.options.purgeQueueOnResume) {
             try {
                 const parsed = JSON.parse(activeSession.queueJson) as Array<{
                     url: string;
@@ -264,12 +599,38 @@ export class SiteDiscovery extends EventEmitter {
             }
         }
 
+        if (activeSession.skippedUrlsJson) {
+            try {
+                const parsed = JSON.parse(activeSession.skippedUrlsJson) as unknown;
+                if (Array.isArray(parsed)) {
+                    for (const entry of parsed) {
+                        if (typeof entry === "string") {
+                            this.skippedUrls.add(entry);
+                        }
+                    }
+                }
+            } catch {
+                // Ignore malformed memory; better to over-crawl than to crash.
+            }
+        }
+
+        if (activeSession.ignoredCategoriesJson) {
+            try {
+                const parsed = JSON.parse(activeSession.ignoredCategoriesJson) as unknown;
+                if (Array.isArray(parsed)) {
+                    for (const entry of parsed) {
+                        if (typeof entry === "string") {
+                            this.ignoredCategories.add(entry as BlockerCategory);
+                        }
+                    }
+                }
+            } catch {
+                // Ignore malformed memory.
+            }
+        }
+
         // Check for auth state file
-        const authStatePath = path.join(
-            this.options.projectPath,
-            ".raiken",
-            "auth-state.json"
-        );
+        const authStatePath = path.join(this.options.projectPath, ".raiken", "auth-state.json");
 
         if (fs.existsSync(authStatePath) && !this.options.storageStatePath) {
             this.options.storageStatePath = authStatePath;
@@ -296,11 +657,7 @@ export class SiteDiscovery extends EventEmitter {
      */
     private async startNewSession(): Promise<void> {
         // Check for auth state file
-        const authStatePath = path.join(
-            this.options.projectPath,
-            ".raiken",
-            "auth-state.json"
-        );
+        const authStatePath = path.join(this.options.projectPath, ".raiken", "auth-state.json");
 
         if (fs.existsSync(authStatePath) && !this.options.storageStatePath) {
             this.options.storageStatePath = authStatePath;
@@ -324,168 +681,317 @@ export class SiteDiscovery extends EventEmitter {
 
     /**
      * Handle a single page request.
+     *
+     * Lifecycle invariants this method enforces:
+     *
+     *   1. `visitedUrls` is committed only when the URL has reached a
+     *      *definitive* outcome (saved page, exclusion, blocker, HTTP
+     *      error, off-origin redirect, hard skip). Transient failures
+     *      (browser closed mid-handler, navigation timeout that throws
+     *      after settle, snapshot/title throws) leave the URL un-visited
+     *      so Crawlee's retry layer can take another shot — without that,
+     *      a single torn-down page leaks a permanent gap in the crawl.
+     *      This was the root cause of the "Snapshot failed at /about"
+     *      pages that vanished from the timeline.
+     *
+     *   2. `inFlightUrls` is held for the duration of the handler so two
+     *      concurrent workers can't race on the same normalized URL, and
+     *      is always released in `finally`.
+     *
+     *   3. `pagesDiscovered` is checked against `maxPages` BEFORE doing
+     *      any expensive work, because Crawlee's `maxRequestsPerCrawl` is
+     *      now intentionally larger than `maxPages` (see `start()`) to
+     *      give the queue headroom for blocked / excluded / redirected
+     *      requests that don't count toward the user's cap.
      */
-    private async handleRequest(
-        context: PlaywrightCrawlingContext
-    ): Promise<void> {
+    private async handleRequest(context: PlaywrightCrawlingContext): Promise<void> {
         const { page, request, enqueueLinks, response } = context;
         const url = request.url;
         const depth = (request.userData["depth"] as number) || 0;
 
-        // Check if paused
         if (this.isPaused) {
             return;
         }
 
-        // Update current state
         this.stats.currentUrl = url;
         this.stats.currentDepth = Math.max(this.stats.currentDepth, depth);
 
-        // Check max depth
         if (depth > this.options.maxDepth) {
             return;
         }
 
-        // Check if URL should be excluded
         if (this.shouldExclude(url)) {
             return;
         }
 
-        // Normalize URL
         const normalizedUrl = this.normalizeUrl(url);
 
-        // Check if already visited
-        if (this.visitedUrls.has(normalizedUrl)) {
+        // Hard cap on saved pages. Crawlee's `maxRequestsPerCrawl` alone
+        // can't enforce this — it counts every dispatch (including ones
+        // we reject), and we deliberately gave it headroom.
+        if (this.stats.pagesDiscovered >= this.options.maxPages) {
             return;
         }
 
-        this.visitedUrls.add(normalizedUrl);
-
-        // Wait for page to load
-        try {
-            await page.waitForLoadState("domcontentloaded", {
-                timeout: this.options.timeout,
-            });
-        } catch {
-            // Timeout - continue anyway
+        if (this.visitedUrls.has(normalizedUrl) || this.inFlightUrls.has(normalizedUrl)) {
+            return;
         }
 
-        // Check for authentication blockers
-        const authBlocker = await this.authDetector.detect(
-            page,
-            url,
-            response ?? undefined
-        );
+        this.inFlightUrls.add(normalizedUrl);
 
-        if (authBlocker && this.options.pauseOnAuth) {
-            // Save auth blocker
-            this.siteDb.saveAuthBlocker(authBlocker);
-            this.stats.authBlockersFound++;
+        // Tracks whether we reached a definitive outcome. Set to `true`
+        // by every branch below that should NOT be retried; left `false`
+        // when an exception bubbles out of the handler so Crawlee retries
+        // and we get another shot at the page.
+        let committed = false;
 
-            // Update session
-            if (this.sessionId) {
-                this.siteDb.updateSession(this.sessionId, {
-                    status: "paused",
-                    blockedAtUrl: url,
+        try {
+            try {
+                await page.waitForLoadState("domcontentloaded", {
+                    timeout: this.options.timeout,
+                });
+            } catch {
+                // domcontentloaded timeout is rarely fatal — proceed and
+                // let the settle wait below try.
+            }
+
+            // Wait for the SPA shell to actually render. Modern
+            // React/Vue/Svelte apps boot in a microtask after the initial
+            // bundle parses, so the DOM at `domcontentloaded` is just
+            // `<div id="root"></div>` with no links. Without this settle
+            // wait, link extraction below would see zero anchors on every
+            // SPA — which is exactly the "only 1 page discovered" symptom.
+            // `networkidle` (500ms of no network) is the canonical
+            // hydrated signal. Capped because chatty apps with analytics
+            // pings or websockets never reach true idle.
+            try {
+                const settleTimeout = Math.min(this.options.timeout, 10_000);
+                await page.waitForLoadState("networkidle", { timeout: settleTimeout });
+            } catch {
+                // Page may have constant background activity; proceed anyway.
+            }
+
+            // Honor user-issued skip list before doing any detector work.
+            if (this.skippedUrls.has(normalizedUrl) || this.skippedUrls.has(url)) {
+                this.markBrokenLinks(url, normalizedUrl, "Skipped by user", "broken");
+                committed = true;
+                return;
+            }
+
+            // Run all blocker detectors in priority order.
+            const blocker = await this.runDetectorPipeline(page, url, response ?? undefined);
+
+            if (blocker) {
+                const effectiveSeverity = this.ignoredCategories.has(blocker.category)
+                    ? ("log" as const)
+                    : blocker.severity;
+                const persisted: Omit<DiscoveryBlocker, "id"> = {
+                    ...blocker,
+                    severity: effectiveSeverity,
+                };
+                const blockerId = this.siteDb.saveBlocker(persisted);
+                this.stats.authBlockersFound++;
+
+                // Dual-emit while consumers migrate. The legacy
+                // `auth_blocked` event is only fired for `auth_required`
+                // blockers so non-auth detectors don't accidentally
+                // trigger old listeners.
+                const blockerWithId: DiscoveryBlocker = {
+                    ...persisted,
+                    id: blockerId,
+                };
+                this.emit("blocker_detected", {
+                    type: "blocker_detected",
+                    data: { blocker: blockerWithId },
+                    timestamp: Date.now(),
+                });
+                if (blocker.category === "auth_required") {
+                    this.emit("auth_blocked", {
+                        type: "auth_blocked",
+                        data: { blocker: blockerWithId },
+                        timestamp: Date.now(),
+                    });
+                }
+
+                if (effectiveSeverity !== "pause") {
+                    this.markBrokenLinks(url, normalizedUrl, "Blocker detected", "broken");
+                    committed = true;
+                    return;
+                }
+
+                // Once we've successfully crawled at least one page with
+                // the current storage state, treat further auth blockers
+                // as one-off protected URLs (skip them) rather than as
+                // session-wide failures (pause + teardown). Captchas /
+                // 5xx don't get magically cleared by a storage state, so
+                // they always pause.
+                const shouldPause =
+                    blocker.category !== "auth_required"
+                        ? true
+                        : this.options.pauseOnAuth && !this.hasSeenAuthenticatedSuccess;
+
+                if (!shouldPause) {
+                    this.markBrokenLinks(
+                        url,
+                        normalizedUrl,
+                        blocker.category === "auth_required" ? "Auth required" : "Blocker detected",
+                        blocker.category === "auth_required" ? "auth_required" : "broken",
+                    );
+                    committed = true;
+                    return;
+                }
+
+                if (this.sessionId) {
+                    this.siteDb.updateSession(this.sessionId, {
+                        status: "paused",
+                        blockedAtUrl: url,
+                    });
+                }
+
+                await this.pause();
+                committed = true;
+                return;
+            }
+
+            if (response && response.status() >= 400) {
+                const status = response.status();
+                const linkStatus = status === 401 || status === 403 ? "auth_required" : "broken";
+                this.markBrokenLinks(url, normalizedUrl, `HTTP ${status}`, linkStatus);
+                committed = true;
+                return;
+            }
+
+            // The URL Playwright actually landed on, post-redirects. May
+            // differ from the requested URL via server-side 301/302,
+            // client-side `<meta http-equiv="refresh">`, or JS
+            // `location.assign(...)`.
+            const resolvedUrl = response?.url() || url;
+            const resolvedNormalized = this.normalizeUrl(resolvedUrl);
+            const startOrigin = this.startOrigin;
+
+            // Off-origin redirect: the inbound link technically navigated
+            // somewhere, but it's not part of *this* site. Verifying the
+            // link without saving the destination keeps our page graph
+            // origin-pure (otherwise we'd record `elsewhere.com`'s title
+            // and links under our own origin's URL — confusing for the
+            // user and noisy for downstream test generation).
+            const resolvedOrigin = safeOrigin(resolvedUrl);
+            if (startOrigin && resolvedOrigin && resolvedOrigin !== startOrigin) {
+                this.verifyPendingLinks(url, normalizedUrl);
+                this.emit("warning", {
+                    type: "warning",
+                    data: {
+                        url,
+                        message: `Followed off-origin redirect to ${resolvedUrl}; not crawling further.`,
+                    },
+                    timestamp: Date.now(),
+                });
+                committed = true;
+                return;
+            }
+
+            this.verifyPendingLinks(resolvedUrl, resolvedNormalized);
+
+            // Snapshot is best-effort: it's a heavy DOM serialization that
+            // can OOM or time out on huge pages, and the page may close
+            // mid-call during teardown. Rate-limit reports so a busted
+            // page type doesn't flood the timeline.
+            let snapshotJson: string | null = null;
+            try {
+                const snapshot = await page.locator("body").ariaSnapshot();
+                snapshotJson = snapshot || null;
+            } catch (err) {
+                if (this.snapshotFailureReports < 5) {
+                    this.snapshotFailureReports++;
+                    const msg = err instanceof Error ? err.message : String(err);
+                    this.emit("snapshot_failed", {
+                        type: "snapshot_failed",
+                        data: { url, message: msg.slice(0, 200) },
+                        timestamp: Date.now(),
+                    });
+                }
+            }
+
+            // Title is also best-effort — Playwright throws "Target page,
+            // context or browser has been closed" here when the page
+            // navigates away mid-handler. Falling back to "" is strictly
+            // better than aborting the whole save and losing the page.
+            let title = "";
+            try {
+                title = await page.title();
+            } catch {
+                // Fall through with an empty title; downstream consumers
+                // handle it gracefully.
+            }
+
+            // If the page redirected to a same-origin different URL, save
+            // under the *resolved* URL so subsequent visits dedupe
+            // correctly. The original URL's pending links were already
+            // verified above.
+            const saveUrl = resolvedUrl;
+            const saveNormalized = resolvedNormalized;
+
+            const now = Date.now();
+            const existingPage = this.siteDb.getPage(saveUrl);
+
+            if (existingPage) {
+                this.siteDb.updatePageVisit(saveUrl);
+            } else {
+                this.siteDb.savePage({
+                    projectPath: this.options.projectPath,
+                    url: saveUrl,
+                    normalizedUrl: saveNormalized,
+                    title,
+                    snapshotJson,
+                    parentUrl: (request.userData["parentUrl"] as string) || null,
+                    navigationAction: null,
+                    depth,
+                    discoveredAt: now,
+                    lastVisitedAt: now,
+                    visitCount: 1,
+                });
+
+                this.stats.pagesDiscovered++;
+
+                // Confirms the loaded storage state actually unlocked the
+                // app — gates the "downgrade further auth blockers to
+                // skip" behavior above.
+                if (this.playwrightStorageState) {
+                    this.hasSeenAuthenticatedSuccess = true;
+                }
+
+                this.emit("page_discovered", {
+                    type: "page_discovered",
+                    data: {
+                        page: { url: saveUrl, title, depth },
+                    },
+                    timestamp: now,
                 });
             }
 
-            // Emit auth blocked event
-            this.emit("auth_blocked", {
-                type: "auth_blocked",
-                data: { blocker: authBlocker },
-                timestamp: Date.now(),
-            });
+            // Mark the resolved URL as committed too so a same-page
+            // redirect doesn't get re-crawled if a future link points at
+            // the pre-redirect URL.
+            if (saveNormalized !== normalizedUrl) {
+                this.visitedUrls.add(saveNormalized);
+            }
 
-            // Pause the crawler
-            await this.pause();
-            return;
-        }
+            if (!startOrigin) {
+                committed = true;
+                return;
+            }
 
-        if (response && response.status() >= 400) {
-            const status = response.status();
-            const linkStatus =
-                status === 401 || status === 403 ? "auth_required" : "broken";
-            this.markBrokenLinks(
-                url,
-                normalizedUrl,
-                `HTTP ${status}`,
-                linkStatus
-            );
-            return;
-        }
+            // Atomic link extraction inside the page context. Single
+            // round-trip, no stale element handles. We pull a richer set
+            // than `a[href]` — anchors with `role="link"` (often used in
+            // SPAs that hijack click) and elements with `data-href` cover
+            // common cases that pure `a[href]` misses.
+            const extracted = await this.extractLinks(page);
 
-        const resolvedUrl = response?.url() || url;
-        const resolvedNormalized = this.normalizeUrl(resolvedUrl);
-        this.verifyPendingLinks(resolvedUrl, resolvedNormalized);
-
-        // Get page snapshot (aria tree for accessibility context)
-        let snapshotJson: string | null = null;
-        try {
-            const snapshot = await page.locator("body").ariaSnapshot();
-            snapshotJson = snapshot || null;
-        } catch {
-            // Snapshot failed - continue without it
-        }
-
-        // Get page title
-        const title = await page.title();
-
-        // Save page to database
-        const now = Date.now();
-        const existingPage = this.siteDb.getPage(url);
-
-        if (existingPage) {
-            this.siteDb.updatePageVisit(url);
-        } else {
-            this.siteDb.savePage({
-                projectPath: this.options.projectPath,
-                url,
-                normalizedUrl,
-                title,
-                snapshotJson,
-                parentUrl: (request.userData["parentUrl"] as string) || null,
-                navigationAction: null,
-                depth,
-                discoveredAt: now,
-                lastVisitedAt: now,
-                visitCount: 1,
-            });
-
-            this.stats.pagesDiscovered++;
-
-            // Emit page discovered event
-            this.emit("page_discovered", {
-                type: "page_discovered",
-                data: {
-                    page: {
-                        url,
-                        title,
-                        depth,
-                    },
-                },
-                timestamp: now,
-            });
-        }
-
-        // Extract and save links
-        const links = await page.locator("a[href]").all();
-        const startOrigin = this.startOrigin;
-
-        if (!startOrigin) {
-            return;
-        }
-
-        for (const link of links) {
-            try {
-                const href = await link.getAttribute("href");
-                const linkText = await link.textContent();
-                const role = await link.getAttribute("role");
-                const dataTestId = await link.getAttribute("data-testid");
-
-                if (!href) continue;
-                const cleanedHref = href.trim();
+            for (const item of extracted) {
+                const cleanedHref = item.href.trim();
                 if (
+                    cleanedHref.length === 0 ||
                     cleanedHref.startsWith("#") ||
                     cleanedHref.startsWith("mailto:") ||
                     cleanedHref.startsWith("tel:") ||
@@ -494,34 +1000,31 @@ export class SiteDiscovery extends EventEmitter {
                     continue;
                 }
 
-                // Resolve relative URLs
                 let absoluteUrl: string;
                 try {
-                    absoluteUrl = new URL(cleanedHref, url).toString();
+                    absoluteUrl = new URL(cleanedHref, saveUrl).toString();
                 } catch {
                     continue;
                 }
 
-                const linkOrigin = new URL(absoluteUrl).origin;
-
-                if (startOrigin !== linkOrigin) {
+                const linkOrigin = safeOrigin(absoluteUrl);
+                if (!linkOrigin || linkOrigin !== startOrigin) {
                     continue;
                 }
 
-                const selector = this.buildLinkSelector(
+                const selector = buildLinkSelector(
                     cleanedHref,
-                    (linkText || "").trim(),
-                    dataTestId
+                    item.text.trim(),
+                    item.dataTestId ?? null,
                 );
 
-                // Save link
                 this.siteDb.saveLink({
                     projectPath: this.options.projectPath,
-                    fromUrl: url,
+                    fromUrl: saveUrl,
                     toUrl: absoluteUrl,
                     selector,
-                    linkText: linkText?.trim() || null,
-                    elementRole: role,
+                    linkText: item.text.trim() || null,
+                    elementRole: item.role ?? null,
                     status: "pending",
                     errorMessage: null,
                     discoveredAt: now,
@@ -529,28 +1032,106 @@ export class SiteDiscovery extends EventEmitter {
                 });
 
                 this.stats.linksFound++;
-            } catch {
-                // Failed to process link - skip it
-                continue;
             }
-        }
 
-        // Enqueue links for further crawling
-        await enqueueLinks({
-            selector: "a[href]",
-            userData: {
-                depth: depth + 1,
-                parentUrl: url,
-            },
-            strategy: "same-hostname",
-        });
-
-        // Update session progress
-        if (this.sessionId) {
-            this.siteDb.updateSession(this.sessionId, {
-                pagesDiscovered: this.stats.pagesDiscovered,
-                linksFound: this.stats.linksFound,
+            // Hand queueing off to Crawlee, but apply our own filtering
+            // (excluded patterns + already-visited normalization +
+            // maxPages cap) BEFORE it dispatches a worker — otherwise
+            // we'd waste a Playwright launch just to bail at the top of
+            // `handleRequest`. We also override `uniqueKey` so Crawlee
+            // dedupes on our normalized URL (it would otherwise see
+            // `/x?a=1` and `/x?a=2` as distinct and dispatch both even
+            // though we'd reject the second on entry — significant on
+            // SPAs with many query-paramed links).
+            await enqueueLinks({
+                selector: 'a[href], [role="link"][href]',
+                userData: {
+                    depth: depth + 1,
+                    parentUrl: saveUrl,
+                },
+                strategy: "same-origin",
+                transformRequestFunction: (req) => {
+                    if (this.shouldExclude(req.url)) return false;
+                    const norm = this.normalizeUrl(req.url);
+                    if (this.visitedUrls.has(norm) || this.inFlightUrls.has(norm)) {
+                        return false;
+                    }
+                    if (this.stats.pagesDiscovered >= this.options.maxPages) {
+                        return false;
+                    }
+                    req.uniqueKey = norm;
+                    return req;
+                },
             });
+
+            if (this.sessionId) {
+                this.siteDb.updateSession(this.sessionId, {
+                    pagesDiscovered: this.stats.pagesDiscovered,
+                    linksFound: this.stats.linksFound,
+                });
+            }
+
+            committed = true;
+        } finally {
+            this.inFlightUrls.delete(normalizedUrl);
+            if (committed) {
+                this.visitedUrls.add(normalizedUrl);
+            }
+            // If `committed` is false the URL is left out of `visitedUrls`
+            // so Crawlee's retry layer can dispatch it again; the failed-
+            // request handler will eventually catch terminal failures and
+            // emit a `warning` for diagnostics.
+        }
+    }
+
+    /**
+     * Pull all candidate navigation elements from the page in a single
+     * `evaluate()` call. Avoids the N+1 round-trips of iterating Locators
+     * (each `getAttribute` is a CDP message), and avoids stale-element
+     * handle errors when the SPA mutates the DOM mid-extraction.
+     */
+    private async extractLinks(page: Page): Promise<
+        Array<{
+            href: string;
+            text: string;
+            role: string | null;
+            dataTestId: string | null;
+        }>
+    > {
+        try {
+            return await page.evaluate(() => {
+                const out: Array<{
+                    href: string;
+                    text: string;
+                    role: string | null;
+                    dataTestId: string | null;
+                }> = [];
+                const selectors = ["a[href]", '[role="link"][href]', "[data-href]"];
+                const seen = new Set<Element>();
+                for (const sel of selectors) {
+                    const nodes = document.querySelectorAll(sel);
+                    for (const node of Array.from(nodes)) {
+                        if (seen.has(node)) continue;
+                        seen.add(node);
+                        const el = node as HTMLElement;
+                        const href = el.getAttribute("href") || el.getAttribute("data-href") || "";
+                        if (!href) continue;
+                        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+                        out.push({
+                            href,
+                            text: text.slice(0, 200),
+                            role: el.getAttribute("role"),
+                            dataTestId: el.getAttribute("data-testid"),
+                        });
+                    }
+                }
+                return out;
+            });
+        } catch {
+            // Page closed / context destroyed mid-extraction. Not fatal —
+            // we'll still return the page's metadata; link discovery from
+            // this hop is just lost.
+            return [];
         }
     }
 
@@ -563,13 +1144,74 @@ export class SiteDiscovery extends EventEmitter {
     }
 
     /**
-     * Check if a URL should be excluded.
+     * Detector pipeline. Delegates to `runBlockerPipeline`, which runs
+     * each detector in priority order and returns the first match.
+     *
+     * Kept as a separate method so callers (tests, future detectors that
+     * compose existing ones) can run it without going through Crawlee's
+     * request handler.
+     */
+    private async runDetectorPipeline(
+        page: Page,
+        url: string,
+        response: Response | undefined,
+    ): Promise<DiscoveryBlocker | null> {
+        return runBlockerPipeline(this.detectors, {
+            projectPath: this.options.projectPath,
+            url,
+            page,
+            response,
+        });
+    }
+
+    /**
+     * Add a URL to the session-scoped skip set. The crawler will refuse to
+     * fetch it on this and any subsequent run within this session, so the
+     * user's "skip this URL" choice survives a pause/resume cycle.
+     */
+    addSkippedUrl(url: string): void {
+        this.skippedUrls.add(url);
+        const normalized = this.normalizeUrl(url);
+        if (normalized !== url) {
+            this.skippedUrls.add(normalized);
+        }
+        this.persistSessionMemory();
+    }
+
+    /**
+     * Add a category to the session-scoped ignore set. Detectors still fire
+     * (so we keep visibility), but the blocker is recorded with severity
+     * `log` instead of `pause`, so the crawl keeps going.
+     */
+    addIgnoredCategory(category: BlockerCategory): void {
+        this.ignoredCategories.add(category);
+        this.persistSessionMemory();
+    }
+
+    /** Snapshot for callers that want to reflect session memory in the UI. */
+    getSessionMemory(): { skippedUrls: string[]; ignoredCategories: BlockerCategory[] } {
+        return {
+            skippedUrls: Array.from(this.skippedUrls),
+            ignoredCategories: Array.from(this.ignoredCategories),
+        };
+    }
+
+    private persistSessionMemory(): void {
+        if (!this.sessionId) return;
+        this.siteDb.updateSession(this.sessionId, {
+            skippedUrlsJson: JSON.stringify(Array.from(this.skippedUrls)),
+            ignoredCategoriesJson: JSON.stringify(Array.from(this.ignoredCategories)),
+        });
+    }
+
+    /**
+     * Check if a URL should be excluded. Patterns can be:
+     *  - Plain substring (legacy: e.g. "/admin" matches any URL containing "/admin")
+     *  - Glob (e.g. "/admin/**", "*.pdf") — only when the pattern contains "*"
      */
     private shouldExclude(url: string): boolean {
-        for (const pattern of this.options.excludePatterns) {
-            if (url.includes(pattern)) {
-                return true;
-            }
+        for (const matcher of this.compiledExcludeMatchers) {
+            if (matcher(url)) return true;
         }
         return false;
     }
@@ -586,79 +1228,92 @@ export class SiteDiscovery extends EventEmitter {
         }
     }
 
+    /**
+     * Reduce a Playwright/Crawlee navigation error to a one-line, user-
+     * friendly reason. We swallow the stack and pull out the recognisable
+     * Chrome NET error code (e.g. `NET::ERR_HTTP_RESPONSE_CODE_FAILURE`)
+     * because the raw message is multi-paragraph and noisy.
+     */
+    private summariseFailure(error: Error | undefined, status: number | null): string {
+        if (status && status >= 400) {
+            return `HTTP ${status}`;
+        }
+        const raw = error?.message ?? "Unknown navigation failure";
+        const netCode = raw.match(/net::ERR_[A-Z_0-9]+/i)?.[0];
+        if (netCode) return netCode;
+        if (/Timeout .* exceeded/i.test(raw)) return "Navigation timeout";
+        if (/Target .* closed|Browser .* closed/i.test(raw)) return "Browser closed mid-navigation";
+        if (/Maximum retry count exceeded/i.test(raw)) return "Retry exhausted";
+        // Trim down multi-line Playwright errors so the dashboard timeline
+        // stays readable.
+        const firstLine = raw.split(/\r?\n/)[0]?.trim() ?? raw;
+        return firstLine.slice(0, 200);
+    }
+
+    /**
+     * Compose the user-facing error for a crawl that completed without
+     * discovering any pages. Includes whatever diagnostic context we
+     * captured (failed requests, blockers detected) so the user knows
+     * whether to (a) check the URL, (b) authenticate first, or (c) try a
+     * non-headless browser for anti-bot-protected sites.
+     */
+    private buildEmptyCrawlError(): string {
+        const parts: string[] = [`No pages discovered at ${this.options.startUrl}.`];
+
+        if (this.failedRequests.length > 0) {
+            // Group by reason so a single anti-bot block doesn't print 30 times.
+            const byReason = new Map<string, number>();
+            for (const f of this.failedRequests) {
+                byReason.set(f.reason, (byReason.get(f.reason) ?? 0) + 1);
+            }
+            const summary = Array.from(byReason.entries())
+                .map(([reason, count]) => (count > 1 ? `${reason} (×${count})` : reason))
+                .join("; ");
+            parts.push(`${this.failedRequests.length} request(s) failed: ${summary}.`);
+        }
+
+        if (this.stats.authBlockersFound > 0) {
+            parts.push(
+                `${this.stats.authBlockersFound} blocker(s) were detected but downgraded to log-only — every page was gated. Try resolving the first blocker (e.g. \`raiken auth\` or the dashboard's "Open in browser" button) and re-running.`,
+            );
+        }
+
+        if (this.failedRequests.length === 0 && this.stats.authBlockersFound === 0) {
+            parts.push(
+                "Either the URL didn't return HTML, the page rendered nothing the crawler could index, or the site detected the headless browser. Try running `raiken auth --url <startUrl>` first to confirm the page is reachable, or test the URL manually.",
+            );
+        } else if (this.failedRequests.some((f) => /timeout|net::|closed/i.test(f.reason))) {
+            parts.push(
+                "Sites with strong anti-bot protection (e.g. social networks, paywalled news) often refuse headless Chromium. Discovery currently runs headless only.",
+            );
+        }
+
+        return parts.join(" ");
+    }
+
     private loadStorageState(): void {
         if (!this.options.storageStatePath) {
-            this.storageState = null;
+            this.playwrightStorageState = null;
             return;
         }
         try {
             if (!fs.existsSync(this.options.storageStatePath)) {
                 if (!this.storageStateWarningEmitted) {
-                    console.warn(
-                        `⚠️  Storage state not found at ${this.options.storageStatePath}`
-                    );
+                    console.warn(`⚠️  Storage state not found at ${this.options.storageStatePath}`);
                     this.storageStateWarningEmitted = true;
                 }
-                this.storageState = null;
+                this.playwrightStorageState = null;
                 return;
             }
             const raw = fs.readFileSync(this.options.storageStatePath, "utf-8");
-            this.storageState = JSON.parse(raw);
+            const parsed = JSON.parse(raw) as StorageStateInput;
+            this.playwrightStorageState = sanitizeStorageState(parsed);
         } catch {
             if (!this.storageStateWarningEmitted) {
                 console.warn("⚠️  Failed to load storage state for discovery");
                 this.storageStateWarningEmitted = true;
             }
-            this.storageState = null;
-        }
-    }
-
-    private async applyStorageState(page: Page): Promise<void> {
-        const state = this.storageState;
-        if (!state) {
-            return;
-        }
-        const context = page.context();
-        if (this.storageStateApplied.has(context)) {
-            return;
-        }
-        this.storageStateApplied.add(context);
-
-        const cookies = Array.isArray(state.cookies) ? state.cookies : [];
-        if (cookies.length > 0) {
-            await context.addCookies(cookies as Array<{
-                name: string;
-                value: string;
-                domain?: string;
-                path?: string;
-                url?: string;
-                expires?: number;
-                httpOnly?: boolean;
-                secure?: boolean;
-                sameSite?: "Strict" | "Lax" | "None";
-            }>);
-        }
-
-        const origins = Array.isArray(state.origins) ? state.origins : [];
-        if (origins.length > 0) {
-            await context.addInitScript((items) => {
-                try {
-                    const entry = items.find((item) => item.origin === location.origin);
-                    if (!entry) return;
-                    if (Array.isArray(entry.localStorage)) {
-                        for (const kv of entry.localStorage) {
-                            localStorage.setItem(kv.name, kv.value);
-                        }
-                    }
-                    if (Array.isArray(entry.sessionStorage)) {
-                        for (const kv of entry.sessionStorage) {
-                            sessionStorage.setItem(kv.name, kv.value);
-                        }
-                    }
-                } catch {
-                    // ignore storage injection errors
-                }
-            }, origins);
+            this.playwrightStorageState = null;
         }
     }
 
@@ -682,54 +1337,19 @@ export class SiteDiscovery extends EventEmitter {
         url: string,
         normalizedUrl: string,
         errorMessage: string,
-        status: "broken" | "auth_required" = "broken"
+        status: "broken" | "auth_required" = "broken",
     ): void {
         const pendingLinks = this.siteDb.getPendingLinksTo(url);
         for (const link of pendingLinks) {
-            this.siteDb.updateLinkStatus(
-                link.fromUrl,
-                link.toUrl,
-                status,
-                errorMessage
-            );
+            this.siteDb.updateLinkStatus(link.fromUrl, link.toUrl, status, errorMessage);
         }
 
         if (normalizedUrl !== url) {
             const normalizedLinks = this.siteDb.getPendingLinksTo(normalizedUrl);
             for (const link of normalizedLinks) {
-                this.siteDb.updateLinkStatus(
-                    link.fromUrl,
-                    link.toUrl,
-                    status,
-                    errorMessage
-                );
+                this.siteDb.updateLinkStatus(link.fromUrl, link.toUrl, status, errorMessage);
             }
         }
-    }
-
-    private buildLinkSelector(
-        href: string,
-        linkText: string,
-        dataTestId: string | null
-    ): string {
-        if (dataTestId) {
-            return `a[data-testid="${this.escapeSelectorText(dataTestId)}"]`;
-        }
-
-        if (href) {
-            return `a[href="${this.escapeSelectorText(href)}"]`;
-        }
-
-        const trimmed = linkText.trim();
-        if (trimmed && trimmed.length <= 80) {
-            return `a:has-text("${this.escapeSelectorText(trimmed)}")`;
-        }
-
-        return "a[href]";
-    }
-
-    private escapeSelectorText(value: string): string {
-        return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     }
 
     private async persistQueueState(): Promise<void> {
@@ -738,19 +1358,19 @@ export class SiteDiscovery extends EventEmitter {
         }
 
         try {
-            const queueDir = path.join(
-                this.options.projectPath,
-                "storage",
-                "request_queues",
-                "default"
-            );
+            // S1: Crawlee's storage dir is set in `start()` to
+            // `<project>/.raiken/crawlee/`. The previous implementation read
+            // from `<project>/storage/...` which never exists in our setup,
+            // so the persisted queue was always empty and resume only ever
+            // worked from the in-memory snapshot.
+            const baseDir =
+                this.crawleeStorageDir ?? path.join(this.options.projectPath, ".raiken", "crawlee");
+            const queueDir = path.join(baseDir, "request_queues", "default");
             if (!fs.existsSync(queueDir)) {
                 return;
             }
 
-            const files = fs
-                .readdirSync(queueDir)
-                .filter((file) => file.endsWith(".json"));
+            const files = fs.readdirSync(queueDir).filter((file) => file.endsWith(".json"));
             const serialized: Array<{
                 url: string;
                 uniqueKey?: string;
@@ -793,11 +1413,128 @@ export class SiteDiscovery extends EventEmitter {
 
     /**
      * Clean up resources.
+     *
+     * `crawler.teardown()` is wrapped because Crawlee dereferences
+     * `this.sessionPool` unconditionally — but `sessionPool` is only
+     * created once `crawler.run()` has progressed past its setup phase.
+     * If `start()` threw early (bad config, port conflict, missing
+     * Chromium, ...) or if `run()` exited so fast that teardown is
+     * called twice, the unguarded call throws `TypeError: Cannot read
+     * properties of undefined (reading 'teardown')` and that bubbles up
+     * as an unhandled rejection — crashing the entire CLI server.
      */
     async close(): Promise<void> {
+        this.disarmWallClockTimer();
         if (this.crawler) {
-            await this.crawler.teardown();
+            try {
+                await this.crawler.teardown();
+            } catch (err) {
+                // Swallow — best-effort cleanup. We surface it via a
+                // warning event so it's still visible in the timeline.
+                this.emit("warning", {
+                    type: "warning",
+                    data: {
+                        url: this.options.startUrl,
+                        message: `Crawler teardown failed (likely never fully initialized): ${
+                            err instanceof Error ? err.message : String(err)
+                        }`,
+                    },
+                    timestamp: Date.now(),
+                });
+            }
         }
         this.db.close();
+    }
+}
+
+/**
+ * Convert a single exclude pattern into a matcher function.
+ *
+ *   - Patterns without "*" → legacy substring match (backward-compatible).
+ *   - Patterns with "*"    → glob: "*" matches any chars except "/", "**"
+ *                              matches any chars including "/".
+ *
+ * Bad regex compilation falls back to substring so a malformed entry can never
+ * crash the crawl.
+ */
+/**
+ * Coerce raw storage-state JSON into the exact shape Playwright accepts at
+ * `browser.newContext({ storageState })`. Real-world auth-state.json files
+ * — especially those produced by older Chromium versions or third-party
+ * exporters — frequently contain cookies with `sameSite: null` or non-
+ * canonical values, which Playwright rejects, silently dropping the entire
+ * session. Coerce to "Lax" as a safe default and strip unknown fields.
+ */
+function sanitizeStorageState(state: StorageStateInput): {
+    cookies: StorageStateCookie[];
+    origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
+} {
+    const validSameSite = new Set(["Strict", "Lax", "None"]);
+    const cookies: StorageStateCookie[] = [];
+    for (const raw of Array.isArray(state.cookies) ? state.cookies : []) {
+        if (
+            typeof raw !== "object" ||
+            raw === null ||
+            typeof (raw as Record<string, unknown>)["name"] !== "string" ||
+            typeof (raw as Record<string, unknown>)["value"] !== "string"
+        ) {
+            continue;
+        }
+        const r = raw as Record<string, unknown>;
+        const sameSiteRaw = r["sameSite"];
+        const sameSite: "Strict" | "Lax" | "None" =
+            typeof sameSiteRaw === "string" && validSameSite.has(sameSiteRaw)
+                ? (sameSiteRaw as "Strict" | "Lax" | "None")
+                : "Lax";
+        cookies.push({
+            name: r["name"] as string,
+            value: r["value"] as string,
+            domain: typeof r["domain"] === "string" ? (r["domain"] as string) : undefined,
+            path: typeof r["path"] === "string" ? (r["path"] as string) : undefined,
+            url: typeof r["url"] === "string" ? (r["url"] as string) : undefined,
+            expires: typeof r["expires"] === "number" ? (r["expires"] as number) : undefined,
+            httpOnly: typeof r["httpOnly"] === "boolean" ? (r["httpOnly"] as boolean) : undefined,
+            secure: typeof r["secure"] === "boolean" ? (r["secure"] as boolean) : undefined,
+            sameSite,
+        });
+    }
+
+    const origins: Array<{
+        origin: string;
+        localStorage: Array<{ name: string; value: string }>;
+    }> = [];
+    for (const raw of Array.isArray(state.origins) ? state.origins : []) {
+        if (typeof raw?.origin !== "string") continue;
+        const localStorage: Array<{ name: string; value: string }> = [];
+        for (const item of Array.isArray(raw.localStorage) ? raw.localStorage : []) {
+            if (typeof item?.name === "string" && typeof item?.value === "string") {
+                localStorage.push({ name: item.name, value: item.value });
+            }
+        }
+        origins.push({ origin: raw.origin, localStorage });
+    }
+
+    return { cookies, origins };
+}
+
+function compileExcludeMatcher(pattern: string): (url: string) => boolean {
+    if (!pattern) {
+        return () => false;
+    }
+    if (!pattern.includes("*")) {
+        return (url) => url.includes(pattern);
+    }
+    try {
+        // Two-pass replacement using a sentinel that can't appear in URLs.
+        const DOUBLESTAR_SENTINEL = "__RAIKEN_GLOBSTAR__";
+        const re = pattern
+            .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+            .replace(/\*\*/g, DOUBLESTAR_SENTINEL)
+            .replace(/\*/g, "[^/]*")
+            .replace(new RegExp(DOUBLESTAR_SENTINEL, "g"), ".*");
+        const compiled = new RegExp(re);
+        return (url) => compiled.test(url);
+    } catch {
+        return (url) => url.includes(pattern);
     }
 }

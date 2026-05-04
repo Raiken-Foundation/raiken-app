@@ -79,18 +79,28 @@ function parsePlaywrightOutput(output: string): { results: TestResult[]; summary
                                             };
                                         }
 
-                                        // Add attachments
+                                        // Add attachments. The Playwright JSON
+                                        // reporter shape isn't typed in this
+                                        // file (the surrounding parser uses
+                                        // `any` throughout), but the attachment
+                                        // contract is narrow enough to pin
+                                        // locally without a wider refactor.
                                         if (
                                             testResult.attachments &&
                                             testResult.attachments.length > 0
                                         ) {
-                                            result.attachments = testResult.attachments.map(
-                                                (att: any) => ({
-                                                    name: att.name,
-                                                    contentType: att.contentType,
-                                                    path: att.path,
-                                                }),
-                                            );
+                                            type RawAttachment = {
+                                                name?: string;
+                                                contentType?: string;
+                                                path?: string;
+                                            };
+                                            result.attachments = (
+                                                testResult.attachments as RawAttachment[]
+                                            ).map((att) => ({
+                                                name: att.name ?? "",
+                                                contentType: att.contentType ?? "",
+                                                path: att.path,
+                                            }));
                                         }
 
                                         results.push(result);
@@ -252,6 +262,27 @@ export function TestingView({
     const [rawTestOutput, setRawTestOutput] = useState<string>("");
     const [interpretation, setInterpretation] = useState<string>("");
     const [isInterpreting, setIsInterpreting] = useState(false);
+
+    // Snapshot of the file that was ACTUALLY run, captured at run-time so
+    // the AI insights flow can't accidentally analyse stale-editor content.
+    // Pre-fix `testCode` came from `activeFile?.content`, which is whichever
+    // tab is selected — not necessarily the file whose results are on
+    // screen. When the user clicked through to a different test file before
+    // hitting "Analyze with AI", the model received mismatched code and
+    // results and invented explanations that didn't match the artifacts.
+    // We snapshot here at run-time and pass through to the mutation; the
+    // editor tab can change without affecting analysis fidelity.
+    const [lastRunTestPath, setLastRunTestPath] = useState<string>("");
+    const [lastRunTestCode, setLastRunTestCode] = useState<string>("");
+
+    // The server tells us whether it analysed the on-disk file or fell
+    // back to our in-memory snapshot. Surfaced as a small dim banner in
+    // the AI insights view so the user can decide whether to trust the
+    // diagnosis (disk = freshest, snapshot-fallback = file may have been
+    // moved/deleted/locked between run and analyze).
+    const [interpretationSource, setInterpretationSource] = useState<
+        "disk" | "client-snapshot" | "client-snapshot-fallback" | null
+    >(null);
 
     // Get tRPC utils for query invalidation
     const utils = trpc.useUtils();
@@ -487,20 +518,37 @@ export function TestingView({
     const interpretMutation = trpc.interpretTestResults.useMutation({
         onSuccess: (data) => {
             setInterpretation(data.interpretation);
+            // `testCodeSource` is null when the server early-returned (no API
+            // key) and a string discriminant when it actually ran the model.
+            setInterpretationSource(data.testCodeSource ?? null);
             setIsInterpreting(false);
         },
         onError: (error) => {
             console.error("❌ Interpretation failed:", error);
             setInterpretation(`Error getting interpretation: ${error.message}`);
+            setInterpretationSource(null);
             setIsInterpreting(false);
         },
     });
 
-    const handleRequestInterpretation = (results: TestResult[], testCode: string) => {
+    const handleRequestInterpretation = (results: TestResult[]) => {
         setIsInterpreting(true);
         setInterpretation("");
+        setInterpretationSource(null);
 
-        // Convert TestResult to the format expected by the API
+        // Forward ALL the evidence we already have on screen:
+        //   - per-test attachments (failure screenshot, video, trace) so
+        //     the model can reference them by name in its diagnosis.
+        //   - rawTestOutput which contains Playwright's full per-action
+        //     `Call log:` and any console messages from the page — this
+        //     is the ground truth that distinguishes "selector mismatch"
+        //     from "page not loaded" from "click intercepted".
+        //   - testFilePath so the SERVER can read the file from disk —
+        //     Playwright reads from disk at run time, so the on-disk
+        //     copy is the most accurate source for what produced these
+        //     results. The server falls back to `testCode` (our run-time
+        //     snapshot) only for scratch buffers or read failures.
+        //   - testCode (snapshot from handleRunTests) as the fallback.
         const formattedResults = results.map((r) => ({
             name: r.name,
             suite: r.suite,
@@ -513,11 +561,18 @@ export function TestingView({
                       location: r.error.location,
                   }
                 : undefined,
+            attachments: r.attachments?.map((a) => ({
+                name: a.name,
+                contentType: a.contentType,
+                path: a.path,
+            })),
         }));
 
         interpretMutation.mutate({
             testResults: formattedResults,
-            testCode,
+            testCode: lastRunTestCode,
+            testFilePath: lastRunTestPath || undefined,
+            rawOutput: rawTestOutput || undefined,
         });
     };
 
@@ -543,6 +598,14 @@ export function TestingView({
         if (!file) return;
 
         setIsRunningTests(true);
+
+        // Snapshot the file's content + path AT RUN TIME. The AI insights
+        // flow uses these (not `activeFile`) so the model always sees the
+        // exact code that produced the results — even if the user clicks
+        // a different editor tab between running and analyzing, or edits
+        // the file while the run is in flight.
+        setLastRunTestPath(file.path);
+        setLastRunTestCode(file.content);
 
         // Update file status to running
         setFiles((prevFiles) =>
@@ -734,16 +797,23 @@ export function TestingView({
                 </div>
             </div>
 
-            {/* Test Results - Full Width at Bottom */}
+            {/* Test Results - Full Width at Bottom.
+                `testCode` is the run-time snapshot used as a fallback when
+                the server can't read from disk (scratch files, moved/
+                deleted files). The server prefers reading the on-disk
+                copy of `lastRunTestPath` because Playwright reads from
+                disk at run time, so the on-disk version is what actually
+                produced these results. */}
             <TestResults
                 results={testResults}
                 summary={testSummary}
-                filePath={activeFile?.path}
+                filePath={lastRunTestPath || activeFile?.path}
                 isRunning={isRunningTests}
                 rawOutput={rawTestOutput}
-                testCode={activeFile?.content || ""}
+                testCode={lastRunTestCode}
                 onRequestInterpretation={handleRequestInterpretation}
                 interpretation={interpretation}
+                interpretationSource={interpretationSource}
                 isInterpreting={isInterpreting}
             />
 

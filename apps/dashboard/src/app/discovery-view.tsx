@@ -107,9 +107,30 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
         { enabled: false, refetchOnWindowFocus: false },
     );
 
+    // Smart defaults from `playwright.config.ts` → fixes Issue 5: the form
+    // used to hardcode `:3000` even though every other Raiken subsystem
+    // (test generation, doctor, port detector) was already detecting the
+    // real baseURL. Cache for the whole session — this only changes when
+    // the user edits playwright.config and that's not worth polling for.
+    const discoveryDefaultsQuery = trpc.getDiscoveryDefaults.useQuery(
+        {},
+        { refetchOnWindowFocus: false, staleTime: Infinity },
+    );
+    const detectedBaseURL = discoveryDefaultsQuery.data?.baseURL ?? null;
+
     useEffect(() => {
         if (runtime?.requiresAuth) authAssistQuery.refetch();
     }, [runtime?.requiresAuth]);
+
+    // One-shot pre-fill: when the detected baseURL arrives, drop it into
+    // the empty Start URL field. We only fire on the empty-string case so
+    // we never clobber what the user is typing — and we don't track this
+    // in a "did we pre-fill?" boolean, because the natural guard is
+    // `form.url === ""`: the moment the user edits, we stop trying.
+    useEffect(() => {
+        if (!detectedBaseURL) return;
+        setForm((prev) => (prev.url === "" ? { ...prev, url: detectedBaseURL } : prev));
+    }, [detectedBaseURL]);
 
     const refreshAll = async () => {
         await Promise.all([
@@ -355,7 +376,9 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     url: e.target.value,
                                                 }))
                                             }
-                                        placeholder="http://localhost:3000"
+                                        placeholder={
+                                            detectedBaseURL ?? "http://localhost:3000"
+                                        }
                                     />
                                     {form.url && (
                                             <a
@@ -377,6 +400,13 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                         </a>
                                     )}
                                 </div>
+                                {detectedBaseURL && form.url === detectedBaseURL && (
+                                    <span className="field-hint">
+                                        Auto-detected from{" "}
+                                        <code>playwright.config.ts</code> ·{" "}
+                                        <code>use.baseURL</code>
+                                    </span>
+                                )}
                             </label>
 
                             <div className="field-row-3">
@@ -1325,6 +1355,15 @@ const STYLES = `
     .field-label {
         font-size: 10.5px; color: var(--ink-faint);
         text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .field-hint {
+        font-size: 11px; color: var(--ink-faint);
+        font-family: var(--mono); line-height: 1.4;
+    }
+    .field-hint code {
+        font-family: var(--mono); font-size: 10.5px;
+        color: var(--ink); background: var(--bg-elev);
+        padding: 0 0.25rem; border-radius: 2px;
     }
 
     .discovery-view input[type="text"],

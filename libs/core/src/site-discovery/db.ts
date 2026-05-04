@@ -4,18 +4,18 @@
  * Provides persistence for site discovery data including pages, links, auth blockers, and sessions.
  */
 
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import type {
-    DiscoveredPage,
-    DiscoveredLink,
-    LinkStatus,
     AuthBlocker,
     AuthBlockerType,
     BlockerCategory,
     BlockerResolution,
     BlockerSeverity,
+    DiscoveredLink,
+    DiscoveredPage,
     DiscoveryBlocker,
     DiscoverySession,
+    LinkStatus,
     SessionStatus,
 } from "./types";
 import { normalizeUrl } from "./url-utils";
@@ -43,20 +43,27 @@ export interface LegacyAuthBlockerInput {
  * detector id doesn't carry an auth-flavored suffix — safe because callers
  * only inspect `blockerType` for display.
  */
+// Single source of truth for which detector-id suffixes round-trip cleanly
+// to the legacy `AuthBlockerType` shape. Must include EVERY value in
+// `AuthBlockerType` — drift here silently downgrades blockers on read
+// (e.g. `auth:login_redirect` → "login_form" when this list is stale).
+const LEGACY_AUTH_TYPES: readonly AuthBlockerType[] = [
+    "url_pattern",
+    "login_form",
+    "oauth_button",
+    "error_message",
+    "http_status",
+    "login_redirect",
+];
+const LEGACY_AUTH_TYPE_SET = new Set<string>(LEGACY_AUTH_TYPES);
+
 function detectorIdToLegacyAuthType(
     detectorId: string | null,
     category: BlockerCategory,
 ): AuthBlockerType {
     if (detectorId && detectorId.includes(":")) {
         const suffix = detectorId.split(":", 2)[1];
-        const valid: AuthBlockerType[] = [
-            "url_pattern",
-            "login_form",
-            "oauth_button",
-            "error_message",
-            "http_status",
-        ];
-        if ((valid as string[]).includes(suffix)) {
+        if (LEGACY_AUTH_TYPE_SET.has(suffix)) {
             return suffix as AuthBlockerType;
         }
     }
@@ -89,7 +96,7 @@ export class SiteKnowledgeDB {
                 parent_url, navigation_action, depth, discovered_at,
                 last_visited_at, visit_count
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
+        `,
             )
             .run(
                 page.projectPath,
@@ -102,7 +109,7 @@ export class SiteKnowledgeDB {
                 page.depth,
                 page.discoveredAt,
                 page.lastVisitedAt,
-                page.visitCount
+                page.visitCount,
             );
 
         return Number(result.lastInsertRowid);
@@ -118,7 +125,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT * FROM discovered_pages
             WHERE project_path = ? AND normalized_url = ?
-        `
+        `,
             )
             .get(this.projectPath, normalizedUrl) as Record<string, unknown> | undefined;
 
@@ -135,7 +142,7 @@ export class SiteKnowledgeDB {
             SELECT * FROM discovered_pages
             WHERE project_path = ?
             ORDER BY depth ASC, discovered_at ASC
-        `
+        `,
             )
             .all(this.projectPath) as Array<Record<string, unknown>>;
 
@@ -153,7 +160,7 @@ export class SiteKnowledgeDB {
             WHERE project_path = ?
             ORDER BY depth ASC, discovered_at ASC
             LIMIT ? OFFSET ?
-        `
+        `,
             )
             .all(this.projectPath, limit, offset) as Array<Record<string, unknown>>;
 
@@ -171,11 +178,10 @@ export class SiteKnowledgeDB {
             UPDATE discovered_pages
             SET last_visited_at = ?, visit_count = visit_count + 1
             WHERE project_path = ? AND normalized_url = ?
-        `
+        `,
             )
             .run(Date.now(), this.projectPath, normalizedUrl);
     }
-
 
     /**
      * Get the count of discovered pages.
@@ -186,7 +192,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovered_pages
             WHERE project_path = ?
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 
@@ -208,7 +214,7 @@ export class SiteKnowledgeDB {
                 project_path, from_url, to_url, selector, link_text,
                 element_role, status, error_message, discovered_at, verified_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
+        `,
             )
             .run(
                 link.projectPath,
@@ -220,7 +226,7 @@ export class SiteKnowledgeDB {
                 link.status,
                 link.errorMessage,
                 link.discoveredAt,
-                link.verifiedAt
+                link.verifiedAt,
             );
     }
 
@@ -234,7 +240,7 @@ export class SiteKnowledgeDB {
             SELECT * FROM discovered_links
             WHERE project_path = ? AND from_url = ?
             ORDER BY discovered_at ASC
-        `
+        `,
             )
             .all(this.projectPath, url) as Array<Record<string, unknown>>;
 
@@ -251,7 +257,7 @@ export class SiteKnowledgeDB {
             SELECT * FROM discovered_links
             WHERE project_path = ? AND to_url = ? AND status = 'pending'
             ORDER BY discovered_at ASC
-        `
+        `,
             )
             .all(this.projectPath, url) as Array<Record<string, unknown>>;
 
@@ -268,7 +274,7 @@ export class SiteKnowledgeDB {
             SELECT * FROM discovered_links
             WHERE project_path = ? AND status = ?
             ORDER BY discovered_at ASC
-        `
+        `,
             )
             .all(this.projectPath, status) as Array<Record<string, unknown>>;
 
@@ -282,7 +288,7 @@ export class SiteKnowledgeDB {
         fromUrl: string,
         toUrl: string,
         status: LinkStatus,
-        errorMessage?: string
+        errorMessage?: string,
     ): void {
         const verifiedAt = status === "verified" ? Date.now() : null;
 
@@ -292,16 +298,9 @@ export class SiteKnowledgeDB {
             UPDATE discovered_links
             SET status = ?, error_message = ?, verified_at = ?
             WHERE project_path = ? AND from_url = ? AND to_url = ?
-        `
+        `,
             )
-            .run(
-                status,
-                errorMessage || null,
-                verifiedAt,
-                this.projectPath,
-                fromUrl,
-                toUrl
-            );
+            .run(status, errorMessage || null, verifiedAt, this.projectPath, fromUrl, toUrl);
     }
 
     /**
@@ -327,7 +326,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovered_links
             WHERE project_path = ?
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 
@@ -435,9 +434,9 @@ export class SiteKnowledgeDB {
      * a specific row, e.g. "skip the URL of blocker #42").
      */
     getBlocker(id: number): DiscoveryBlocker | null {
-        const row = this.db
-            .prepare(`SELECT * FROM discovery_blockers WHERE id = ?`)
-            .get(id) as Record<string, unknown> | undefined;
+        const row = this.db.prepare(`SELECT * FROM discovery_blockers WHERE id = ?`).get(id) as
+            | Record<string, unknown>
+            | undefined;
         return row ? this.mapBlockerRow(row) : null;
     }
 
@@ -522,7 +521,6 @@ export class SiteKnowledgeDB {
         return result.changes;
     }
 
-
     // ==========================================================================
     // Discovery Sessions Operations
     // ==========================================================================
@@ -539,7 +537,7 @@ export class SiteKnowledgeDB {
                 links_found, started_at, completed_at, blocked_at_url, queue_json,
                 max_pages, max_depth, skipped_urls_json, ignored_categories_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
+        `,
             )
             .run(
                 session.projectPath,
@@ -627,7 +625,7 @@ export class SiteKnowledgeDB {
             WHERE project_path = ? AND status IN ('running', 'paused')
             ORDER BY started_at DESC
             LIMIT 1
-        `
+        `,
             )
             .get(this.projectPath) as Record<string, unknown> | undefined;
 
@@ -643,7 +641,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT * FROM discovery_sessions
             WHERE id = ?
-        `
+        `,
             )
             .get(id) as Record<string, unknown> | undefined;
 
@@ -660,7 +658,7 @@ export class SiteKnowledgeDB {
             SELECT * FROM discovery_sessions
             WHERE project_path = ?
             ORDER BY started_at DESC
-        `
+        `,
             )
             .all(this.projectPath) as Array<Record<string, unknown>>;
 
@@ -678,7 +676,7 @@ export class SiteKnowledgeDB {
             WHERE project_path = ?
             ORDER BY started_at DESC
             LIMIT 1
-        `
+        `,
             )
             .get(this.projectPath) as Record<string, unknown> | undefined;
 
@@ -774,7 +772,7 @@ export class SiteKnowledgeDB {
             UPDATE discovery_sessions
             SET status = 'failed', completed_at = ?
             WHERE project_path = ? AND status = 'running'
-        `
+        `,
             )
             .run(Date.now(), this.projectPath);
 
@@ -828,7 +826,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovered_links
             WHERE project_path = ? AND status = 'verified'
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 
@@ -837,7 +835,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovered_links
             WHERE project_path = ? AND status = 'broken'
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 
@@ -846,7 +844,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovery_blockers
             WHERE project_path = ?
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 
@@ -855,7 +853,7 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovery_blockers
             WHERE project_path = ? AND resolved_at IS NULL
-        `
+        `,
             )
             .get(this.projectPath) as { count: number };
 

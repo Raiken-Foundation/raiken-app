@@ -11,7 +11,7 @@ import type { DOMContext, InteractiveElement, FormField, AccessibilityNode } fro
 export class BrowserActionError extends Error {
     readonly action: string;
     readonly target: string;
-    readonly cause: unknown;
+    override readonly cause: unknown;
 
     constructor(action: string, target: string, cause: unknown) {
         const causeMsg = cause instanceof Error ? cause.message : String(cause);

@@ -165,6 +165,39 @@ describe("SiteKnowledgeDB", () => {
             expect(all[0].detectorId).toBe("auth:login_form");
         });
 
+        // Regression for H1: every value in `AuthBlockerType` must round-trip
+        // back through `mapBlockerRow`. Pre-fix, `login_redirect` was missing
+        // from the legacy-suffix allow-list, so it silently downgraded to
+        // `"login_form"` on read — breaking the CLI's `Type: login redirect`
+        // diagnostic and any external consumer that switches on `blockerType`.
+        it.each([
+            ["url_pattern", "auth:url_pattern"],
+            ["login_form", "auth:login_form"],
+            ["oauth_button", "auth:oauth_button"],
+            ["error_message", "auth:error_message"],
+            ["http_status", "auth:http_status"],
+            ["login_redirect", "auth:login_redirect"],
+        ] as const)("round-trips legacy blockerType for detectorId=%s → %s", (expectedType, detectorId) => {
+            const id = siteDb.saveBlocker({
+                projectPath: testDir,
+                url: "http://localhost:3000/dashboard",
+                category: "auth_required",
+                severity: "pause",
+                detectorId,
+                detectedElements: null,
+                evidenceJson: JSON.stringify({ originUrl: "http://x", finalUrl: "http://x/login" }),
+                screenshotPath: null,
+                resolution: null,
+                resolvedVia: null,
+                resolvedAt: null,
+                storageStatePath: null,
+                discoveredAt: Date.now(),
+            });
+            const row = siteDb.getBlocker(id) as AuthBlocker;
+            expect(row.detectorId).toBe(detectorId);
+            expect(row.blockerType).toBe(expectedType);
+        });
+
         it("markBlockerResolved records the structured resolution", () => {
             const id = siteDb.saveBlocker({
                 projectPath: testDir,
@@ -260,9 +293,7 @@ describe("SiteKnowledgeDB", () => {
             });
 
             const updated = siteDb.getSession(sessionId);
-            expect(updated?.skippedUrlsJson).toBe(
-                JSON.stringify(["http://localhost:3000/admin"]),
-            );
+            expect(updated?.skippedUrlsJson).toBe(JSON.stringify(["http://localhost:3000/admin"]));
             expect(updated?.ignoredCategoriesJson).toBe(JSON.stringify(["captcha"]));
         });
     });

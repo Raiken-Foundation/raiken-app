@@ -176,4 +176,41 @@ describe("readPlaywrightBaseURL", () => {
         );
         expect(await readPlaywrightBaseURL(tmpDir)).toBeNull();
     });
+
+    // Below: cases added for Issue 5 (dashboard pre-fills the Discovery
+    // Start URL from this value). The dashboard surfaces `null` as
+    // "fall back to the generic placeholder" so the missing-baseURL
+    // case must reliably return `null` rather than something truthy.
+
+    it("returns null when the config exists but has no baseURL field", async () => {
+        await fs.writeFile(
+            path.join(tmpDir, "playwright.config.ts"),
+            `export default { testDir: './e2e', use: { trace: 'on-first-retry' } };`,
+        );
+        expect(await readPlaywrightBaseURL(tmpDir)).toBeNull();
+    });
+
+    it("extracts a baseURL written as a template literal", async () => {
+        await fs.writeFile(
+            path.join(tmpDir, "playwright.config.ts"),
+            `export default { use: { baseURL: \`http://localhost:5100\` } };`,
+        );
+        expect(await readPlaywrightBaseURL(tmpDir)).toBe("http://localhost:5100");
+    });
+
+    it("reads playwright.config.cjs", async () => {
+        await fs.writeFile(
+            path.join(tmpDir, "playwright.config.cjs"),
+            `module.exports = { use: { baseURL: 'http://localhost:4200' } };`,
+        );
+        expect(await readPlaywrightBaseURL(tmpDir)).toBe("http://localhost:4200");
+    });
+
+    it("reads playwright.config.mts", async () => {
+        await fs.writeFile(
+            path.join(tmpDir, "playwright.config.mts"),
+            `export default { use: { baseURL: 'http://127.0.0.1:5173' } };`,
+        );
+        expect(await readPlaywrightBaseURL(tmpDir)).toBe("http://127.0.0.1:5173");
+    });
 });

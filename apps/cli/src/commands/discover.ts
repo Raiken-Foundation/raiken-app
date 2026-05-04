@@ -4,12 +4,7 @@
  * Autonomously discover web application structure by crawling pages.
  */
 
-import type {
-    DiscoveryEvent,
-    DiscoverySession,
-    DiscoveryStats,
-    SiteDiscovery,
-} from "@raiken/core";
+import type { DiscoveryEvent, DiscoverySession, DiscoveryStats, SiteDiscovery } from "@raiken/core";
 import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -115,6 +110,85 @@ const attachDiscoveryListeners = (params: {
         }
 
         console.log(chalk.dim(authHint));
+    });
+
+    // Non-auth blockers (captcha, error_page, manual) also pause discovery
+    // but never fire `auth_blocked`. Pre-fix the spinner just hung silently
+    // until the user Ctrl-C'd, with no indication of what happened. We
+    // listen on the generic `blocker_detected` event and skip the
+    // auth_required case (already handled above) so the messages don't
+    // double-print.
+    discovery.on("blocker_detected", (event: DiscoveryEvent) => {
+        const blocker = (
+            event.data as {
+                blocker: {
+                    url: string;
+                    category?: string;
+                    severity?: string;
+                    detectorId?: string | null;
+                    evidenceJson?: string | null;
+                };
+            }
+        ).blocker;
+
+        if (blocker.category === "auth_required") return;
+        // Only pause-severity blockers stop the crawl. Skip/log-only
+        // blockers shouldn't interrupt the spinner because the crawl
+        // keeps going.
+        if (blocker.severity && blocker.severity !== "pause") return;
+
+        clearInterval(progressInterval);
+        spinner.stop();
+
+        const category = blocker.category ?? "unknown";
+        const detector = blocker.detectorId ?? `${category}:detected`;
+        const headers: Record<string, string> = {
+            captcha: "🤖 Captcha challenge detected",
+            error_page: "💥 Error page returned",
+            manual: "⏸️  Manually paused",
+            rate_limit: "⏱️  Rate limit hit",
+            anti_bot: "🛡️  Anti-bot challenge detected",
+        };
+        const header = headers[category] ?? `🛑 Discovery paused (${category})`;
+
+        console.log(chalk.yellow(`\n${header}`));
+        console.log(chalk.dim(`   URL:      ${blocker.url}`));
+        console.log(chalk.dim(`   Detector: ${detector}`));
+        console.log();
+
+        // Category-specific guidance. Each branch tells the user the
+        // shortest path to unblock — running `raiken auth` won't help
+        // here (that's H2 territory), so we surface the right tool.
+        if (category === "captcha" || category === "anti_bot") {
+            console.log(chalk.cyan("Next steps:"));
+            console.log(
+                chalk.white("  1."),
+                chalk.dim(
+                    "Open the dashboard and request a browser handoff to solve the challenge",
+                ),
+            );
+            console.log(
+                chalk.white("  2."),
+                chalk.dim("Or skip this blocker and continue with"),
+                chalk.white("raiken discover --continue"),
+            );
+            console.log();
+        } else if (category === "error_page" || category === "rate_limit") {
+            console.log(chalk.cyan("Next steps:"));
+            console.log(
+                chalk.white("  1."),
+                chalk.dim("Verify the target server is reachable and not throttling requests"),
+            );
+            console.log(
+                chalk.white("  2."),
+                chalk.dim("Resume with"),
+                chalk.white("raiken discover --continue"),
+                chalk.dim("once resolved"),
+            );
+            console.log();
+        }
+
+        console.log(chalk.dim("Discovery paused. Resume with 'raiken discover --continue'."));
     });
 
     discovery.on("session_completed", () => {
@@ -243,9 +317,17 @@ async function startDiscovery(
         await discovery.start();
     } catch (error) {
         clearInterval(progressInterval);
+        // Make sure the spinner doesn't stay frozen on its last "Initializing
+        // crawler..." text when the run throws before any listener fires.
+        if (spinner.isSpinning) spinner.fail(chalk.red("Discovery failed"));
         throw error;
     } finally {
         clearInterval(progressInterval);
+        // The session_completed listener calls .succeed(); the catch above
+        // calls .fail(). This is the safety net for the rare path where
+        // neither fires (e.g. a blocker_detected listener stopped the
+        // spinner but discovery.start() then resolved cleanly).
+        if (spinner.isSpinning) spinner.stop();
         await discovery.close();
     }
 }
@@ -294,8 +376,11 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
         await discovery.start();
     } catch (error) {
         clearInterval(progressInterval);
+        if (spinner.isSpinning) spinner.fail(chalk.red("Discovery failed"));
         throw error;
     } finally {
+        clearInterval(progressInterval);
+        if (spinner.isSpinning) spinner.stop();
         await discovery.close();
     }
 }

@@ -117,6 +117,58 @@ const RULES: Rule[] = [
         message: ".only will silently drop every other test in the suite on CI.",
         suggestion: "Remove .only before committing.",
     },
+    // ---- Selector-quality rules (Issue 7) ------------------------------------
+    // All three selector rules anchor on the small set of Playwright APIs that
+    // accept a CSS-engine string (locator, $, $$, click, fill, etc.). The
+    // semantic queries — getByRole, getByLabel, getByTestId, getByText,
+    // getByPlaceholder, getByAltText, getByTitle — are deliberately excluded
+    // from the alternation so they never trigger these rules even if the user
+    // happens to pass a string that LOOKS brittle (e.g. test-id "css-cta-1").
+    //
+    // Per-line `first match wins` means a selector that is brittle on multiple
+    // axes (hash + nth-child + deep chain) still produces ONE finding — the
+    // most specific signal first. Order below reflects that priority.
+    {
+        id: "no-css-in-js-hash",
+        severity: "warning",
+        // Matches MUI generated classes (MuiBox-root, MuiButton-contained...),
+        // Emotion (css-1abc2de), styled-components (sc-jSUZER), styled-jsx
+        // (jsx-1234567890), and CSS Modules (_button__a3f9d). These hashes
+        // change on every CSS-in-JS bundle and are the #1 cause of post-deploy
+        // selector breakage that doesn't surface in dev.
+        pattern:
+            /\.(?:click|locator|fill|hover|dblclick|check|uncheck|selectOption|type|press|tap|waitForSelector|focus|setInputFiles|\$\$?)\s*\(\s*['"`][^'"`\n]*?(?:Mui[A-Z]\w+-|\bcss-[a-z0-9]{4,}|\bsc-[A-Za-z0-9]{4,}|\bjsx-\d{6,}|\b_[A-Za-z0-9-]{3,}_[A-Za-z0-9]{4,})/,
+        message:
+            "Selector targets a CSS-in-JS hashed class (MUI / Emotion / styled-components / styled-jsx / CSS Modules).",
+        suggestion:
+            "These hashes change every build. Use getByRole / getByLabel / getByTestId, or add a stable data-testid to the component.",
+    },
+    {
+        id: "no-deep-descendant-chain",
+        severity: "warning",
+        // 3+ direct-child combinators (>). Two-level chains (`#root > main`)
+        // are pragmatic and survive most refactors; three+ are tightly
+        // coupled to internal layout and break on any wrapper change.
+        pattern:
+            /\.(?:click|locator|fill|hover|dblclick|check|uncheck|selectOption|type|press|tap|waitForSelector|focus|setInputFiles|\$\$?)\s*\(\s*['"`][^'"`\n]*?>[^>'"`\n]*>[^>'"`\n]*>/,
+        message: "Selector chains 3+ direct-child combinators (>). Brittle to layout changes.",
+        suggestion:
+            "Refactor to a stable role/label/test-id query (getByRole, getByLabel, getByTestId).",
+    },
+    {
+        id: "prefer-role-selectors",
+        severity: "info",
+        // Positional selectors (:nth-child, :nth-of-type) couple the test to
+        // the rendered order of siblings. Any reordering — sorting,
+        // pagination, A/B test, new menu item — silently picks the wrong
+        // element.
+        pattern:
+            /\.(?:click|locator|fill|hover|dblclick|check|uncheck|selectOption|type|press|tap|waitForSelector|focus|setInputFiles|\$\$?)\s*\(\s*['"`][^'"`\n]*?:nth-(?:child|of-type)\(/,
+        message: "Positional CSS selector (:nth-child / :nth-of-type) is brittle to ordering.",
+        suggestion:
+            "Prefer a semantic query like getByRole('button', { name: 'Save' }) or getByLabel — it survives reordering.",
+    },
+    // -------------------------------------------------------------------------
     {
         id: "no-commented-url",
         severity: "info",

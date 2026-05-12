@@ -52,6 +52,12 @@ export class ProjectContext {
     // Track files that have changed since last scan
     private pendingChanges: FileChange[] = [];
 
+    // Monotonically increments on every file watcher event so cheap
+    // pollers (e.g. the dashboard) can detect "something changed" without
+    // a WebSocket transport. Resets are intentionally not supported —
+    // only the relative change matters, not the absolute value.
+    private fileChangeBump = 0;
+
     // Staleness threshold (5 minutes)
     private static readonly STALE_THRESHOLD_MS = 5 * 60 * 1000;
 
@@ -142,7 +148,7 @@ export class ProjectContext {
         db.close();
 
         console.log(
-            `ProjectContext initialized: ${this.keywordIndex.size} keywords, ${this.modules.length} modules`
+            `ProjectContext initialized: ${this.keywordIndex.size} keywords, ${this.modules.length} modules`,
         );
     }
 
@@ -351,6 +357,15 @@ export class ProjectContext {
         this.pendingChanges = [];
     }
 
+    /**
+     * Returns a monotonically increasing counter that ticks on every file
+     * change observed by the watcher. Pollers compare against their last
+     * known value to decide whether to invalidate downstream queries.
+     */
+    getFileChangeBump(): number {
+        return this.fileChangeBump;
+    }
+
     // =========================================================================
     // Refresh (Agent calls when cache is invalid)
     // =========================================================================
@@ -482,15 +497,10 @@ export class ProjectContext {
             this.lastScanTime = Date.now();
 
             const changeType: FileChange["type"] =
-                event.type === "add"
-                    ? "added"
-                    : event.type === "remove"
-                      ? "deleted"
-                      : "modified";
+                event.type === "add" ? "added" : event.type === "remove" ? "deleted" : "modified";
 
-            this.notifyChanges([
-                { path: event.filePath, type: changeType, contentChanged: true },
-            ]);
+            this.notifyChanges([{ path: event.filePath, type: changeType, contentChanged: true }]);
+            this.fileChangeBump += 1;
         } catch (err) {
             console.warn(
                 `[ProjectContext] Watch event failed for ${event.filePath}:`,
@@ -524,7 +534,9 @@ export class ProjectContext {
         const embGen = EmbeddingsGenerator.getInstance();
         if (!embGen.isReady()) return;
 
-        const chunks = [{ type: "file" as const, name: fileRecord.relative_path, text: searchableText }];
+        const chunks = [
+            { type: "file" as const, name: fileRecord.relative_path, text: searchableText },
+        ];
         embGen
             .generateEmbeddingsBatch(chunks.map((c) => c.text))
             .then((embeddings) => {
@@ -567,7 +579,11 @@ export class ProjectContext {
         const keywords: string[] = [];
 
         // From path
-        const basename = node.relativePath.split("/").pop()?.replace(/\.[^.]+$/, "") || "";
+        const basename =
+            node.relativePath
+                .split("/")
+                .pop()
+                ?.replace(/\.[^.]+$/, "") || "";
         keywords.push(...this.splitIdentifier(basename));
         keywords.push(basename.toLowerCase());
 

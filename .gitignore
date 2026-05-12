@@ -49,3 +49,6 @@ vitest.config.*.timestamp*
 .raiken/
 storage/
 .env
+
+
+.local

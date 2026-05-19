@@ -105,6 +105,179 @@ test('ok', async () => {});
         expect(report.scannedFiles).toBe(0);
     });
 
+    // -------------------------------------------------------------------------
+    // Issue 7: Doctor doesn't flag brittle CSS selectors
+    // -------------------------------------------------------------------------
+    // The user's repro covered three flake patterns the linter missed:
+    //   1. CSS-in-JS hashed classes (MUI, Emotion, styled-components, jsx)
+    //   2. Long > chains (#__next > div > div > div > p)
+    //   3. Positional selectors (:nth-child / :nth-of-type)
+    // The tests below pin both directions: the patterns trigger the right
+    // rule, and semantic queries (getByRole / getByTestId / getByText /
+    // getByLabel) never trigger any of them.
+    describe("selector-quality rules (Issue 7)", () => {
+        it("flags MUI / Emotion CSS-in-JS hashes inside page.click", async () => {
+            // Verbatim repro from the bug report.
+            writeSpec(
+                "css-in-js.spec.ts",
+                `import { test } from '@playwright/test';
+test('mui hash', async ({ page }) => {
+    await page.click('div.MuiBox-root.css-1abc2de > button:nth-child(3)');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const finding = report.findings.find((f) => f.rule === "no-css-in-js-hash");
+
+            expect(finding).toBeDefined();
+            expect(finding?.severity).toBe("warning");
+            expect(finding?.snippet).toContain("MuiBox-root");
+        });
+
+        it("flags styled-components (sc-) and styled-jsx (jsx-) hashes", async () => {
+            writeSpec(
+                "sc-jsx.spec.ts",
+                `import { test } from '@playwright/test';
+test('sc', async ({ page }) => {
+    await page.locator('button.sc-jSUZER').click();
+});
+test('jsx', async ({ page }) => {
+    await page.locator('div.jsx-1234567890');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const ids = report.findings.filter((f) => f.rule === "no-css-in-js-hash");
+            expect(ids.length).toBe(2);
+        });
+
+        it("flags 3+ deep > chains (the #__next > div > div > div > p case)", async () => {
+            // Verbatim repro from the bug report.
+            writeSpec(
+                "deep-chain.spec.ts",
+                `import { test } from '@playwright/test';
+test('chain', async ({ page }) => {
+    const para = page.locator('#__next > div > div > div > p');
+    await para.click();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const finding = report.findings.find((f) => f.rule === "no-deep-descendant-chain");
+
+            expect(finding).toBeDefined();
+            expect(finding?.severity).toBe("warning");
+            expect(finding?.snippet).toContain("#__next");
+        });
+
+        it("does NOT flag a 1-level > chain (#root > main)", async () => {
+            // Pragmatic single-level chains are common and survive most
+            // refactors; the rule only fires at 3+ to avoid noise.
+            writeSpec(
+                "shallow-chain.spec.ts",
+                `import { test } from '@playwright/test';
+test('shallow', async ({ page }) => {
+    await page.locator('#root > main').waitFor();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(
+                report.findings.find((f) => f.rule === "no-deep-descendant-chain"),
+            ).toBeUndefined();
+        });
+
+        it("flags :nth-child / :nth-of-type as info-level brittleness", async () => {
+            writeSpec(
+                "nth.spec.ts",
+                `import { test } from '@playwright/test';
+test('nth', async ({ page }) => {
+    await page.locator('.row:nth-child(2)').click();
+    await page.locator('.list :nth-of-type(3)').click();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const findings = report.findings.filter((f) => f.rule === "prefer-role-selectors");
+
+            expect(findings.length).toBe(2);
+            expect(findings[0]?.severity).toBe("info");
+        });
+
+        it("does NOT flag any selector rule on getByRole / getByTestId / getByLabel", async () => {
+            // Semantic queries are the recommended replacement. The rules
+            // must never trigger on them, even if the test-id string itself
+            // looks brittle (e.g. "css-cta-1") — the API call is the anchor,
+            // not the string content.
+            writeSpec(
+                "semantic.spec.ts",
+                `import { test } from '@playwright/test';
+test('semantic', async ({ page }) => {
+    await page.getByRole('button', { name: 'Save' }).click();
+    await page.getByTestId('css-cta-1').click();
+    await page.getByLabel('Email').fill('a@b.com');
+    await page.getByText('Welcome').waitFor();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const triggered = report.findings.filter((f) =>
+                ["no-css-in-js-hash", "no-deep-descendant-chain", "prefer-role-selectors"].includes(
+                    f.rule,
+                ),
+            );
+            expect(triggered).toEqual([]);
+        });
+
+        it("does NOT flag a stable BEM-style selector", async () => {
+            writeSpec(
+                "bem.spec.ts",
+                `import { test } from '@playwright/test';
+test('bem', async ({ page }) => {
+    await page.locator('.product-card__buy-button').click();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const triggered = report.findings.filter((f) =>
+                ["no-css-in-js-hash", "no-deep-descendant-chain", "prefer-role-selectors"].includes(
+                    f.rule,
+                ),
+            );
+            expect(triggered).toEqual([]);
+        });
+
+        it("emits exactly one finding when a selector violates multiple rules", async () => {
+            // The user's repro selector is brittle on TWO axes: CSS-in-JS
+            // hash AND :nth-child. The scanner emits one finding per line
+            // (most-specific rule wins) so we don't drown the user in
+            // redundant signals about the same selector.
+            writeSpec(
+                "multi.spec.ts",
+                `import { test } from '@playwright/test';
+test('multi', async ({ page }) => {
+    await page.click('div.MuiBox-root.css-1abc2de > button:nth-child(3)');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const onLineWithSelector = report.findings.filter(
+                (f) => f.file === "e2e/multi.spec.ts" && f.snippet.includes("MuiBox-root"),
+            );
+            expect(onLineWithSelector.length).toBe(1);
+            // Highest-priority rule wins (warning > info, ordered by specificity).
+            expect(onLineWithSelector[0]?.rule).toBe("no-css-in-js-hash");
+        });
+    });
+
     describe("project-level checks", () => {
         function writePlaywrightConfig(baseURL: string | null) {
             const useBlock = baseURL ? `use: { baseURL: '${baseURL}' },` : "";

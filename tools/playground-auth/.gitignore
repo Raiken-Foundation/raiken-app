@@ -1,0 +1,22 @@
+# Raiken local database (site knowledge, embeddings, code graph).
+.raiken/
+
+# Crawlee scratch storage (used by the site-discovery crawler).
+storage/
+
+# Playwright runtime artefacts — screenshots/videos/traces/.last-run.json
+# captured per run. Re-generated every time you run a test; never commit.
+test-results/
+
+# Playwright HTML/JSON reports — the directory itself is committed as a
+# placeholder via test-reports/.gitignore, but the report payload changes
+# every run.
+test-reports/*
+!test-reports/.gitignore
+
+# Raiken auto-generated tests — saved from the dashboard when you click
+# "Save test" or `autoSaveTests: true`. Live alongside hand-written tests
+# under `tests/`, but we don't want them committed by default because
+# they're throwaway exploration. Promote a generated test by moving it
+# out of `tests/generated/` into `tests/` and renaming it.
+tests/generated/

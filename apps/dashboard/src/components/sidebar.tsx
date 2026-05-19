@@ -425,10 +425,6 @@ export function Sidebar({
                 [messageId]: { status: "saved", filePath: result.filePath },
             }));
 
-            // Surface the saved file in the editor pane (same hook
-            // testing-view uses to detect "complete test file" output).
-            onSendMessage?.(testCode);
-
             const confirmMsg: Message = {
                 id: `sys-${Date.now()}`,
                 content:

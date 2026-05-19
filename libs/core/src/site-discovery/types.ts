@@ -153,13 +153,20 @@ export type AuthBlocker = DiscoveryBlocker & {
 /**
  * Legacy auth-specific blocker type strings, kept for back-compat with
  * external scripts that destructure `blockerType`.
+ *
+ * `login_redirect` is the strongest pre-DOM signal: a server-side redirect
+ * chain that lands on a login-shaped URL. Detected from Playwright's
+ * request chain rather than the rendered DOM, so it fires even when the
+ * login page hasn't hydrated yet, has no password input (magic-link
+ * flows), or was withheld by anti-bot heuristics.
  */
 export type AuthBlockerType =
     | "url_pattern"
     | "login_form"
     | "oauth_button"
     | "error_message"
-    | "http_status";
+    | "http_status"
+    | "login_redirect";
 
 /**
  * Discovery session information

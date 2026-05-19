@@ -24,6 +24,7 @@ import {
     createManualFallbackDetector,
     runBlockerPipeline,
 } from "./detectors";
+import { looksLikeLoginUrl } from "./detectors/auth";
 import { buildLinkSelector, safeOrigin } from "./link-utils";
 import type { BlockerCategory, DiscoveryBlocker, DiscoveryOptions, DiscoveryStats } from "./types";
 import { normalizeUrl } from "./url-utils";
@@ -60,6 +61,23 @@ export class SiteDiscovery extends EventEmitter {
     private isPaused = false;
     private startOrigin: string | null = null;
     private requestQueue: RequestQueue | null = null;
+    /**
+     * Per-instance queue name. Crawlee's `RequestQueue.open(name)` caches
+     * by name, so repeated `open()` with the default `null`/`"default"`
+     * key returns the SAME wrapped queue across discovery sessions —
+     * carrying over the prior run's "URL already handled" markers and
+     * causing the next fresh crawl to drain immediately with 0 pages.
+     *
+     * Swapping in a fresh `MemoryStorage` (see `start()`) is necessary
+     * but not sufficient: the cached `RequestQueue` instance still
+     * dedupes against its in-memory request log. Giving every
+     * `SiteDiscovery` instance a unique queue name forces a clean
+     * cache miss and a brand-new queue. Memory cost is negligible —
+     * dropping the queue on `close()` reclaims the entry.
+     *
+     * Public-ish so the `purgeQueueOnResume` path can reuse it.
+     */
+    private readonly queueName: string;
     private queuedRequests: Array<{
         url: string;
         uniqueKey?: string;
@@ -121,6 +139,37 @@ export class SiteDiscovery extends EventEmitter {
      */
     private failedRequests: Array<{ url: string; reason: string; status: number | null }> = [];
 
+    /**
+     * Resolved URLs (post-redirect) that look like a login/auth page but
+     * which no detector flagged. Surfaced in the empty-crawl diagnostic
+     * so users running `raiken discover` directly against a login URL
+     * (or sites that hide the password field behind OAuth/magic-link)
+     * still get an actionable hint instead of the generic fallback.
+     *
+     * Bounded — we only track up to 5 distinct URLs to avoid unbounded
+     * growth on huge crawls of login-heavy site sections.
+     */
+    private resolvedLoginShapedUrls = new Set<string>();
+
+    /**
+     * Set to `true` the first time `handleRequest` is entered. Used by
+     * `buildEmptyCrawlError` to distinguish:
+     *
+     *   - Pages were dispatched but produced no usable content
+     *     (handler ran → handlerInvoked = true → existing diagnostics apply)
+     *
+     *   - The crawler ran with a non-empty startUrls list yet the
+     *     handler never fired (handlerInvoked = false → silent drain)
+     *
+     * The silent-drain branch is the symptom of Crawlee's `RequestQueue`
+     * having previously marked the URL as handled, so `addRequests`
+     * deduped it away and `run()` returned in <300ms with `requestsTotal: 0`.
+     * The unique queue name + drop-on-close fix prevents this in normal
+     * use, but we keep the diagnostic as an unmistakeable signal if it
+     * ever recurs (e.g. a future Crawlee version changes its caching).
+     */
+    private handlerInvoked = false;
+
     constructor(options: DiscoveryOptions) {
         super();
 
@@ -141,6 +190,12 @@ export class SiteDiscovery extends EventEmitter {
         };
 
         this.compiledExcludeMatchers = this.options.excludePatterns.map(compileExcludeMatcher);
+
+        // Per-instance Crawlee queue name. See `queueName` field doc for
+        // why the default `"default"` would silently break run-after-clear.
+        this.queueName = `raiken-discovery-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 10)}`;
 
         // Initialize database
         this.db = new CodeGraphDB(this.options.projectPath);
@@ -237,7 +292,7 @@ export class SiteDiscovery extends EventEmitter {
 
             this.loadStorageState();
 
-            this.requestQueue = await RequestQueue.open();
+            this.requestQueue = await RequestQueue.open(this.queueName);
 
             if (this.queuedRequests && this.queuedRequests.length > 0) {
                 await this.requestQueue.addRequests(
@@ -709,6 +764,10 @@ export class SiteDiscovery extends EventEmitter {
         const url = request.url;
         const depth = (request.userData["depth"] as number) || 0;
 
+        // Set BEFORE the pause check — we want to know that the handler
+        // was reached at all, not just that it ran to completion.
+        this.handlerInvoked = true;
+
         if (this.isPaused) {
             return;
         }
@@ -868,6 +927,17 @@ export class SiteDiscovery extends EventEmitter {
             const resolvedUrl = response?.url() || url;
             const resolvedNormalized = this.normalizeUrl(resolvedUrl);
             const startOrigin = this.startOrigin;
+
+            // Track login-shaped resolved URLs so the empty-crawl
+            // diagnostic can suggest `raiken auth` even when no detector
+            // fired (e.g. magic-link login pages with no password field,
+            // or `raiken discover` pointed straight at /auth/login).
+            if (
+                looksLikeLoginUrl(resolvedUrl) &&
+                this.resolvedLoginShapedUrls.size < 5
+            ) {
+                this.resolvedLoginShapedUrls.add(resolvedUrl);
+            }
 
             // Off-origin redirect: the inbound link technically navigated
             // somewhere, but it's not part of *this* site. Verifying the
@@ -1278,7 +1348,45 @@ export class SiteDiscovery extends EventEmitter {
             );
         }
 
-        if (this.failedRequests.length === 0 && this.stats.authBlockersFound === 0) {
+        // Residual auth-wall hint: if the start URL or any resolved URL
+        // looked login-shaped but no detector fired (magic-link only,
+        // OAuth-only, or a slow-hydrating SPA that never rendered the
+        // password input), emit a specific actionable message instead of
+        // the generic "page rendered nothing" fallback.
+        const loginShapedSamples = new Set<string>();
+        if (looksLikeLoginUrl(this.options.startUrl)) {
+            loginShapedSamples.add(this.options.startUrl);
+        }
+        for (const url of this.resolvedLoginShapedUrls) {
+            loginShapedSamples.add(url);
+        }
+        const sawLoginShapedUrl = loginShapedSamples.size > 0;
+
+        if (
+            this.failedRequests.length === 0 &&
+            this.stats.authBlockersFound === 0 &&
+            !this.handlerInvoked
+        ) {
+            // Silent-drain symptom — see `handlerInvoked` field doc.
+            // The crawler ran but never even called the request handler,
+            // which means Crawlee dropped every dispatched request before
+            // it reached us (deduped against a stale "URL already handled"
+            // log carried over from a prior session). The unique-queue-name
+            // fix in `start()` should prevent this; if you're seeing it,
+            // restart the Raiken server to clear in-process Crawlee state.
+            parts.push(
+                `The crawler completed without dispatching any requests — likely a stale Crawlee request-queue cache from a previous run on the same URL. Restart \`raiken start\` to clear the in-process cache, or report this if it persists across restarts.`,
+            );
+        } else if (
+            this.failedRequests.length === 0 &&
+            this.stats.authBlockersFound === 0 &&
+            sawLoginShapedUrl
+        ) {
+            const sample = Array.from(loginShapedSamples)[0];
+            parts.push(
+                `The crawl resolved to a login-shaped URL (${sample}) but no detector fired — this often means a magic-link or OAuth-only login flow that hides the standard \`<input type="password">\` field. Run \`raiken auth --url ${this.options.startUrl}\` to log in interactively, or pass \`--skip-auth\` to skip protected routes.`,
+            );
+        } else if (this.failedRequests.length === 0 && this.stats.authBlockersFound === 0) {
             parts.push(
                 "Either the URL didn't return HTML, the page rendered nothing the crawler could index, or the site detected the headless browser. Try running `raiken auth --url <startUrl>` first to confirm the page is reachable, or test the URL manually.",
             );
@@ -1442,6 +1550,23 @@ export class SiteDiscovery extends EventEmitter {
                     timestamp: Date.now(),
                 });
             }
+        }
+        // Drop the per-instance queue so its cache entry is freed and a
+        // future `RequestQueue.open(<sameName>)` won't return our stale
+        // "URLs already handled" log. Belt-and-braces with the unique
+        // queue name — the name alone prevents collisions across runs,
+        // but the drop releases memory once the run is done.
+        if (this.requestQueue) {
+            try {
+                await this.requestQueue.drop();
+            } catch {
+                // Best-effort: dropping a queue that was never fully
+                // initialized (e.g. SiteDiscovery threw before
+                // RequestQueue.open completed) raises an unrelated
+                // error inside Crawlee. Ignored — the unique queue
+                // name already guarantees the next run is clean.
+            }
+            this.requestQueue = null;
         }
         this.db.close();
     }

@@ -15,6 +15,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { looksLikeLoginUrl } from "@raiken/core";
+import { resolveAuthStorageStateDestination } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
 
@@ -53,15 +55,20 @@ const POLL_INTERVAL_MS = 1500;
 // Number of consecutive identical polls (after a change is detected) we wait
 // for before saving — this avoids snapshotting in the middle of a redirect.
 const STABILITY_POLLS = 2;
-const LOGIN_PATH_RE = /(login|signin|sign-in|sign_in|log-in|log_in|auth|sso|account|oauth)/i;
 
 export async function authCommand(options: AuthOptions): Promise<void> {
     const projectPath = process.cwd();
-    const raikenDir = path.join(projectPath, ".raiken");
-    const authStatePath = path.join(raikenDir, "auth-state.json");
+    // Honour `auth.storageStatePath` from raiken.config.json — pre-fix this
+    // hardcoded `.raiken/auth-state.json` and silently ignored the configured
+    // path, which meant `raiken discover` would load auth state from the
+    // configured path while `raiken auth` wrote to the legacy default. The
+    // result was that any project with a custom `storageStatePath` could
+    // never refresh its auth state via the CLI.
+    const authStatePath = resolveAuthStorageStateDestination(projectPath);
+    const authStateDir = path.dirname(authStatePath);
 
-    if (!fs.existsSync(raikenDir)) {
-        fs.mkdirSync(raikenDir, { recursive: true });
+    if (!fs.existsSync(authStateDir)) {
+        fs.mkdirSync(authStateDir, { recursive: true });
     }
 
     // Headless import paths: skip launching a browser entirely. Useful for CI,
@@ -137,7 +144,12 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     let savedReason: SavedReason = "auto" as SavedReason;
 
     // Manual override: pressing Enter resolves the watcher immediately.
-    const enterPromise = waitForEnterKey().then(() => {
+    // We hold onto `enterWatcher.cancel` so we can release the readline
+    // (and unref stdin) when the auto-detector or browser-closed handler
+    // wins the race — otherwise the CLI hangs after success because
+    // readline keeps stdin referenced.
+    const enterWatcher = waitForEnterKey();
+    const enterPromise = enterWatcher.promise.then(() => {
         savedReason = "manual";
     });
 
@@ -193,6 +205,10 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     await Promise.race([autoDetectPromise, enterPromise, browserClosedPromise]);
     aborted = true;
     watchSpinner.stop();
+    // Release the readline / stdin reference. Idempotent — safe even if
+    // the user pressed Enter (manual save), in which case the readline is
+    // already closed and this is a no-op.
+    enterWatcher.cancel();
 
     // Snapshot whatever state is currently in the context (works even if the
     // browser is closing — we just may get an empty state in that case).
@@ -215,27 +231,13 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 
     fs.writeFileSync(authStatePath, JSON.stringify(storageState, null, 2));
 
-    // Mark any outstanding blockers resolved so the dashboard's auto-resume
-    // logic kicks in on the next poll.
-    let resolvedBlockers = 0;
-    try {
-        const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
-        const db = new CodeGraphDB(projectPath);
-        try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
-            const blockers = siteDb.getUnresolvedBlockers();
-            for (const blocker of blockers) {
-                if (blocker.id) {
-                    siteDb.markBlockerResolved(blocker.id, authStatePath);
-                    resolvedBlockers += 1;
-                }
-            }
-        } finally {
-            db.close();
-        }
-    } catch {
-        // Non-fatal — the saved storage state is the important artifact.
-    }
+    // Mark outstanding *auth* blockers resolved so the dashboard's auto-
+    // resume logic kicks in on the next poll. Captcha / 5xx / manual-pause
+    // blockers are deliberately left alone — saved auth state doesn't
+    // unblock them, and pre-fix this loop falsely cleared them with
+    // `resolvedVia: "auth_command"`, causing the dashboard to auto-resume
+    // straight back into the same captcha and confusing the timeline.
+    const resolvedBlockers = await markAuthBlockersResolved(projectPath, authStatePath);
 
     const cookieCount = storageState.cookies.length;
     const originCount = storageState.origins.length;
@@ -264,9 +266,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     // actually completed before the browser closed.
     if (cookieCount === 0 && originCount === 0) {
         console.log(
-            chalk.yellow(
-                "⚠ Saved state is empty — no cookies or storage entries were captured.",
-            ),
+            chalk.yellow("⚠ Saved state is empty — no cookies or storage entries were captured."),
         );
         console.log(chalk.dim("   Re-run `raiken auth` and complete the login before exiting.\n"));
     }
@@ -318,9 +318,7 @@ function detectLogin(
         .flatMap(originEntries)
         .some((entry) => !baseline.originKeys.has(entry));
 
-    const initialIsLogin =
-        baseline.initialUrl === "about:blank" ||
-        looksLikeLoginUrl(baseline.initialUrl);
+    const initialIsLogin = isLoginOrPreNavigation(baseline.initialUrl);
 
     // Best signal: a new cookie or storage entry shows up. URL change alone is
     // a weaker signal (could be intra-login redirects), so we require a
@@ -329,7 +327,7 @@ function detectLogin(
         return true;
     }
 
-    if (initialIsLogin && currentUrl && !looksLikeLoginUrl(currentUrl)) {
+    if (initialIsLogin && currentUrl && !isLoginOrPreNavigation(currentUrl)) {
         // Redirected away from the login page entirely — treat as logged in.
         return true;
     }
@@ -341,14 +339,8 @@ function snapshotKey(
     state: Awaited<ReturnType<import("playwright").BrowserContext["storageState"]>>,
     currentUrl: string,
 ): string {
-    const cookies = state.cookies
-        .map(cookieKey)
-        .sort()
-        .join("|");
-    const origins = state.origins
-        .flatMap(originEntries)
-        .sort()
-        .join("|");
+    const cookies = state.cookies.map(cookieKey).sort().join("|");
+    const origins = state.origins.flatMap(originEntries).sort().join("|");
     return `${currentUrl}::${cookies}::${origins}`;
 }
 
@@ -356,21 +348,19 @@ function cookieKey(c: { name: string; domain: string; path: string }): string {
     return `${c.domain}\u0000${c.path}\u0000${c.name}`;
 }
 
-function originEntries(o: {
-    origin: string;
-    localStorage?: Array<{ name: string }>;
-}): string[] {
+function originEntries(o: { origin: string; localStorage?: Array<{ name: string }> }): string[] {
     return (o.localStorage ?? []).map((item) => `${o.origin}\u0000${item.name}`);
 }
 
-function looksLikeLoginUrl(url: string): boolean {
+/**
+ * Treat the empty/about:blank pre-navigation state as "looks like login"
+ * so the watcher waits for *any* meaningful navigation before considering
+ * the session changed. The shared {@link looksLikeLoginUrl} predicate
+ * (`@raiken/core`) handles every real URL.
+ */
+function isLoginOrPreNavigation(url: string): boolean {
     if (!url || url === "about:blank") return true;
-    try {
-        const parsed = new URL(url);
-        return LOGIN_PATH_RE.test(parsed.pathname) || LOGIN_PATH_RE.test(parsed.search);
-    } catch {
-        return false;
-    }
+    return looksLikeLoginUrl(url);
 }
 
 function safePageUrl(page: import("playwright").Page): string {
@@ -385,30 +375,65 @@ function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function waitForEnterKey(): Promise<void> {
-    return new Promise((resolve) => {
-        const rl = readline.createInterface({
+/**
+ * Watcher that resolves when the user presses Enter, with an explicit
+ * `cancel()` to release the underlying readline interface when another
+ * race winner (auto-detect or browser-closed) fires first.
+ *
+ * The pre-fix version created a readline interface in a fire-and-forget
+ * Promise. If the auto-detector or browser-closed handler resolved
+ * `Promise.race` first, the readline kept stdin in line-input mode
+ * forever — the CLI process would print "✅ Login detected" and hang
+ * because Node never exits while stdin is referenced. Users hit this
+ * every successful run and either Ctrl-C'd or assumed the command was
+ * still working.
+ *
+ * Returning an object with a `cancel` makes the cleanup explicit at the
+ * call site (next to the spinner stop) instead of relying on listener
+ * tear-down side effects.
+ */
+function waitForEnterKey(): { promise: Promise<void>; cancel: () => void } {
+    let rl: readline.Interface | null = null;
+    const promise = new Promise<void>((resolve) => {
+        rl = readline.createInterface({
             input: process.stdin,
             output: process.stdout,
         });
-        rl.once("line", () => {
-            rl.close();
+        const finish = () => {
+            try {
+                rl?.close();
+            } catch {
+                // already closed
+            }
+            // Unref stdin so an open readline-less stream doesn't pin the
+            // event loop on macOS/Linux when the CLI exits.
+            try {
+                process.stdin.unref?.();
+            } catch {
+                // unref isn't supported on every stream type; best effort.
+            }
             resolve();
-        });
-        // Make sure the readline doesn't keep the process alive on its own.
-        rl.on("close", () => resolve());
+        };
+        rl.once("line", finish);
+        rl.once("close", finish);
     });
+    return {
+        promise,
+        cancel: () => {
+            try {
+                rl?.close();
+            } catch {
+                // already closed
+            }
+        },
+    };
 }
 
 // ---------------------------------------------------------------------------
 // Headless import paths (no browser)
 // ---------------------------------------------------------------------------
 
-async function importFromStateFile(
-    src: string,
-    dest: string,
-    projectPath: string,
-): Promise<void> {
+async function importFromStateFile(src: string, dest: string, projectPath: string): Promise<void> {
     const resolved = path.isAbsolute(src) ? src : path.resolve(projectPath, src);
     if (!fs.existsSync(resolved)) {
         console.error(chalk.red(`\n❌ State file not found: ${resolved}`));
@@ -419,9 +444,7 @@ async function importFromStateFile(
         const raw = fs.readFileSync(resolved, "utf-8");
         parsed = JSON.parse(raw) as PlaywrightStorageStateShape;
     } catch (err) {
-        console.error(
-            chalk.red(`\n❌ Could not parse ${resolved}: ${(err as Error).message}`),
-        );
+        console.error(chalk.red(`\n❌ Could not parse ${resolved}: ${(err as Error).message}`));
         process.exit(1);
     }
     if (!Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
@@ -434,7 +457,7 @@ async function importFromStateFile(
     }
 
     fs.writeFileSync(dest, JSON.stringify(parsed, null, 2));
-    await markBlockersResolved(projectPath, dest);
+    await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✅ Imported storage state"));
     console.log(chalk.dim(`   From: ${resolved}`));
@@ -456,7 +479,10 @@ async function importFromFlags(
         );
         process.exit(1);
     }
-    const domain = options.domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "").trim();
+    const domain = options.domain
+        .replace(/^https?:\/\//, "")
+        .replace(/\/.*$/, "")
+        .trim();
     if (!domain) {
         console.error(chalk.red("\n❌ --domain is empty."));
         process.exit(1);
@@ -512,7 +538,7 @@ async function importFromFlags(
     };
 
     fs.writeFileSync(dest, JSON.stringify(state, null, 2));
-    await markBlockersResolved(projectPath, dest);
+    await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✅ Imported auth state"));
     console.log(chalk.dim(`   File:           ${dest}`));
@@ -521,22 +547,44 @@ async function importFromFlags(
     console.log(chalk.dim(`   Storage origins: ${state.origins.length}\n`));
 }
 
-async function markBlockersResolved(projectPath: string, statePath: string): Promise<void> {
+/**
+ * Mark every unresolved `auth_required` blocker as `provide_state` against
+ * the freshly-written storage state. Returns the number of blockers
+ * touched so the caller can show a "N blockers cleared" hint.
+ *
+ * Crucially scoped to `auth_required` only:
+ *  - A captcha pause isn't unblocked by saved cookies; the user has to
+ *    solve the challenge in a browser.
+ *  - A 5xx error_page pause isn't unblocked by auth state; the server
+ *    is broken.
+ *  - A manual user pause is — by definition — the user driving the
+ *    crawl. Auto-resolving it would steal control from them.
+ *
+ * Pre-fix this function (and its inline twin in `authCommand`) looped
+ * over EVERY unresolved blocker, leaving the timeline showing
+ * "Resolved: provide_state via auth_command" on rows it had no business
+ * touching, and triggering false-positive auto-resume cycles.
+ */
+async function markAuthBlockersResolved(projectPath: string, statePath: string): Promise<number> {
     try {
         const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
         const db = new CodeGraphDB(projectPath);
         try {
             const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
             const blockers = siteDb.getUnresolvedBlockers();
+            let touched = 0;
             for (const blocker of blockers) {
-                if (blocker.id) {
+                if (blocker.id && blocker.category === "auth_required") {
                     siteDb.markBlockerResolved(blocker.id, statePath);
+                    touched += 1;
                 }
             }
+            return touched;
         } finally {
             db.close();
         }
     } catch {
         // Non-fatal — the saved storage state is the important artifact.
+        return 0;
     }
 }

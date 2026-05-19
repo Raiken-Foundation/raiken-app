@@ -2,17 +2,36 @@ import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
 import type { TestRunResult } from "../../../testing/runner";
 
+const MAX_BASENAME_LENGTH = 40;
+
+function sanitizeBaseName(input: string): string {
+    const slug = input
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+    if (slug.length <= MAX_BASENAME_LENGTH) return slug;
+    const sliced = slug.slice(0, MAX_BASENAME_LENGTH);
+    const lastBoundary = sliced.lastIndexOf("-");
+    const trimmed = lastBoundary > 0 ? sliced.slice(0, lastBoundary) : sliced;
+    return trimmed.replace(/-+$/, "");
+}
+
+function deriveFileNameFromTestCode(code: string): string | null {
+    const describeMatch = code.match(/test\.describe\(\s*['"`](.+?)['"`]/);
+    const titleMatch = describeMatch ?? code.match(/test\(\s*['"`](.+?)['"`]/);
+    if (!titleMatch) return null;
+    const base = sanitizeBaseName(titleMatch[1]);
+    return base ? `${base}.spec.ts` : null;
+}
+
 export const createHitlSaveNode =
     ({ callTool }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
         if (!state.testDraft) return {};
         const testDirectory = state.testDirectory || "e2e";
-        const baseName = state.userPrompt
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/(^-|-$)/g, "")
-            .slice(0, 40);
-        const fileName = `${baseName || "raiken-test"}.spec.ts`;
+        const llmDerivedName = deriveFileNameFromTestCode(state.testDraft);
+        const baseName = sanitizeBaseName(state.userPrompt);
+        const fileName = llmDerivedName ?? `${baseName || "raiken-test"}.spec.ts`;
         const filePath = `${testDirectory}/${fileName}`;
         const saveResult = await callTool("saveFile", {
             filePath,
@@ -56,19 +75,19 @@ export const createHitlRunNode =
 
         if (!runResult.success) {
             return {
-                testRunResult: [{
-                    testFile: state.savedTestPath,
-                    testName: "unknown",
-                    status: "error" as const,
-                    duration: 0,
-                    error: { message: runResult.message || "Test run failed" },
-                }] satisfies TestRunResult[],
+                testRunResult: [
+                    {
+                        testFile: state.savedTestPath,
+                        testName: "unknown",
+                        status: "error" as const,
+                        duration: 0,
+                        error: { message: runResult.message || "Test run failed" },
+                    },
+                ] satisfies TestRunResult[],
             };
         }
 
-        const results = Array.isArray(runResult.data)
-            ? (runResult.data as TestRunResult[])
-            : null;
+        const results = Array.isArray(runResult.data) ? (runResult.data as TestRunResult[]) : null;
         if (results) {
             return { testRunResult: results };
         }

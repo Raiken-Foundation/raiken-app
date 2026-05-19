@@ -21,6 +21,7 @@ import {
     playwrightConfigExists,
     queryTrace,
     readApiKeyFromEnv,
+    readPlaywrightBaseURL,
     resolveAIConfig,
     runCi,
     runCover,
@@ -34,7 +35,11 @@ import {
 } from "@raiken/core";
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "./config";
+import {
+    loadDiscoveryConfig,
+    resolveAuthStorageStateDestination,
+    resolveAuthStorageStatePath,
+} from "./config";
 
 async function findPlaywrightConfigPath(projectPath: string): Promise<string | null> {
     const candidates = [
@@ -453,13 +458,13 @@ function attachDiscoveryRuntimeListeners(projectPath: string, discovery: SiteDis
         // Severity "log" means "we recorded it but kept going"; don't flip
         // phase or requiresAuth in that case — just timeline it.
         if (severity !== "log") {
-        patchDiscoveryState(projectPath, {
-            phase: "paused",
-            blockedAtUrl: blocker?.url ?? state.currentUrl,
+            patchDiscoveryState(projectPath, {
+                phase: "paused",
+                blockedAtUrl: blocker?.url ?? state.currentUrl,
                 requiresAuth: isAuth,
-            authBlockersFound: state.authBlockersFound + 1,
-            currentUrl: blocker?.url ?? state.currentUrl,
-        });
+                authBlockersFound: state.authBlockersFound + 1,
+                currentUrl: blocker?.url ?? state.currentUrl,
+            });
         } else {
             patchDiscoveryState(projectPath, {
                 authBlockersFound: state.authBlockersFound + 1,
@@ -968,6 +973,11 @@ export const appRouter = t.router({
                 lastScan: new Date(stats.last_scan).toISOString(),
             };
         }),
+
+    getFileChangeBump: t.procedure.query(({ ctx }) => {
+        const projectCtx = ProjectContext.getInstance(ctx.projectPath);
+        return { bump: projectCtx.getFileChangeBump() };
+    }),
 
     getGraphFiles: t.procedure
         .input(
@@ -1719,7 +1729,17 @@ export const appRouter = t.router({
         return { exists };
     }),
 
-    // Interpret test results using AI
+    // Interpret test results using AI.
+    //
+    // Schema includes everything the dashboard already has on screen for
+    // a failing run — `attachments` per result, the raw `rawOutput` from
+    // Playwright, and the actual `testFilePath` of the file that ran.
+    // Pre-fix the dashboard was sending only `testResults` (without
+    // attachments) and `testCode` (taken from whichever editor tab was
+    // active, not the file that actually ran), so the model invented
+    // explanations that diverged from the on-disk artifacts. See
+    // `libs/core/src/testing/interpreter.ts` for the prompt + budget
+    // rationale.
     interpretTestResults: t.procedure
         .input(
             z.object({
@@ -1742,9 +1762,31 @@ export const appRouter = t.router({
                                     .optional(),
                             })
                             .optional(),
+                        attachments: z
+                            .array(
+                                z.object({
+                                    name: z.string(),
+                                    contentType: z.string().optional(),
+                                    path: z.string().optional(),
+                                }),
+                            )
+                            .optional(),
                     }),
                 ),
                 testCode: z.string(),
+                /**
+                 * Path of the file whose results are being interpreted. The
+                 * model uses this to flag context-mismatch when the supplied
+                 * code doesn't contain the locator that Playwright is waiting
+                 * for in the call log.
+                 */
+                testFilePath: z.string().optional(),
+                /**
+                 * Full Playwright stdout/stderr for the run. Truncated tail-
+                 * first inside the prompt builder so the most-recent (and most
+                 * actionable) lines survive.
+                 */
+                rawOutput: z.string().optional(),
                 sourceCode: z.string().optional(),
                 domContext: z
                     .object({
@@ -1777,20 +1819,70 @@ export const appRouter = t.router({
         .mutation(async ({ input, ctx }) => {
             const apiKey = process.env["OPENROUTER_API_KEY"];
             if (!apiKey) {
-                return { interpretation: "Error: OPENROUTER_API_KEY not configured.", error: true };
+                return {
+                    interpretation: "Error: OPENROUTER_API_KEY not configured.",
+                    error: true,
+                    // Included so the response shape is uniform across all
+                    // branches — keeps the dashboard's `data.testCodeSource`
+                    // access type-safe without an extra narrowing.
+                    testCodeSource: null as
+                        | "disk"
+                        | "client-snapshot"
+                        | "client-snapshot-fallback"
+                        | null,
+                };
+            }
+
+            // Prefer the file on disk over whatever the client snapshotted.
+            // Rationale: Playwright reads test files from disk at run time,
+            // so the on-disk version is what *actually produced* the failing
+            // results. The client snapshot is only used as a fallback when
+            // (a) no path was supplied, (b) the path is a scratch buffer
+            // (no disk file), (c) the path resolves outside the project
+            // directory (path-traversal guard), or (d) the read fails for
+            // any reason.
+            let testCode = input.testCode;
+            let testCodeSource: "disk" | "client-snapshot" | "client-snapshot-fallback" =
+                "client-snapshot";
+            const rawPath = input.testFilePath;
+            if (rawPath && !rawPath.startsWith("scratch:")) {
+                const projectRoot = path.resolve(ctx.projectPath);
+                const candidate = path.isAbsolute(rawPath)
+                    ? path.resolve(rawPath)
+                    : path.resolve(ctx.projectPath, rawPath);
+                // Path-traversal guard. The mutation accepts an arbitrary
+                // string from the dashboard; without this an attacker (or a
+                // bug in the client) could trick the server into reading
+                // `/etc/passwd`. Constrain to files under projectRoot.
+                const insideProject =
+                    candidate === projectRoot || candidate.startsWith(`${projectRoot}${path.sep}`);
+                if (insideProject) {
+                    try {
+                        testCode = await fs.readFile(candidate, "utf-8");
+                        testCodeSource = "disk";
+                    } catch {
+                        // ENOENT / EACCES / etc. Keep client snapshot, but
+                        // flag in the response so the dashboard can warn.
+                        testCodeSource = "client-snapshot-fallback";
+                    }
+                } else {
+                    testCodeSource = "client-snapshot-fallback";
+                }
             }
 
             try {
                 const context = {
                     testResults: input.testResults,
-                    testCode: input.testCode,
+                    testCode,
+                    testFilePath: input.testFilePath,
+                    rawOutput: input.rawOutput,
                     sourceCode: input.sourceCode,
                     domContext: input.domContext as any, // eslint-disable-line @typescript-eslint/no-explicit-any
                     projectPath: ctx.projectPath,
                 };
 
                 const interpretation = await getQuickInterpretation(context, { apiKey });
-                return { interpretation, error: false };
+                return { interpretation, error: false, testCodeSource };
             } catch (error) {
                 console.error("Interpretation error:", error);
                 const raw = error instanceof Error ? error.message : String(error);
@@ -1799,7 +1891,7 @@ export const appRouter = t.router({
                     interpretation =
                         "Insufficient OpenRouter credits for AI analysis. Please add credits at https://openrouter.ai/settings/credits and try again.";
                 }
-                return { interpretation, error: true };
+                return { interpretation, error: true, testCodeSource };
             }
         }),
 
@@ -2092,6 +2184,39 @@ export const appRouter = t.router({
                 ...hydrated,
                 isRunningInProcess: discoveryJobStore.has(projectPath),
             };
+        }),
+
+    /**
+     * Smart defaults the Discovery form should pre-fill from the project's
+     * own configuration — currently just `use.baseURL` from
+     * `playwright.config.{ts,js,mjs,cjs}`.
+     *
+     * Why this exists: Issue 5. The dashboard previously hardcoded the
+     * placeholder to `http://localhost:3000`, which forced every user
+     * whose dev server runs on a different port (Next.js stable on
+     * `:3000`, Vite on `:5173`, this fixture on `:5100`, …) to retype
+     * the URL the rest of Raiken (test generation, doctor, port
+     * detector) had already detected automatically.
+     *
+     * Returns `{ baseURL: null }` when no static literal could be
+     * extracted (no config, dynamic value, etc.) so the dashboard can
+     * fall back to its old generic placeholder without surprising the
+     * user with a guess.
+     */
+    getDiscoveryDefaults: t.procedure
+        .input(
+            z.object({
+                path: z.string().optional(),
+            }),
+        )
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
+            try {
+                const baseURL = await readPlaywrightBaseURL(projectPath);
+                return { baseURL };
+            } catch {
+                return { baseURL: null };
+            }
         }),
 
     getDiscoveryTimeline: t.procedure
@@ -2573,6 +2698,12 @@ export const appRouter = t.router({
                 blockerId,
                 category,
                 timeoutMs: input.timeoutMs,
+                // Honour `auth.storageStatePath` from raiken.config.json — the
+                // handoff captures cookies that the next crawl needs to read
+                // back via `resolveAuthStorageStatePath`. Pre-fix this defaulted
+                // to `.raiken/auth-state.json` regardless of config, leaving
+                // configured projects with stale auth state forever.
+                storageStatePath: resolveAuthStorageStateDestination(projectPath),
                 onProgress: (snapshot) => {
                     if (snapshot.reason) {
                         pushDiscoveryEvent(projectPath, {

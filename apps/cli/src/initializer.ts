@@ -20,7 +20,10 @@ interface UserPreferences {
     generateExampleTest: boolean;
 }
 
-async function promptUserPreferences(projectInfo: ProjectInfo): Promise<UserPreferences> {
+async function promptUserPreferences(
+    projectInfo: ProjectInfo,
+    nonInteractive = false,
+): Promise<UserPreferences> {
     console.log(chalk.cyan("\n🔍 Detected project information:"));
     console.log(chalk.gray(`   Project: ${projectInfo.name}`));
     console.log(chalk.gray(`   Type: ${projectInfo.type}`));
@@ -31,6 +34,23 @@ async function promptUserPreferences(projectInfo: ProjectInfo): Promise<UserPref
     const needsProjectType = projectInfo.type === "generic";
     const needsTestFramework = projectInfo.testFramework === "none";
     const everythingDetected = !needsProjectType && !needsTestFramework;
+
+    if (nonInteractive) {
+        const resolvedType: ProjectType = projectInfo.type;
+        const resolvedFramework: Exclude<TestFramework, "none"> =
+            projectInfo.testFramework === "none" ? "playwright" : projectInfo.testFramework;
+        console.log(chalk.green("\n✓ --yes: accepting auto-detected defaults"));
+        console.log(
+            chalk.gray(`   ${resolvedType} + ${resolvedFramework} → ${projectInfo.testDir}/\n`),
+        );
+        return {
+            projectType: resolvedType,
+            testFramework: resolvedFramework,
+            testDirectory: projectInfo.testDir,
+            installPlaywright: resolvedFramework === "playwright" && !projectInfo.hasPlaywright,
+            generateExampleTest: true,
+        };
+    }
 
     // If everything is detected, ask if user wants to use auto-detected config
     if (everythingDetected) {
@@ -205,7 +225,21 @@ async function promptUserPreferences(projectInfo: ProjectInfo): Promise<UserPref
 // Main Initialization Function
 // ============================================================================
 
-export async function initializeProject(projectPath: string, force = false): Promise<void> {
+export interface InitializeProjectOptions {
+    force?: boolean;
+    nonInteractive?: boolean;
+}
+
+export async function initializeProject(
+    projectPath: string,
+    options: InitializeProjectOptions | boolean = {},
+): Promise<void> {
+    // Back-compat: previous signature was `initializeProject(path, force)`.
+    const opts: InitializeProjectOptions =
+        typeof options === "boolean" ? { force: options } : options;
+    const force = opts.force ?? false;
+    const nonInteractive = opts.nonInteractive ?? false;
+
     // Check for package.json first
     const pkgPath = path.join(projectPath, "package.json");
     try {
@@ -221,7 +255,7 @@ export async function initializeProject(projectPath: string, force = false): Pro
     const projectInfo = await detectProject(projectPath);
 
     // Step 2: Prompt user for preferences
-    const preferences = await promptUserPreferences(projectInfo);
+    const preferences = await promptUserPreferences(projectInfo, nonInteractive);
 
     // Merge preferences with project info
     const finalProjectInfo: ProjectInfo = {

@@ -47,7 +47,9 @@ function printBanner(version: string): void {
     console.log("");
     for (const line of lines) console.log("  " + line);
     console.log("");
-    console.log(`  ${chalk.bold("raiken")} ${dim(`v${version}`)}  ${dim("·")}  ${dim("AI QA agent for developers")}`);
+    console.log(
+        `  ${chalk.bold("raiken")} ${dim(`v${version}`)}  ${dim("·")}  ${dim("AI QA agent for developers")}`,
+    );
     console.log("");
 }
 
@@ -69,7 +71,9 @@ function checkApiKey() {
         console.warn(
             chalk.yellow(`⚠️  No ${provider.label} API key found. AI features will not work.`),
         );
-        console.log(chalk.dim(`   Set ${envHint} in .env, or configure in Settings → AI Provider.`));
+        console.log(
+            chalk.dim(`   Set ${envHint} in .env, or configure in Settings → AI Provider.`),
+        );
         if (provider.apiKeyUrl) {
             console.log(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
         }
@@ -123,10 +127,14 @@ program
     .command("init")
     .description("Initialize Raiken in the current project")
     .option("-f, --force", "Overwrite existing configuration files", false)
+    .option("-y, --yes", "Accept auto-detected defaults for every prompt (non-interactive)", false)
     .action(async (options) => {
         try {
             const { initializeProject } = await import("./initializer");
-            await initializeProject(process.cwd(), options.force);
+            await initializeProject(process.cwd(), {
+                force: options.force,
+                nonInteractive: options.yes,
+            });
         } catch (error) {
             console.error(chalk.red("\n ❌ Failed to initialize project:"), error);
             process.exit(1);
@@ -160,7 +168,7 @@ program
     .option("--url <url>", "URL to navigate to for authentication")
     .option(
         "--cookie <pairs>",
-        "Skip the browser and import cookies directly (e.g. \"sid=abc; csrf=xyz\"). Requires --domain.",
+        'Skip the browser and import cookies directly (e.g. "sid=abc; csrf=xyz"). Requires --domain.',
     )
     .option(
         "--domain <host>",

@@ -974,6 +974,11 @@ export const appRouter = t.router({
             };
         }),
 
+    getFileChangeBump: t.procedure.query(({ ctx }) => {
+        const projectCtx = ProjectContext.getInstance(ctx.projectPath);
+        return { bump: projectCtx.getFileChangeBump() };
+    }),
+
     getGraphFiles: t.procedure
         .input(
             z.object({

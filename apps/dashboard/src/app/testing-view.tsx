@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CodeEditor, type TestFile } from "../components/code-editor";
 import { Header } from "../components/header";
 import { Sidebar } from "../components/sidebar";
@@ -286,6 +286,30 @@ export function TestingView({
 
     // Get tRPC utils for query invalidation
     const utils = trpc.useUtils();
+
+    // Poll the file-watcher bump so externally-created files (e.g. via
+    // `raiken cover`) refresh the Files panel without a manual click.
+    // The bump query is intentionally trivial (single integer); the heavier
+    // getGraphFiles + listTestFiles queries are invalidated only when the
+    // bump actually changes.
+    const lastBumpRef = useRef<number | null>(null);
+    const { data: bumpData } = trpc.getFileChangeBump.useQuery(undefined, {
+        refetchInterval: 1500,
+        refetchIntervalInBackground: false,
+    });
+    useEffect(() => {
+        const bump = bumpData?.bump;
+        if (bump === undefined) return;
+        if (lastBumpRef.current === null) {
+            lastBumpRef.current = bump;
+            return;
+        }
+        if (bump !== lastBumpRef.current) {
+            lastBumpRef.current = bump;
+            utils.getGraphFiles.invalidate();
+            utils.listTestFiles.invalidate();
+        }
+    }, [bumpData?.bump, utils]);
 
     // Fetch project info
     const { data: projectInfo } = trpc.getProjectInfo.useQuery();

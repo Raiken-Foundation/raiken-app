@@ -61,8 +61,7 @@ export function AIProviderPanel({
     // Defer model fetch until either the provider exposes a public catalog
     // or the user has supplied a key (avoid spamming /models with no auth).
     const canFetchModels = Boolean(
-        activeProvider &&
-            (activeProvider.publicCatalog || apiKey || activeProvider.hasKey),
+        activeProvider && (activeProvider.publicCatalog || apiKey || activeProvider.hasKey),
     );
 
     type ListModelsInput = Exclude<
@@ -102,9 +101,7 @@ export function AIProviderPanel({
         if (!search.trim()) return allModels;
         const q = search.trim().toLowerCase();
         return allModels.filter(
-            (m) =>
-                m.id.toLowerCase().includes(q) ||
-                (m.name?.toLowerCase().includes(q) ?? false),
+            (m) => m.id.toLowerCase().includes(q) || (m.name?.toLowerCase().includes(q) ?? false),
         );
     }, [allModels, search]);
 
@@ -150,7 +147,10 @@ export function AIProviderPanel({
                                 <span className="ai-provider-card-head">
                                     <span className="ai-provider-card-name">{p.label}</span>
                                     {p.hasKey && (
-                                        <span className="ai-provider-card-tag" title="API key detected in env">
+                                        <span
+                                            className="ai-provider-card-tag"
+                                            title="API key detected in env"
+                                        >
                                             key set
                                         </span>
                                     )}
@@ -175,7 +175,8 @@ export function AIProviderPanel({
                         Stored locally in <code>raiken.config.json</code>
                         {activeProvider?.envVars[0] && (
                             <>
-                                {" "}or set <code>{activeProvider.envVars[0]}</code> in your{" "}
+                                {" "}
+                                or set <code>{activeProvider.envVars[0]}</code> in your{" "}
                                 <code>.env</code>.
                             </>
                         )}
@@ -214,8 +215,8 @@ export function AIProviderPanel({
                         {isFetchingModels && "Loading models…"}
                         {!isFetchingModels && modelsError && (
                             <>
-                                Couldn't load model list from {activeProvider?.label}: {modelsError}.
-                                You can still type a model ID below.
+                                Couldn't load model list from {activeProvider?.label}: {modelsError}
+                                . You can still type a model ID below.
                             </>
                         )}
                         {!isFetchingModels &&
@@ -261,16 +262,20 @@ export function AIProviderPanel({
                         }}
                         aria-label="Toggle model list"
                     >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            aria-hidden="true"
+                        >
                             <path d="M6 9l6 6 6-6" />
                         </svg>
                     </button>
 
                     {open && (
                         <div className="ai-combobox-pop" role="listbox" id={listboxId}>
-                            {isFetchingModels && (
-                                <div className="ai-combobox-empty">Loading…</div>
-                            )}
+                            {isFetchingModels && <div className="ai-combobox-empty">Loading…</div>}
                             {!isFetchingModels && modelsHaveResults && (
                                 <ul className="ai-combobox-list">
                                     {filteredModels.slice(0, 200).map((m) => (
@@ -282,9 +287,13 @@ export function AIProviderPanel({
                                                 className={`ai-combobox-option ${m.id === model ? "selected" : ""}`}
                                                 onClick={() => selectModel(m.id)}
                                             >
-                                                <span className="ai-combobox-option-id">{m.id}</span>
+                                                <span className="ai-combobox-option-id">
+                                                    {m.id}
+                                                </span>
                                                 {m.name && m.name !== m.id && (
-                                                    <span className="ai-combobox-option-name">{m.name}</span>
+                                                    <span className="ai-combobox-option-name">
+                                                        {m.name}
+                                                    </span>
                                                 )}
                                                 {(m.context || m.description) && (
                                                     <span className="ai-combobox-option-meta">
@@ -323,7 +332,8 @@ export function AIProviderPanel({
                     <label htmlFor={baseUrlId} className="ai-row-label">
                         Base URL
                         <span className="ai-row-hint">
-                            OpenAI-compatible endpoint (used for self-hosted Ollama or custom proxies).
+                            OpenAI-compatible endpoint (used for self-hosted Ollama or custom
+                            proxies).
                         </span>
                     </label>
                     <input

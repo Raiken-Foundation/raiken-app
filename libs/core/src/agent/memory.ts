@@ -65,13 +65,13 @@ export class AgentMemory {
      * Singleton pattern ensures one instance per project.
      */
     static getInstance(projectPath: string): AgentMemory {
-        const existing = this.instances.get(projectPath);
+        const existing = AgentMemory.instances.get(projectPath);
         if (existing) {
             return existing;
         }
 
         const instance = new AgentMemory(projectPath);
-        this.instances.set(projectPath, instance);
+        AgentMemory.instances.set(projectPath, instance);
         return instance;
     }
 
@@ -79,10 +79,10 @@ export class AgentMemory {
      * Clear all instances (for testing)
      */
     static clearInstances(): void {
-        for (const instance of this.instances.values()) {
+        for (const instance of AgentMemory.instances.values()) {
             instance.close();
         }
-        this.instances.clear();
+        AgentMemory.instances.clear();
     }
 
     /**
@@ -91,8 +91,16 @@ export class AgentMemory {
      * storage without forcing the browser layer to depend on AgentMemory.
      */
     asSelectorMemory(): {
-        recordSuccess: (element: string, selector: string, kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other") => void;
-        recordFailure: (element: string, selector: string, kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other") => void;
+        recordSuccess: (
+            element: string,
+            selector: string,
+            kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other",
+        ) => void;
+        recordFailure: (
+            element: string,
+            selector: string,
+            kind: "data-testid" | "role" | "text" | "css" | "xpath" | "other",
+        ) => void;
     } {
         return {
             recordSuccess: (element, selector, kind) => {
@@ -264,19 +272,19 @@ export class AgentMemory {
         missingContext?: string[];
         nextTool?: string | null;
     }): void {
-        if (Object.prototype.hasOwnProperty.call(state, "activeGoal")) {
+        if (Object.hasOwn(state, "activeGoal")) {
             this.setPreference("active_goal", state.activeGoal ?? "");
         }
-        if (Object.prototype.hasOwnProperty.call(state, "targetFeature")) {
+        if (Object.hasOwn(state, "targetFeature")) {
             this.setPreference("target_feature", state.targetFeature ?? "");
         }
-        if (Object.prototype.hasOwnProperty.call(state, "targetUrl")) {
+        if (Object.hasOwn(state, "targetUrl")) {
             this.setPreference("target_url", state.targetUrl ?? "");
         }
-        if (Object.prototype.hasOwnProperty.call(state, "nextTool")) {
+        if (Object.hasOwn(state, "nextTool")) {
             this.setPreference("next_tool", state.nextTool ?? "");
         }
-        if (Object.prototype.hasOwnProperty.call(state, "missingContext")) {
+        if (Object.hasOwn(state, "missingContext")) {
             const value = JSON.stringify(state.missingContext || []);
             this.setPreference("missing_context", value);
         }
@@ -286,10 +294,7 @@ export class AgentMemory {
      * Persist exploration state so it survives across graph invocations
      * (e.g., when the graph pauses for user auth and resumes later).
      */
-    setExplorationState(state: {
-        pagesVisited?: string[];
-        currentUrl?: string | null;
-    }): void {
+    setExplorationState(state: { pagesVisited?: string[]; currentUrl?: string | null }): void {
         if (state.pagesVisited !== undefined) {
             this.setPreference("explore_pages_visited", JSON.stringify(state.pagesVisited));
         }
@@ -357,7 +362,7 @@ export class AgentMemory {
     recordSelectorSuccess(
         elementDescription: string,
         selector: string,
-        selectorType: "data-testid" | "role" | "text" | "css" | "xpath" | "other"
+        selectorType: "data-testid" | "role" | "text" | "css" | "xpath" | "other",
     ): void {
         this.db.recordSelectorSuccess(elementDescription, selector, selectorType);
     }
@@ -406,7 +411,7 @@ export class AgentMemory {
         testName: string,
         sourcePrompt: string,
         generatedCode: string,
-        sourceFiles?: string[]
+        sourceFiles?: string[],
     ): number {
         const id = this.db.recordTestGenerated(testFile, testName, sourcePrompt, generatedCode);
         if (sourceFiles && sourceFiles.length > 0) {
@@ -423,7 +428,7 @@ export class AgentMemory {
         status: "passed" | "failed" | "error" | "timeout",
         executionTimeMs?: number,
         errorMessage?: string,
-        failingSelector?: string
+        failingSelector?: string,
     ): void {
         this.db.recordTestResult(testId, status, executionTimeMs, errorMessage, failingSelector);
     }
@@ -485,7 +490,7 @@ export class AgentMemory {
         this.preferencesCache.clear();
         this.initialized = false;
     }
-    
+
     /**
      * Register process cleanup handlers.
      * Call this once during application startup to ensure proper cleanup.
@@ -494,7 +499,7 @@ export class AgentMemory {
         const cleanup = () => {
             AgentMemory.clearInstances();
         };
-        
+
         // Handle graceful shutdown signals
         process.once("SIGINT", cleanup);
         process.once("SIGTERM", cleanup);

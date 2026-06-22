@@ -1,11 +1,11 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
-import Projects from "./pages/Projects";
-import ProjectDetail from "./pages/ProjectDetail";
-import Tasks from "./pages/Tasks";
-import Settings from "./pages/Settings";
+import Login from "./pages/Login";
 import Members from "./pages/Members";
+import ProjectDetail from "./pages/ProjectDetail";
+import Projects from "./pages/Projects";
+import Settings from "./pages/Settings";
+import Tasks from "./pages/Tasks";
 
 export default function App() {
     return (

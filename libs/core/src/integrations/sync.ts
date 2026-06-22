@@ -12,21 +12,12 @@
  *   5. Return SyncResult
  */
 
-import {
-    getCurrentBranch,
-    getGitRemoteInfo,
-    parseTicketFromBranch,
-} from "./branch-parser";
+import { getCurrentBranch, getGitRemoteInfo, parseTicketFromBranch } from "./branch-parser";
 import { GitHubProvider } from "./github-provider";
 import { JiraProvider } from "./jira-provider";
 import { LinearProvider } from "./linear-provider";
 import { TicketAnalyzer } from "./ticket-analyzer";
-import type {
-    IntegrationConfig,
-    SyncResult,
-    TicketInfo,
-    TicketProvider,
-} from "./types";
+import type { IntegrationConfig, SyncResult, TicketInfo, TicketProvider } from "./types";
 
 interface SyncOptions {
     projectPath: string;
@@ -88,10 +79,7 @@ export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResul
 
         // Fallback: check if current branch has an open PR with linked issues
         if (!ticket && provider.name === "github") {
-            const prTicket = await tryFindPRForBranch(
-                provider as GitHubProvider,
-                branchName,
-            );
+            const prTicket = await tryFindPRForBranch(provider as GitHubProvider, branchName);
             if (prTicket) {
                 ticket = prTicket;
                 source = "pr";
@@ -180,9 +168,7 @@ function createProvider(
     if (providerType === "linear") {
         const linear = new LinearProvider(config?.linear);
         if (!linear.isConfigured()) {
-            console.warn(
-                "Linear integration not configured. Set LINEAR_API_KEY env var.",
-            );
+            console.warn("Linear integration not configured. Set LINEAR_API_KEY env var.");
             return null;
         }
         return linear;

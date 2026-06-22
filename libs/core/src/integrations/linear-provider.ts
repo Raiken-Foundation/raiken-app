@@ -6,12 +6,7 @@
  * Auth: LINEAR_API_KEY env var or config value.
  */
 
-import type {
-    TicketProvider,
-    TicketInfo,
-    ChangedFile,
-    IntegrationConfig,
-} from "./types";
+import type { ChangedFile, IntegrationConfig, TicketInfo, TicketProvider } from "./types";
 
 const GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
 
@@ -83,9 +78,7 @@ export class LinearProvider implements TicketProvider {
     }
 
     async getMyTickets(): Promise<TicketInfo[]> {
-        const teamFilter = this.teamKey
-            ? `, team: { key: { eq: "${this.teamKey}" } }`
-            : "";
+        const teamFilter = this.teamKey ? `, team: { key: { eq: "${this.teamKey}" } }` : "";
 
         const query = `
             query MyIssues {
@@ -148,7 +141,7 @@ export class LinearProvider implements TicketProvider {
         const response = await fetch(GRAPHQL_ENDPOINT, {
             method: "POST",
             headers: {
-                "Authorization": this.apiKey,
+                Authorization: this.apiKey,
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({ query, variables }),
@@ -156,9 +149,7 @@ export class LinearProvider implements TicketProvider {
 
         if (!response.ok) {
             const body = await response.text().catch(() => "");
-            throw new Error(
-                `Linear API error ${response.status}: ${response.statusText}. ${body}`,
-            );
+            throw new Error(`Linear API error ${response.status}: ${response.statusText}. ${body}`);
         }
 
         const json = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };

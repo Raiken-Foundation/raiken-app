@@ -1,3 +1,5 @@
+import { BrowserSession } from "../../../browser/session";
+import { AgentMemory } from "../../memory";
 import type { GraphStateType } from "../state";
 import {
     extractPageTitle,
@@ -6,10 +8,8 @@ import {
     parseSummaryElements,
     shouldClassifyInterruption,
 } from "../utils";
-import type { AgentNodeDeps } from "./types";
-import { AgentMemory } from "../../memory";
-import { BrowserSession } from "../../../browser/session";
 import { classifyInterruption, extractCredentialsWithLLM } from "./classify-interruption";
+import type { AgentNodeDeps } from "./types";
 
 const AUTH_INTERRUPTION_TYPES = new Set(["auth", "otp"]);
 
@@ -21,7 +21,7 @@ const AUTH_INTERRUPTION_TYPES = new Set(["auth", "otp"]);
 async function tryFillWithSelectors(
     callTool: AgentNodeDeps["callTool"],
     selectors: string[],
-    value: string
+    value: string,
 ): Promise<boolean> {
     if (selectors.length === 0) return false;
     const r = await callTool("fillInput", { selector: selectors, value });
@@ -34,7 +34,7 @@ async function tryFillWithSelectors(
  */
 async function tryClickWithSelectors(
     callTool: AgentNodeDeps["callTool"],
-    selectors: string[]
+    selectors: string[],
 ): Promise<boolean> {
     if (selectors.length === 0) return false;
     const r = await callTool("clickElement", { selector: selectors });
@@ -72,13 +72,25 @@ export const createDetectInterruptionNode =
             try {
                 const session = BrowserSession.getInstance(projectPath);
                 hasOverlay = await session.hasBlockingOverlay();
-            } catch { /* browser not active */ }
+            } catch {
+                /* browser not active */
+            }
 
             const signals = getStructuralSignals(elements, pageTitle, hasOverlay);
 
             if (shouldClassifyInterruption(signals)) {
-                const credentials = await extractCredentialsWithLLM(state.userPrompt, state.conversationHistory, model);
-                interruption = await classifyInterruption(pageTitle, elements, signals, credentials, model);
+                const credentials = await extractCredentialsWithLLM(
+                    state.userPrompt,
+                    state.conversationHistory,
+                    model,
+                );
+                interruption = await classifyInterruption(
+                    pageTitle,
+                    elements,
+                    signals,
+                    credentials,
+                    model,
+                );
             }
         }
 
@@ -111,7 +123,7 @@ export const createDetectInterruptionNode =
  */
 async function verifyAuthAndSave(
     callTool: AgentNodeDeps["callTool"],
-    loginUrl: string | null
+    loginUrl: string | null,
 ): Promise<{ verified: boolean; summary: string | null; url: string | null }> {
     for (let attempt = 0; attempt < 3; attempt++) {
         await new Promise((r) => setTimeout(r, 2000));
@@ -139,7 +151,11 @@ export const createResolveInterruptionNode =
     async (state: GraphStateType) => {
         const interruption = state.interruption;
         if (!interruption) return {};
-        const credentials = await extractCredentialsWithLLM(state.userPrompt, state.conversationHistory, model);
+        const credentials = await extractCredentialsWithLLM(
+            state.userPrompt,
+            state.conversationHistory,
+            model,
+        );
 
         if (interruption.type === "consent" && interruption.actionSelector) {
             const click = await callTool("clickElement", { selector: interruption.actionSelector });
@@ -153,19 +169,20 @@ export const createResolveInterruptionNode =
         }
 
         if (interruption.type === "auth") {
-            const identitySelectors = interruption.fieldSelectors?.username || interruption.fieldSelectors?.email || [];
+            const identitySelectors =
+                interruption.fieldSelectors?.username || interruption.fieldSelectors?.email || [];
             const passwordSelectors = interruption.fieldSelectors?.password || [];
             const submitSelectors = interruption.fieldSelectors?.submit || [];
 
-            const needsUsernameOrEmail = !credentials.username && !credentials.email && !credentials.useDefaults;
+            const needsUsernameOrEmail =
+                !credentials.username && !credentials.email && !credentials.useDefaults;
             const needsPassword =
-                passwordSelectors.length > 0 &&
-                !credentials.password &&
-                !credentials.useDefaults;
+                passwordSelectors.length > 0 && !credentials.password && !credentials.useDefaults;
             if (needsUsernameOrEmail || needsPassword) {
                 return {
                     shouldPause: true,
-                    awaitUserMessage: "Authentication required. Please provide credentials to continue.",
+                    awaitUserMessage:
+                        "Authentication required. Please provide credentials to continue.",
                 };
             }
 
@@ -177,14 +194,19 @@ export const createResolveInterruptionNode =
                 if (!r) interactionFailed = true;
             }
             if (!interactionFailed && credentials.password && passwordSelectors.length > 0) {
-                const r = await tryFillWithSelectors(callTool, passwordSelectors, credentials.password);
+                const r = await tryFillWithSelectors(
+                    callTool,
+                    passwordSelectors,
+                    credentials.password,
+                );
                 if (!r) interactionFailed = true;
             }
 
             if (interactionFailed) {
                 return {
                     shouldPause: true,
-                    awaitUserMessage: "Failed to fill login form fields. Please log in manually and continue.",
+                    awaitUserMessage:
+                        "Failed to fill login form fields. Please log in manually and continue.",
                 };
             }
 
@@ -195,7 +217,8 @@ export const createResolveInterruptionNode =
                     if (!fallback.success) {
                         return {
                             shouldPause: true,
-                            awaitUserMessage: "Could not submit login form. Please submit manually and continue.",
+                            awaitUserMessage:
+                                "Could not submit login form. Please submit manually and continue.",
                         };
                     }
                 }
@@ -204,7 +227,8 @@ export const createResolveInterruptionNode =
                 if (!r.success) {
                     return {
                         shouldPause: true,
-                        awaitUserMessage: "Could not submit login form. Please submit manually and continue.",
+                        awaitUserMessage:
+                            "Could not submit login form. Please submit manually and continue.",
                     };
                 }
             }
@@ -213,7 +237,8 @@ export const createResolveInterruptionNode =
             if (!authResult.verified) {
                 return {
                     shouldPause: true,
-                    awaitUserMessage: "Login may have failed (still on login page). Please check and try again.",
+                    awaitUserMessage:
+                        "Login may have failed (still on login page). Please check and try again.",
                 };
             }
             return {};
@@ -223,18 +248,24 @@ export const createResolveInterruptionNode =
             if (!credentials.code) {
                 return {
                     shouldPause: true,
-                    awaitUserMessage: "Verification code required. Please provide the code to continue.",
+                    awaitUserMessage:
+                        "Verification code required. Please provide the code to continue.",
                 };
             }
             const codeSelectors = interruption.fieldSelectors?.code || [];
             const submitSelectors = interruption.fieldSelectors?.submit || [];
 
             if (codeSelectors.length > 0) {
-                const filled = await tryFillWithSelectors(callTool, codeSelectors, credentials.code);
+                const filled = await tryFillWithSelectors(
+                    callTool,
+                    codeSelectors,
+                    credentials.code,
+                );
                 if (!filled) {
                     return {
                         shouldPause: true,
-                        awaitUserMessage: "Failed to fill verification code. Please enter it manually and continue.",
+                        awaitUserMessage:
+                            "Failed to fill verification code. Please enter it manually and continue.",
                     };
                 }
             }
@@ -251,7 +282,8 @@ export const createResolveInterruptionNode =
             if (!authResult.verified) {
                 return {
                     shouldPause: true,
-                    awaitUserMessage: "OTP verification may have failed. Please check and try again.",
+                    awaitUserMessage:
+                        "OTP verification may have failed. Please check and try again.",
                 };
             }
             return {};
@@ -289,7 +321,11 @@ export const createCaptureAfterResolveNode =
             ? (capture.data as { url?: string } | undefined)?.url || null
             : null;
 
-        if (capture.success && state.interruption && AUTH_INTERRUPTION_TYPES.has(state.interruption.type)) {
+        if (
+            capture.success &&
+            state.interruption &&
+            AUTH_INTERRUPTION_TYPES.has(state.interruption.type)
+        ) {
             await callTool("saveAuthState", {});
         }
 

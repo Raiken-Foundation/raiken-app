@@ -1,11 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-    getStructuralSignals,
-    shouldClassifyInterruption,
-    hasAuthFormFields,
     extractPageTitle,
+    getStructuralSignals,
+    hasAuthFormFields,
     parseSummaryElements,
     type SummaryElement,
+    shouldClassifyInterruption,
 } from "../agent/graph/utils";
 
 // Helper to build SummaryElement objects
@@ -44,9 +44,7 @@ describe("Structural Signals & Pre-filter", () => {
         });
 
         it("does NOT mark a rich page as dead-end", () => {
-            const elements = Array.from({ length: 15 }, (_, i) =>
-                el("link", `Link ${i}`)
-            );
+            const elements = Array.from({ length: 15 }, (_, i) => el("link", `Link ${i}`));
             const signals = getStructuralSignals(elements, "Dashboard");
             expect(signals.isDeadEnd).toBe(false);
             expect(signals.elementCount).toBe(15);
@@ -85,7 +83,7 @@ describe("Structural Signals & Pre-filter", () => {
         it("triggers on password field", () => {
             const signals = getStructuralSignals(
                 [el("textbox", "Password", undefined, "password"), el("button", "Login")],
-                "Login"
+                "Login",
             );
             expect(shouldClassifyInterruption(signals)).toBe(true);
         });
@@ -93,31 +91,24 @@ describe("Structural Signals & Pre-filter", () => {
         it("triggers on code/OTP field", () => {
             const signals = getStructuralSignals(
                 [el("textbox", "OTP", undefined, "text"), el("button", "Submit")],
-                "Verify"
+                "Verify",
             );
             expect(shouldClassifyInterruption(signals)).toBe(true);
         });
 
         it("triggers on blocking overlay", () => {
-            const elements = Array.from({ length: 10 }, (_, i) =>
-                el("link", `Nav ${i}`)
-            );
+            const elements = Array.from({ length: 10 }, (_, i) => el("link", `Nav ${i}`));
             const signals = getStructuralSignals(elements, "Dashboard", true);
             expect(shouldClassifyInterruption(signals)).toBe(true);
         });
 
         it("triggers on dead-end page", () => {
-            const signals = getStructuralSignals(
-                [el("button", "Retry")],
-                "Error"
-            );
+            const signals = getStructuralSignals([el("button", "Retry")], "Error");
             expect(shouldClassifyInterruption(signals)).toBe(true);
         });
 
         it("does NOT trigger on a normal rich page", () => {
-            const elements = Array.from({ length: 20 }, (_, i) =>
-                el("link", `Section ${i}`)
-            );
+            const elements = Array.from({ length: 20 }, (_, i) => el("link", `Section ${i}`));
             const signals = getStructuralSignals(elements, "Dashboard");
             expect(shouldClassifyInterruption(signals)).toBe(false);
         });
@@ -151,11 +142,7 @@ describe("Structural Signals & Pre-filter", () => {
         });
 
         it("returns false when no auth-related fields", () => {
-            const elements = [
-                el("textbox", "Search"),
-                el("button", "Go"),
-                el("link", "Home"),
-            ];
+            const elements = [el("textbox", "Search"), el("button", "Go"), el("link", "Home")];
             expect(hasAuthFormFields(elements)).toBe(false);
         });
 
@@ -171,7 +158,8 @@ describe("Structural Signals & Pre-filter", () => {
 
     describe("extractPageTitle", () => {
         it("extracts title from summary", () => {
-            const summary = "Page Title: My App Dashboard\nURL: https://example.com\nINTERACTIVE ELEMENTS:";
+            const summary =
+                "Page Title: My App Dashboard\nURL: https://example.com\nINTERACTIVE ELEMENTS:";
             expect(extractPageTitle(summary)).toBe("My App Dashboard");
         });
 
@@ -344,9 +332,7 @@ describe("Real-world Site Scenarios", () => {
     });
 
     describe("Cookie consent overlay on a rich page", () => {
-        const elements = Array.from({ length: 25 }, (_, i) =>
-            el("link", `Navigation ${i}`)
-        );
+        const elements = Array.from({ length: 25 }, (_, i) => el("link", `Navigation ${i}`));
         elements.push(el("button", "Accept All Cookies"));
         elements.push(el("button", "Manage Preferences"));
 
@@ -439,7 +425,12 @@ describe("Real-world Site Scenarios", () => {
 
     describe("Login with placeholder-only labels", () => {
         const elements = [
-            el("textbox", "Enter your phone or email", 'getByPlaceholder(\'Enter your phone or email\')', "text"),
+            el(
+                "textbox",
+                "Enter your phone or email",
+                "getByPlaceholder('Enter your phone or email')",
+                "text",
+            ),
             el("textbox", "", 'input[name="passwd"]', "password"),
             el("button", "Next"),
         ];
@@ -453,9 +444,7 @@ describe("Real-world Site Scenarios", () => {
     });
 
     describe("CAPTCHA page", () => {
-        const elements = [
-            el("button", "I'm not a robot"),
-        ];
+        const elements = [el("button", "I'm not a robot")];
         const title = "Please verify you are human";
 
         it("detects as dead-end (triggers pre-filter)", () => {
@@ -466,10 +455,7 @@ describe("Real-world Site Scenarios", () => {
     });
 
     describe("Paywall page", () => {
-        const elements = [
-            el("button", "Subscribe Now"),
-            el("link", "Learn More"),
-        ];
+        const elements = [el("button", "Subscribe Now"), el("link", "Learn More")];
         const title = "Subscribe to continue reading - News Site";
 
         it("detects as dead-end", () => {
@@ -498,20 +484,23 @@ describe("Real-world Site Scenarios", () => {
                     role: "textbox",
                     name: "Password",
                     type: "password",
-                    selector: "input[type=\"password\"]",
+                    selector: 'input[type="password"]',
+                    selectors: ['input[name="password"]', "#password", 'input[type="password"]'],
+                },
+                {
+                    role: "button",
+                    name: "Sign in",
                     selectors: [
-                        'input[name="password"]',
-                        "#password",
-                        "input[type=\"password\"]",
+                        "getByRole('button', { name: 'Sign in' })",
+                        'button[type="submit"]',
                     ],
                 },
-                { role: "button", name: "Sign in", selectors: ["getByRole('button', { name: 'Sign in' })", 'button[type="submit"]'] },
             ];
             const signals = getStructuralSignals(elements, "Sign in");
             expect(signals.passwordSelectors).toEqual([
                 'input[name="password"]',
                 "#password",
-                "input[type=\"password\"]",
+                'input[type="password"]',
             ]);
             expect(signals.identitySelectors).toEqual([
                 "getByRole('textbox', { name: 'Username or email address' })",
@@ -537,9 +526,31 @@ describe("Real-world Site Scenarios", () => {
 
     describe("Atlassian-style login (multi-step)", () => {
         const step1 = [
-            { role: "textbox", name: "Enter your email", type: "email", selectors: ['input[name="username"]', "#username", "getByPlaceholder('Enter your email')"], selector: 'input[name="username"]' } as SummaryElement,
-            { role: "button", name: "Continue", selectors: ["getByRole('button', { name: 'Continue' })", 'button[type="submit"]', "#login-submit"] } as SummaryElement,
-            { role: "link", name: "Can't log in?", selectors: ["getByText('Can\\'t log in?')"] } as SummaryElement,
+            {
+                role: "textbox",
+                name: "Enter your email",
+                type: "email",
+                selectors: [
+                    'input[name="username"]',
+                    "#username",
+                    "getByPlaceholder('Enter your email')",
+                ],
+                selector: 'input[name="username"]',
+            } as SummaryElement,
+            {
+                role: "button",
+                name: "Continue",
+                selectors: [
+                    "getByRole('button', { name: 'Continue' })",
+                    'button[type="submit"]',
+                    "#login-submit",
+                ],
+            } as SummaryElement,
+            {
+                role: "link",
+                name: "Can't log in?",
+                selectors: ["getByText('Can\\'t log in?')"],
+            } as SummaryElement,
         ];
         const title = "Log in to continue - Atlassian";
 
@@ -550,8 +561,26 @@ describe("Real-world Site Scenarios", () => {
         });
 
         const step2 = [
-            { role: "textbox", name: "Enter your password", type: "password", selectors: ['input[name="password"]', "#password", "getByPlaceholder('Enter your password')"], selector: 'input[name="password"]' } as SummaryElement,
-            { role: "button", name: "Log in", selectors: ["getByRole('button', { name: 'Log in' })", 'button[type="submit"]', "#login-submit"] } as SummaryElement,
+            {
+                role: "textbox",
+                name: "Enter your password",
+                type: "password",
+                selectors: [
+                    'input[name="password"]',
+                    "#password",
+                    "getByPlaceholder('Enter your password')",
+                ],
+                selector: 'input[name="password"]',
+            } as SummaryElement,
+            {
+                role: "button",
+                name: "Log in",
+                selectors: [
+                    "getByRole('button', { name: 'Log in' })",
+                    'button[type="submit"]',
+                    "#login-submit",
+                ],
+            } as SummaryElement,
         ];
 
         it("detects password field on step 2 with full selectors", () => {
@@ -567,11 +596,46 @@ describe("Real-world Site Scenarios", () => {
 
     describe("AWS Console login (complex form)", () => {
         const elements: SummaryElement[] = [
-            { role: "textbox", name: "IAM user name", type: "text", selectors: ['input[name="username"]', "#username", "getByLabel('IAM user name')"], selector: 'input[name="username"]' },
-            { role: "textbox", name: "Password", type: "password", selectors: ['input[name="password"]', "#password", "input[type=\"password\"]", "getByLabel('Password')"], selector: 'input[name="password"]' },
-            { role: "checkbox", name: "Remember this account", type: "checkbox", selectors: ['input[name="remember"]'], selector: 'input[name="remember"]' },
-            { role: "button", name: "Sign in", selectors: ["getByRole('button', { name: 'Sign in' })", "#signin_button", 'button[type="submit"]'] },
-            { role: "link", name: "Forgot password?", selectors: ["getByText('Forgot password?')"] },
+            {
+                role: "textbox",
+                name: "IAM user name",
+                type: "text",
+                selectors: ['input[name="username"]', "#username", "getByLabel('IAM user name')"],
+                selector: 'input[name="username"]',
+            },
+            {
+                role: "textbox",
+                name: "Password",
+                type: "password",
+                selectors: [
+                    'input[name="password"]',
+                    "#password",
+                    'input[type="password"]',
+                    "getByLabel('Password')",
+                ],
+                selector: 'input[name="password"]',
+            },
+            {
+                role: "checkbox",
+                name: "Remember this account",
+                type: "checkbox",
+                selectors: ['input[name="remember"]'],
+                selector: 'input[name="remember"]',
+            },
+            {
+                role: "button",
+                name: "Sign in",
+                selectors: [
+                    "getByRole('button', { name: 'Sign in' })",
+                    "#signin_button",
+                    'button[type="submit"]',
+                ],
+            },
+            {
+                role: "link",
+                name: "Forgot password?",
+                selectors: ["getByText('Forgot password?')"],
+            },
             { role: "link", name: "Root user", selectors: ["getByText('Root user')"] },
         ];
         const title = "Sign in as IAM user";
@@ -581,7 +645,7 @@ describe("Real-world Site Scenarios", () => {
             expect(signals.hasPasswordField).toBe(true);
             expect(signals.hasEmailOrUserField).toBe(true);
             expect(signals.identitySelectors).toContain('input[name="username"]');
-            expect(signals.passwordSelectors).toContain("input[type=\"password\"]");
+            expect(signals.passwordSelectors).toContain('input[type="password"]');
         });
 
         it("does not confuse checkbox with identity field", () => {

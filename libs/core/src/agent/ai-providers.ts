@@ -13,13 +13,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { LanguageModel } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import {
-    AI_PROVIDER_IDS,
-    type AIProviderId,
-    raikenConfigSchema,
-} from "../config/schema";
+import type { LanguageModel } from "ai";
+import { AI_PROVIDER_IDS, type AIProviderId, raikenConfigSchema } from "../config/schema";
 
 export interface ProviderDefinition {
     id: AIProviderId;
@@ -253,9 +249,7 @@ export function resolveAIConfig(
         }
     }
 
-    const providerId = (override?.provider ??
-        configFromFile.provider ??
-        "openrouter") as string;
+    const providerId = (override?.provider ?? configFromFile.provider ?? "openrouter") as string;
     const provider = getProvider(providerId);
 
     const envKey = readApiKeyFromEnv(provider.id);
@@ -282,8 +276,7 @@ export function resolveAIConfig(
         apiKeySource,
         apiKeyEnvVar,
         model: override?.model ?? configFromFile.model ?? provider.defaultModel,
-        baseURL:
-            override?.baseURL ?? configFromFile.baseURL ?? provider.defaultBaseURL,
+        baseURL: override?.baseURL ?? configFromFile.baseURL ?? provider.defaultBaseURL,
         maxTokens: override?.maxTokens ?? configFromFile.maxTokens ?? 4000,
         temperature: override?.temperature ?? configFromFile.temperature ?? 0.7,
     };
@@ -437,9 +430,7 @@ async function fetchGoogleModels(baseURL: string, apiKey?: string) {
         }>;
     };
     const models: ModelInfo[] = (json.models ?? [])
-        .filter((m) =>
-            (m.supportedGenerationMethods ?? []).includes("generateContent"),
-        )
+        .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
         .map((m) => {
             const id = m.name.replace(/^models\//, "");
             return {

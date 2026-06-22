@@ -62,7 +62,7 @@ export class TestRunner {
     async saveTestToProject(
         testCode: string,
         testDirectory: string,
-        fileName: string
+        fileName: string,
     ): Promise<string> {
         return this.storage.saveToProject(testCode, testDirectory, fileName);
     }
@@ -178,7 +178,7 @@ export class TestRunner {
     async runTestByName(
         testFile: string,
         testName: string,
-        options: TestRunOptions = {}
+        options: TestRunOptions = {},
     ): Promise<TestRunResult> {
         const { timeout = 60000, headed = false } = options;
 
@@ -271,7 +271,11 @@ export class TestRunner {
     /**
      * Parse Playwright JSON reporter output.
      */
-    private parseJsonOutput(output: string, testFile: string, fallbackDuration: number): TestRunResult[] {
+    private parseJsonOutput(
+        output: string,
+        testFile: string,
+        fallbackDuration: number,
+    ): TestRunResult[] {
         const results: TestRunResult[] = [];
 
         try {
@@ -305,7 +309,9 @@ export class TestRunner {
                             testResult.error = {
                                 message: result.error.message || "Unknown error",
                                 stack: result.error.stack,
-                                selector: this.extractSelectorFromError(result.error.message || "") || undefined,
+                                selector:
+                                    this.extractSelectorFromError(result.error.message || "") ||
+                                    undefined,
                             };
                         }
 

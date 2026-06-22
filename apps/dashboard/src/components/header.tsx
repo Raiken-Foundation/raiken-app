@@ -6,11 +6,7 @@ interface HeaderProps {
     failedCount?: number;
 }
 
-export function Header({
-    projectName,
-    staleCount = 0,
-    failedCount = 0,
-}: HeaderProps) {
+export function Header({ projectName, staleCount = 0, failedCount = 0 }: HeaderProps) {
     return (
         <header className="header">
             <div className="header-left">

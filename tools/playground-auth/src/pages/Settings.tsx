@@ -46,7 +46,13 @@ export default function Settings() {
                                 id="timezone"
                                 data-testid="timezone-select"
                                 defaultValue="UTC"
-                                style={{ width: "100%", padding: ".5rem .75rem", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: ".9rem" }}
+                                style={{
+                                    width: "100%",
+                                    padding: ".5rem .75rem",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: "var(--radius)",
+                                    fontSize: ".9rem",
+                                }}
                             >
                                 <option value="UTC">UTC</option>
                                 <option value="America/New_York">Eastern Time</option>
@@ -75,8 +81,13 @@ export default function Settings() {
                         data-testid="delete-workspace"
                         type="button"
                         style={{
-                            padding: ".5rem 1rem", background: "white", border: "1px solid var(--danger)",
-                            color: "var(--danger)", borderRadius: "var(--radius)", cursor: "pointer", fontSize: ".875rem",
+                            padding: ".5rem 1rem",
+                            background: "white",
+                            border: "1px solid var(--danger)",
+                            color: "var(--danger)",
+                            borderRadius: "var(--radius)",
+                            cursor: "pointer",
+                            fontSize: ".875rem",
                         }}
                     >
                         Delete workspace

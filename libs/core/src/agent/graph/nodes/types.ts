@@ -1,7 +1,6 @@
 import type { ChatOpenAI } from "@langchain/openai";
+import type { AgentClassifierResult, ContextData, MemoryContext } from "../../prompts";
 import type { ToolResult } from "../../tools";
-import type { ContextData, MemoryContext } from "../../prompts";
-import type { AgentClassifierResult } from "../../prompts";
 import type { AgentIntent } from "../utils";
 
 export type CallTool = (toolName: string, args: unknown) => Promise<ToolResult>;
@@ -10,12 +9,16 @@ export interface AgentNodeDeps {
     callTool: CallTool;
     projectPath: string;
     model: ChatOpenAI;
-    gatherContext: (prompt: string, projectPath: string, fileContext?: string[]) => Promise<ContextData>;
+    gatherContext: (
+        prompt: string,
+        projectPath: string,
+        fileContext?: string[],
+    ) => Promise<ContextData>;
     buildSystemPrompt: (
         context: ContextData,
         userPrompt: string,
         templateVersion?: string,
-        memoryContext?: MemoryContext
+        memoryContext?: MemoryContext,
     ) => string;
     buildExplorationPrompt: (
         context: ContextData,
@@ -28,7 +31,7 @@ export interface AgentNodeDeps {
             targetUrl?: string | null;
             missingContext?: string[];
             nextTool?: string | null;
-        }
+        },
     ) => string;
     buildAgentClassifierPrompt: (input: {
         userPrompt: string;

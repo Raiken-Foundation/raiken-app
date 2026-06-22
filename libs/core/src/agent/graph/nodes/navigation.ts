@@ -1,6 +1,7 @@
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type { ChatOpenAI } from "@langchain/openai";
+import { BrowserSession } from "../../../browser/session";
 import type { GraphStateType } from "../state";
 import type { InterruptionInfo } from "../utils";
 import {
@@ -10,9 +11,8 @@ import {
     parseSummaryElements,
     shouldClassifyInterruption,
 } from "../utils";
-import type { AgentNodeDeps } from "./types";
 import { classifyInterruption, extractCredentialsWithLLM } from "./classify-interruption";
-import { BrowserSession } from "../../../browser/session";
+import type { AgentNodeDeps } from "./types";
 
 function loadExploreMaxPages(projectPath: string): number {
     try {
@@ -31,7 +31,7 @@ async function checkForInterruption(
     userPrompt: string,
     conversationHistory: Array<{ role: string; content: string }>,
     model: ChatOpenAI,
-    projectPath: string
+    projectPath: string,
 ): Promise<InterruptionInfo | null> {
     if (!summary) return null;
     const elements = parseSummaryElements(summary);
@@ -41,7 +41,9 @@ async function checkForInterruption(
     try {
         const session = BrowserSession.getInstance(projectPath);
         hasOverlay = await session.hasBlockingOverlay();
-    } catch { /* browser not active */ }
+    } catch {
+        /* browser not active */
+    }
 
     const signals = getStructuralSignals(elements, pageTitle, hasOverlay);
     if (!shouldClassifyInterruption(signals)) return null;
@@ -59,7 +61,9 @@ export const createNavigateNode =
             const { AgentMemory } = await import("../../memory");
             const memory = AgentMemory.getInstance(projectPath);
             rememberedUrl = memory.getPreference("project_base_url") || null;
-        } catch { /* memory not available */ }
+        } catch {
+            /* memory not available */
+        }
 
         const url =
             state.targetUrl ||
@@ -69,10 +73,12 @@ export const createNavigateNode =
         if (!url) {
             return {
                 currentUrl: "",
-                domSummary: "[Navigation failed: no URL provided. Please specify a URL to navigate to.]",
+                domSummary:
+                    "[Navigation failed: no URL provided. Please specify a URL to navigate to.]",
                 pagesVisited: [],
                 pageSummaries: [],
-                awaitUserMessage: "I need a URL to navigate to. Please provide the base URL of your application.",
+                awaitUserMessage:
+                    "I need a URL to navigate to. Please provide the base URL of your application.",
                 shouldPause: true,
             };
         }
@@ -88,7 +94,8 @@ export const createNavigateNode =
             };
         }
 
-        const summary = (navResult.data as { summary?: string; url?: string } | undefined)?.summary || null;
+        const summary =
+            (navResult.data as { summary?: string; url?: string } | undefined)?.summary || null;
         const currentUrl = (navResult.data as { url?: string } | undefined)?.url || url;
 
         try {
@@ -98,7 +105,9 @@ export const createNavigateNode =
             if (origin && origin !== "null") {
                 memory.setPreference("project_base_url", origin);
             }
-        } catch { /* non-critical */ }
+        } catch {
+            /* non-critical */
+        }
 
         return {
             currentUrl,
@@ -116,7 +125,7 @@ export const createNavigateNode =
 function scoreLinkRelevance(
     link: { text: string; href: string },
     goal: string | null,
-    feature: string | null
+    feature: string | null,
 ): number {
     if (!goal && !feature) return 0;
     const keywords = `${goal || ""} ${feature || ""}`.toLowerCase().split(/\s+/).filter(Boolean);
@@ -134,11 +143,11 @@ function scoreLinkRelevance(
 function sortLinksByRelevance(
     links: Array<{ text: string; href: string }>,
     goal: string | null,
-    feature: string | null
+    feature: string | null,
 ): Array<{ text: string; href: string }> {
     if (!goal && !feature) return links;
-    return [...links].sort((a, b) =>
-        scoreLinkRelevance(b, goal, feature) - scoreLinkRelevance(a, goal, feature)
+    return [...links].sort(
+        (a, b) => scoreLinkRelevance(b, goal, feature) - scoreLinkRelevance(a, goal, feature),
     );
 }
 
@@ -163,7 +172,9 @@ export const createExploreNode =
         let baseOrigin: string | null = null;
         try {
             baseOrigin = new URL(startUrl).origin;
-        } catch { /* no valid start URL */ }
+        } catch {
+            /* no valid start URL */
+        }
 
         const isSameOrigin = (href: string): boolean => {
             if (!baseOrigin) return true;
@@ -174,7 +185,8 @@ export const createExploreNode =
             }
         };
 
-        const AUTH_PATH_SEGMENTS = /\/(login|signin|sign-in|sign_in|signup|sign-up|sign_up|register|auth|sso|oauth|forgot[-_]?password|reset[-_]?password)\b/i;
+        const AUTH_PATH_SEGMENTS =
+            /\/(login|signin|sign-in|sign_in|signup|sign-up|sign_up|register|auth|sso|oauth|forgot[-_]?password|reset[-_]?password)\b/i;
         const isAuthPage = (href: string): boolean => {
             try {
                 return AUTH_PATH_SEGMENTS.test(new URL(href).pathname);
@@ -183,17 +195,22 @@ export const createExploreNode =
             }
         };
 
-        const isExplorableLink = (href: string): boolean =>
-            isSameOrigin(href) && !isAuthPage(href);
+        const isExplorableLink = (href: string): boolean => isSameOrigin(href) && !isAuthPage(href);
 
         const discoverResult = await callTool("discoverLinks", { includeExternal: false });
         if (discoverResult.success) {
             const initialLinks =
-                (discoverResult.data as { links?: Array<{ text: string; href: string }> } | undefined)?.links || [];
+                (
+                    discoverResult.data as
+                        | { links?: Array<{ text: string; href: string }> }
+                        | undefined
+                )?.links || [];
             linksToProcess = sortLinksByRelevance(
-                initialLinks.filter((link) => !visited.has(link.href) && isExplorableLink(link.href)),
+                initialLinks.filter(
+                    (link) => !visited.has(link.href) && isExplorableLink(link.href),
+                ),
                 goal,
-                feature
+                feature,
             );
         }
 
@@ -207,7 +224,8 @@ export const createExploreNode =
                 continue;
             }
 
-            const summary = (nav.data as { summary?: string; url?: string } | undefined)?.summary || null;
+            const summary =
+                (nav.data as { summary?: string; url?: string } | undefined)?.summary || null;
             const url = (nav.data as { url?: string } | undefined)?.url || link.href;
             visited.add(url);
             newVisited.push(url);
@@ -219,7 +237,13 @@ export const createExploreNode =
             }
             lastUrl = url;
 
-            const interruption = await checkForInterruption(summary, state.userPrompt, state.conversationHistory, model, projectPath);
+            const interruption = await checkForInterruption(
+                summary,
+                state.userPrompt,
+                state.conversationHistory,
+                model,
+                projectPath,
+            );
             if (interruption) {
                 return {
                     pagesVisited: newVisited,
@@ -233,9 +257,16 @@ export const createExploreNode =
             const moreLinks = await callTool("discoverLinks", { includeExternal: false });
             if (moreLinks.success) {
                 const newLinks =
-                    (moreLinks.data as { links?: Array<{ text: string; href: string }> } | undefined)?.links || [];
+                    (
+                        moreLinks.data as
+                            | { links?: Array<{ text: string; href: string }> }
+                            | undefined
+                    )?.links || [];
                 const fresh = newLinks.filter(
-                    (nl) => !visited.has(nl.href) && isExplorableLink(nl.href) && !linksToProcess.some(l => l.href === nl.href)
+                    (nl) =>
+                        !visited.has(nl.href) &&
+                        isExplorableLink(nl.href) &&
+                        !linksToProcess.some((l) => l.href === nl.href),
                 );
                 linksToProcess.push(...fresh);
                 linksToProcess = sortLinksByRelevance(linksToProcess, goal, feature);

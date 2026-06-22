@@ -75,7 +75,11 @@ export default function Login() {
                         <p
                             role="alert"
                             data-testid="login-error"
-                            style={{ color: "var(--danger)", fontSize: ".8rem", marginBottom: ".75rem" }}
+                            style={{
+                                color: "var(--danger)",
+                                fontSize: ".8rem",
+                                marginBottom: ".75rem",
+                            }}
                         >
                             {error}
                         </p>
@@ -86,7 +90,9 @@ export default function Login() {
                     </button>
                 </form>
 
-                <p className="login-hint">Use any username (≥ 3 chars) and any password (≥ 4 chars).</p>
+                <p className="login-hint">
+                    Use any username (≥ 3 chars) and any password (≥ 4 chars).
+                </p>
             </div>
         </div>
     );

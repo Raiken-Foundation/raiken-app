@@ -10,6 +10,6 @@ describe("App", () => {
 
     it("should render the app container", () => {
         const { container } = render(<App />);
-        expect(container.querySelector(".app-container")).toBeTruthy();
+        expect(container.querySelector(".app-shell")).toBeTruthy();
     });
 });

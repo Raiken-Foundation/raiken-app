@@ -3,10 +3,28 @@ import Nav from "../Nav";
 const MEMBERS = [
     { id: "alice", name: "Alice Chen", email: "alice@acme.com", role: "admin", joined: "Jan 2024" },
     { id: "bob", name: "Bob Kim", email: "bob@acme.com", role: "member", joined: "Mar 2024" },
-    { id: "carol", name: "Carol Singh", email: "carol@acme.com", role: "member", joined: "Mar 2024" },
-    { id: "dave", name: "Dave Okonkwo", email: "dave@acme.com", role: "member", joined: "Jun 2024" },
+    {
+        id: "carol",
+        name: "Carol Singh",
+        email: "carol@acme.com",
+        role: "member",
+        joined: "Mar 2024",
+    },
+    {
+        id: "dave",
+        name: "Dave Okonkwo",
+        email: "dave@acme.com",
+        role: "member",
+        joined: "Jun 2024",
+    },
     { id: "eve", name: "Eve Müller", email: "eve@acme.com", role: "viewer", joined: "Sep 2024" },
-    { id: "frank", name: "Frank Rossi", email: "frank@acme.com", role: "viewer", joined: "Dec 2024" },
+    {
+        id: "frank",
+        name: "Frank Rossi",
+        email: "frank@acme.com",
+        role: "viewer",
+        joined: "Dec 2024",
+    },
 ];
 
 export default function Members() {
@@ -37,7 +55,9 @@ export default function Members() {
                                         <a href={`mailto:${m.email}`}>{m.email}</a>
                                     </td>
                                     <td>
-                                        <span className={`badge badge-${m.role === "admin" ? "active" : m.role === "member" ? "in-progress" : "archived"}`}>
+                                        <span
+                                            className={`badge badge-${m.role === "admin" ? "active" : m.role === "member" ? "in-progress" : "archived"}`}
+                                        >
                                             {m.role}
                                         </span>
                                     </td>

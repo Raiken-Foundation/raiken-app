@@ -2,12 +2,48 @@ import { useState } from "react";
 import Nav from "../Nav";
 
 const ALL_TASKS = [
-    { id: "t_orion_2", title: "Wire production analytics events", project: "Orion Launch", status: "in_progress", priority: "urgent" },
-    { id: "t_orion_3", title: "QA sign-off on checkout flow", project: "Orion Launch", status: "todo", priority: "high" },
-    { id: "t_atlas_2", title: "Dry-run on staging", project: "Atlas Migration", status: "in_progress", priority: "urgent" },
-    { id: "t_atlas_3", title: "Rollback plan", project: "Atlas Migration", status: "todo", priority: "high" },
-    { id: "t_helix_2", title: "Component library update", project: "Helix Redesign", status: "in_progress", priority: "high" },
-    { id: "t_orion_4", title: "Update landing page copy", project: "Orion Launch", status: "todo", priority: "normal" },
+    {
+        id: "t_orion_2",
+        title: "Wire production analytics events",
+        project: "Orion Launch",
+        status: "in_progress",
+        priority: "urgent",
+    },
+    {
+        id: "t_orion_3",
+        title: "QA sign-off on checkout flow",
+        project: "Orion Launch",
+        status: "todo",
+        priority: "high",
+    },
+    {
+        id: "t_atlas_2",
+        title: "Dry-run on staging",
+        project: "Atlas Migration",
+        status: "in_progress",
+        priority: "urgent",
+    },
+    {
+        id: "t_atlas_3",
+        title: "Rollback plan",
+        project: "Atlas Migration",
+        status: "todo",
+        priority: "high",
+    },
+    {
+        id: "t_helix_2",
+        title: "Component library update",
+        project: "Helix Redesign",
+        status: "in_progress",
+        priority: "high",
+    },
+    {
+        id: "t_orion_4",
+        title: "Update landing page copy",
+        project: "Orion Launch",
+        status: "todo",
+        priority: "normal",
+    },
 ];
 
 export default function Tasks() {
@@ -32,9 +68,13 @@ export default function Tasks() {
                             onClick={() => setFilter(s)}
                             type="button"
                             style={{
-                                padding: ".35rem .75rem", border: "1px solid var(--border)",
-                                borderRadius: "var(--radius)", background: filter === s ? "var(--accent)" : "white",
-                                color: filter === s ? "white" : "var(--muted)", cursor: "pointer", fontSize: ".8rem",
+                                padding: ".35rem .75rem",
+                                border: "1px solid var(--border)",
+                                borderRadius: "var(--radius)",
+                                background: filter === s ? "var(--accent)" : "white",
+                                color: filter === s ? "white" : "var(--muted)",
+                                cursor: "pointer",
+                                fontSize: ".8rem",
                             }}
                         >
                             {s}
@@ -58,12 +98,16 @@ export default function Tasks() {
                                     <td>{t.title}</td>
                                     <td>{t.project}</td>
                                     <td>
-                                        <span className={`badge badge-${t.status === "in_progress" ? "in-progress" : t.status}`}>
+                                        <span
+                                            className={`badge badge-${t.status === "in_progress" ? "in-progress" : t.status}`}
+                                        >
                                             {t.status}
                                         </span>
                                     </td>
                                     <td>
-                                        <span className={`badge badge-${t.priority === "urgent" ? "urgent" : "todo"}`}>
+                                        <span
+                                            className={`badge badge-${t.priority === "urgent" ? "urgent" : "todo"}`}
+                                        >
                                             {t.priority}
                                         </span>
                                     </td>

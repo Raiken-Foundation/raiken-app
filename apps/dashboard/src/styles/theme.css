@@ -446,10 +446,15 @@ button {
 
 .q-select {
     appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, var(--ink-faint) 50%),
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--ink-faint) 50%),
         linear-gradient(135deg, var(--ink-faint) 50%, transparent 50%);
-    background-position: calc(100% - 12px) center, calc(100% - 7px) center;
-    background-size: 5px 5px, 5px 5px;
+    background-position:
+        calc(100% - 12px) center,
+        calc(100% - 7px) center;
+    background-size:
+        5px 5px,
+        5px 5px;
     background-repeat: no-repeat;
     padding-right: 1.25rem;
     cursor: pointer;
@@ -565,7 +570,9 @@ button {
     font-family: var(--mono);
     font-size: 12px;
     cursor: pointer;
-    transition: background 0.12s, border-color 0.12s;
+    transition:
+        background 0.12s,
+        border-color 0.12s;
     text-decoration: none;
     white-space: nowrap;
 }
@@ -626,7 +633,10 @@ button {
     border: 1px solid transparent;
     color: var(--ink-faint);
     cursor: pointer;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    transition:
+        background 0.12s,
+        color 0.12s,
+        border-color 0.12s;
     padding: 0;
 }
 .q-icon-btn:hover:not(:disabled) {

@@ -1,8 +1,14 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { z } from "zod";
 import type { ChatOpenAI } from "@langchain/openai";
-import type { InterruptionInfo, InterruptionType, SummaryElement, StructuralSignals, Credentials } from "../utils";
-import type { SummaryElement as SumEl } from "../utils";
+import { z } from "zod";
+import type {
+    Credentials,
+    InterruptionInfo,
+    InterruptionType,
+    StructuralSignals,
+    SummaryElement as SumEl,
+    SummaryElement,
+} from "../utils";
 
 /**
  * Find the primary submit button for a login form, preferring specific
@@ -17,7 +23,7 @@ import type { SummaryElement as SumEl } from "../utils";
 function findSubmitButtonSelectors(elements: SumEl[]): string[] {
     const EXCLUDE_PATTERN = /\b(with|via|using)\s+\w+|passkey|biometric|fingerprint|face\s*id/i;
     const buttonEls = elements.filter(
-        (el) => el.role === "button" && !EXCLUDE_PATTERN.test(el.name)
+        (el) => el.role === "button" && !EXCLUDE_PATTERN.test(el.name),
     );
 
     const priorities: RegExp[] = [
@@ -32,27 +38,30 @@ function findSubmitButtonSelectors(elements: SumEl[]): string[] {
         if (match && match.selectors.length > 0) return [...match.selectors];
     }
 
-    const fallback = buttonEls.find((el) =>
-        /sign in|log in|login|submit/i.test(el.name)
-    );
+    const fallback = buttonEls.find((el) => /sign in|log in|login|submit/i.test(el.name));
     if (fallback && fallback.selectors.length > 0) return [...fallback.selectors];
 
     return [];
 }
 
 const interruptionSchema = z.object({
-    type: z.enum(["auth", "otp", "captcha", "consent", "paywall", "error", "none"]).describe(
-        "The type of blocker on this page, or 'none' if the page is not blocking the user"
-    ),
-    requiresUser: z.boolean().describe(
-        "Whether the user must take manual action to resolve this (true for captcha, most paywalls, missing credentials)"
-    ),
-    message: z.string().describe(
-        "A short, user-facing message explaining the blocker"
-    ),
-    actionElementName: z.string().nullable().describe(
-        "The exact name of a button or link the agent can click to dismiss the blocker (e.g. the consent accept button). null if no automatic action is possible"
-    ),
+    type: z
+        .enum(["auth", "otp", "captcha", "consent", "paywall", "error", "none"])
+        .describe(
+            "The type of blocker on this page, or 'none' if the page is not blocking the user",
+        ),
+    requiresUser: z
+        .boolean()
+        .describe(
+            "Whether the user must take manual action to resolve this (true for captcha, most paywalls, missing credentials)",
+        ),
+    message: z.string().describe("A short, user-facing message explaining the blocker"),
+    actionElementName: z
+        .string()
+        .nullable()
+        .describe(
+            "The exact name of a button or link the agent can click to dismiss the blocker (e.g. the consent accept button). null if no automatic action is possible",
+        ),
 });
 
 type ClassificationResult = z.infer<typeof interruptionSchema>;
@@ -82,7 +91,7 @@ For auth: requiresUser=true when credentials are needed but unavailable.`;
 function buildUserPrompt(
     pageTitle: string,
     elements: SummaryElement[],
-    signals: StructuralSignals
+    signals: StructuralSignals,
 ): string {
     const elementList = elements
         .slice(0, 25)
@@ -96,9 +105,14 @@ function buildUserPrompt(
     if (signals.hasPasswordField) observations.push("Password input field detected");
     if (signals.hasEmailOrUserField) observations.push("Email or username input field detected");
     if (signals.hasCodeField) observations.push("Code/verification input field detected");
-    if (signals.hasBlockingOverlay) observations.push("A modal dialog or overlay is blocking the page (aria-modal or dialog element detected)");
-    if (signals.isDeadEnd) observations.push(`Dead-end page (only ${signals.elementCount} interactive elements)`);
-    if (signals.elementCount > 10) observations.push(`Feature-rich page (${signals.elementCount} interactive elements)`);
+    if (signals.hasBlockingOverlay)
+        observations.push(
+            "A modal dialog or overlay is blocking the page (aria-modal or dialog element detected)",
+        );
+    if (signals.isDeadEnd)
+        observations.push(`Dead-end page (only ${signals.elementCount} interactive elements)`);
+    if (signals.elementCount > 10)
+        observations.push(`Feature-rich page (${signals.elementCount} interactive elements)`);
 
     return `Page title: "${pageTitle}"
 
@@ -118,7 +132,7 @@ export async function classifyInterruption(
     elements: SummaryElement[],
     signals: StructuralSignals,
     credentials: Credentials,
-    model: ChatOpenAI
+    model: ChatOpenAI,
 ): Promise<InterruptionInfo | null> {
     const userPrompt = buildUserPrompt(pageTitle, elements, signals);
 
@@ -149,8 +163,10 @@ export async function classifyInterruption(
     };
 
     if (result.type === "auth") {
-        const needsIdentity = !credentials.username && !credentials.email && !credentials.useDefaults;
-        const needsPassword = signals.hasPasswordField && !credentials.password && !credentials.useDefaults;
+        const needsIdentity =
+            !credentials.username && !credentials.email && !credentials.useDefaults;
+        const needsPassword =
+            signals.hasPasswordField && !credentials.password && !credentials.useDefaults;
         info.requiresUser = needsIdentity || needsPassword;
         info.message = info.requiresUser
             ? "This page requires authentication. You can provide credentials in the chat, e.g.:\n" +
@@ -172,7 +188,7 @@ export async function classifyInterruption(
         };
     } else if (result.type === "consent" && result.actionElementName) {
         const match = elements.find(
-            (el) => el.name.toLowerCase() === result.actionElementName!.toLowerCase()
+            (el) => el.name.toLowerCase() === result.actionElementName!.toLowerCase(),
         );
         if (match && match.selectors.length > 0) {
             info.actionSelector = match.selectors[0];
@@ -188,10 +204,19 @@ export async function classifyInterruption(
 // =========================================================================
 
 const credentialsSchema = z.object({
-    username: z.string().nullable().describe("Username or login name provided by the user, null if not provided"),
-    email: z.string().nullable().describe("Email address provided by the user, null if not provided"),
+    username: z
+        .string()
+        .nullable()
+        .describe("Username or login name provided by the user, null if not provided"),
+    email: z
+        .string()
+        .nullable()
+        .describe("Email address provided by the user, null if not provided"),
     password: z.string().nullable().describe("Password provided by the user, null if not provided"),
-    code: z.string().nullable().describe("OTP, verification code, or security code (numeric), null if not provided"),
+    code: z
+        .string()
+        .nullable()
+        .describe("OTP, verification code, or security code (numeric), null if not provided"),
     useDefaults: z.boolean().describe("True if the user asked to use default/test credentials"),
 });
 
@@ -203,7 +228,7 @@ const credentialsSchema = z.object({
 export async function extractCredentialsWithLLM(
     userPrompt: string,
     conversationHistory: Array<{ role: string; content: string }>,
-    model: ChatOpenAI
+    model: ChatOpenAI,
 ): Promise<Credentials> {
     const recentMessages = conversationHistory
         .slice(-6)
@@ -253,7 +278,7 @@ If nothing was provided → all fields null, useDefaults=false.`;
 
 async function fallbackClassify(
     model: ChatOpenAI,
-    userPrompt: string
+    userPrompt: string,
 ): Promise<ClassificationResult> {
     const strictPrompt = `${SYSTEM_PROMPT}\n\nReturn JSON only, no fences:\n{"type":"auth|otp|captcha|consent|paywall|error|none","requiresUser":boolean,"message":string,"actionElementName":string|null}`;
 
@@ -263,7 +288,9 @@ async function fallbackClassify(
     ]);
 
     const content = Array.isArray(response.content)
-        ? response.content.map((part) => (typeof part === "string" ? part : part?.text || "")).join("")
+        ? response.content
+              .map((part) => (typeof part === "string" ? part : part?.text || ""))
+              .join("")
         : response.content;
 
     if (!content || typeof content !== "string") {

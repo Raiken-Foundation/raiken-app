@@ -55,28 +55,20 @@ describe("escapeSelectorText", () => {
 
 describe("buildLinkSelector", () => {
     it("prefers data-testid when present", () => {
-        expect(buildLinkSelector("/foo", "Home", "nav-home")).toBe(
-            'a[data-testid="nav-home"]',
-        );
+        expect(buildLinkSelector("/foo", "Home", "nav-home")).toBe('a[data-testid="nav-home"]');
     });
 
     it("falls back to href when no testid", () => {
-        expect(buildLinkSelector("/about", "About us", null)).toBe(
-            'a[href="/about"]',
-        );
+        expect(buildLinkSelector("/about", "About us", null)).toBe('a[href="/about"]');
     });
 
     it("uses :has-text when neither testid nor href is present", () => {
-        expect(buildLinkSelector("", "Click me", null)).toBe(
-            'a:has-text("Click me")',
-        );
+        expect(buildLinkSelector("", "Click me", null)).toBe('a:has-text("Click me")');
     });
 
     it("collapses whitespace and trims long link text", () => {
         const longText = "  hello\n\nworld  ";
-        expect(buildLinkSelector("", longText, null)).toBe(
-            'a:has-text("hello world")',
-        );
+        expect(buildLinkSelector("", longText, null)).toBe('a:has-text("hello world")');
     });
 
     it("falls back to a[href] when text is too long for has-text", () => {
@@ -86,9 +78,7 @@ describe("buildLinkSelector", () => {
 
     it("escapes embedded quotes in href values", () => {
         // Pathological but real — some CMS-generated hrefs contain quotes.
-        expect(buildLinkSelector('/path"weird', "", null)).toBe(
-            'a[href="/path\\"weird"]',
-        );
+        expect(buildLinkSelector('/path"weird', "", null)).toBe('a[href="/path\\"weird"]');
     });
 
     it("does not produce an unparseable selector for control-char text", () => {
@@ -107,22 +97,16 @@ describe("buildLinkSelector", () => {
 
 describe("safeOrigin", () => {
     it("returns the origin for a well-formed URL", () => {
-        expect(safeOrigin("https://example.com/path?x=1#y")).toBe(
-            "https://example.com",
-        );
+        expect(safeOrigin("https://example.com/path?x=1#y")).toBe("https://example.com");
     });
 
     it("includes a non-default port in the origin", () => {
-        expect(safeOrigin("http://localhost:7101/api")).toBe(
-            "http://localhost:7101",
-        );
+        expect(safeOrigin("http://localhost:7101/api")).toBe("http://localhost:7101");
     });
 
     it("treats https default 443 as part of the standard origin", () => {
         // URL parsing canonicalizes :443 out of the origin string.
-        expect(safeOrigin("https://example.com:443/x")).toBe(
-            "https://example.com",
-        );
+        expect(safeOrigin("https://example.com:443/x")).toBe("https://example.com");
     });
 
     it("returns null for unparseable input", () => {
@@ -132,8 +116,6 @@ describe("safeOrigin", () => {
 
     it("is robust against userinfo in the URL", () => {
         // Origin should not include credentials.
-        expect(safeOrigin("https://user:pass@example.com/x")).toBe(
-            "https://example.com",
-        );
+        expect(safeOrigin("https://user:pass@example.com/x")).toBe("https://example.com");
     });
 });

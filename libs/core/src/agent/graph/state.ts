@@ -1,7 +1,7 @@
 import { Annotation } from "@langchain/langgraph";
+import type { TestRunResult } from "../../testing/runner";
 import type { ContextData } from "../prompts";
 import type { AgentIntent, InterruptionInfo } from "./utils";
-import type { TestRunResult } from "../../testing/runner";
 
 export const GraphState = Annotation.Root({
     userPrompt: Annotation<string>({

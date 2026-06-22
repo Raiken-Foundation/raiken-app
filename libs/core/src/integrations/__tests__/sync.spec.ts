@@ -191,9 +191,7 @@ describe("syncCurrentTicket — failure / no-config paths", () => {
         expect(result.ticket).toBeNull();
         expect(result.impact).toBeNull();
         expect(result.branchName).toBe("feat/RAI-123-thing");
-        expect(warn).toHaveBeenCalledWith(
-            expect.stringMatching(/missing owner\/repo/i),
-        );
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/missing owner\/repo/i));
     });
 
     it("emits a soft warning (but still returns a working provider) when owner/repo are set but no token is available", async () => {
@@ -218,18 +216,14 @@ describe("syncCurrentTicket — failure / no-config paths", () => {
         expect(ghMethods.getTicket).toHaveBeenCalledWith("1");
         expect(result.ticket).not.toBeNull();
         // …but the user got a heads-up about the rate limit.
-        expect(warn).toHaveBeenCalledWith(
-            expect.stringMatching(/Anonymous mode active/i),
-        );
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Anonymous mode active/i));
     });
 
     it("infers owner/repo from the git remote when the user only set a token", async () => {
         const { syncCurrentTicket } = await import("../sync");
         // First call (constructor): not configured, owner/repo missing.
         // Second call (after setRepo): configured.
-        ghMethods.isConfigured
-            .mockReturnValueOnce(false)
-            .mockReturnValue(true);
+        ghMethods.isConfigured.mockReturnValueOnce(false).mockReturnValue(true);
         branchParserMocks.getGitRemoteInfo.mockReturnValue({
             owner: "remote-owner",
             repo: "remote-repo",
@@ -281,9 +275,7 @@ describe("syncCurrentTicket — failure / no-config paths", () => {
         });
 
         expect(result.ticket).toBeNull();
-        expect(warn).toHaveBeenCalledWith(
-            expect.stringMatching(/Unknown provider/),
-        );
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Unknown provider/));
     });
 });
 

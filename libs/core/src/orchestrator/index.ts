@@ -10,8 +10,8 @@
  * - Tool calls logged for UI feedback
  */
 
-import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from '../agent/agent';
-import type { HITLAction } from '../agent/hitl-types';
+import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from "../agent/agent";
+import type { HITLAction } from "../agent/hitl-types";
 
 /**
  * Options for running the orchestrator
@@ -45,12 +45,12 @@ export interface OrchestratorResult {
  * 4. Summary and results streamed to client
  */
 export async function* runOrchestrator(
-    options: RunOrchestratorOptions
+    options: RunOrchestratorOptions,
 ): AsyncGenerator<string, OrchestratorResult, unknown> {
     const { userPrompt, projectPath, conversationHistory, onHITL, onToolCall } = options;
 
-    console.log('🚀 Orchestrator: Starting...');
-    console.log(`📝 Prompt: "${userPrompt.slice(0, 50)}${userPrompt.length > 50 ? '...' : ''}"`);
+    console.log("🚀 Orchestrator: Starting...");
+    console.log(`📝 Prompt: "${userPrompt.slice(0, 50)}${userPrompt.length > 50 ? "..." : ""}"`);
 
     const agentOptions: ToolAgentOptions = {
         userPrompt,
@@ -61,14 +61,14 @@ export async function* runOrchestrator(
         onToolResult: (toolName, result) => {
             // Log tool results for debugging
             console.log(`📦 ${toolName}: ${result.message}`);
-            
+
             // Special logging for control tools
-            if (toolName === 'done') {
-                console.log('🏁 Agent signaled completion');
-            } else if (toolName === 'respond') {
-                console.log('💬 Agent responding to user');
-            } else if (toolName === 'awaitUser') {
-                console.log('⏸️ Agent awaiting user input');
+            if (toolName === "done") {
+                console.log("🏁 Agent signaled completion");
+            } else if (toolName === "respond") {
+                console.log("💬 Agent responding to user");
+            } else if (toolName === "awaitUser") {
+                console.log("⏸️ Agent awaiting user input");
             }
         },
     };
@@ -87,11 +87,13 @@ export async function* runOrchestrator(
         yield value as string;
     }
 
-    console.log('✅ Orchestrator complete');
+    console.log("✅ Orchestrator complete");
 
-    return agentResult || {
-        text: '',
-        hitlActions: [],
-        toolCalls: [],
-    };
+    return (
+        agentResult || {
+            text: "",
+            hitlActions: [],
+            toolCalls: [],
+        }
+    );
 }

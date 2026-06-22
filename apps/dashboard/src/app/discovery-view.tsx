@@ -338,49 +338,47 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
 
             <div className="view-body">
                 <div className="view-shell">
-                <nav className="dv-tabs">
+                    <nav className="dv-tabs">
                         <button
                             type="button"
                             className={`dv-tab ${activeTab === "overview" ? "active" : ""}`}
                             onClick={() => setActiveTab("overview")}
                         >
-                        Overview
-                    </button>
+                            Overview
+                        </button>
                         <button
                             type="button"
                             className={`dv-tab ${activeTab === "results" ? "active" : ""}`}
                             onClick={() => setActiveTab("results")}
                         >
-                        Results
+                            Results
                             {totalResults > 0 && (
                                 <span className="dv-tab-badge">{totalResults}</span>
                             )}
-                    </button>
-                </nav>
+                        </button>
+                    </nav>
 
-                {/* ═══════════ OVERVIEW ═══════════ */}
-                {activeTab === "overview" && (
-                    <div className="tab-content">
-                        {/* ── Run ── */}
-                        <section className="card">
-                            <h2 className="card-title">Run Discovery</h2>
+                    {/* ═══════════ OVERVIEW ═══════════ */}
+                    {activeTab === "overview" && (
+                        <div className="tab-content">
+                            {/* ── Run ── */}
+                            <section className="card">
+                                <h2 className="card-title">Run Discovery</h2>
 
-                            <label className="field">
-                                <span className="field-label">Start URL</span>
-                                <div className="url-row">
-                                    <input
-                                        value={form.url}
+                                <label className="field">
+                                    <span className="field-label">Start URL</span>
+                                    <div className="url-row">
+                                        <input
+                                            value={form.url}
                                             onChange={(e) =>
                                                 setForm((prev) => ({
                                                     ...prev,
                                                     url: e.target.value,
                                                 }))
                                             }
-                                        placeholder={
-                                            detectedBaseURL ?? "http://localhost:3000"
-                                        }
-                                    />
-                                    {form.url && (
+                                            placeholder={detectedBaseURL ?? "http://localhost:3000"}
+                                        />
+                                        {form.url && (
                                             <a
                                                 className="url-open"
                                                 href={form.url}
@@ -395,23 +393,22 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     strokeWidth="2"
                                                     aria-hidden="true"
                                                 >
-                                                <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                            </svg>
-                                        </a>
+                                                    <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                                </svg>
+                                            </a>
+                                        )}
+                                    </div>
+                                    {detectedBaseURL && form.url === detectedBaseURL && (
+                                        <span className="field-hint">
+                                            Auto-detected from <code>playwright.config.ts</code> ·{" "}
+                                            <code>use.baseURL</code>
+                                        </span>
                                     )}
-                                </div>
-                                {detectedBaseURL && form.url === detectedBaseURL && (
-                                    <span className="field-hint">
-                                        Auto-detected from{" "}
-                                        <code>playwright.config.ts</code> ·{" "}
-                                        <code>use.baseURL</code>
-                                    </span>
-                                )}
-                            </label>
+                                </label>
 
-                            <div className="field-row-3">
-                                <label className="field">
-                                    <span className="field-label">Max Pages</span>
+                                <div className="field-row-3">
+                                    <label className="field">
+                                        <span className="field-label">Max Pages</span>
                                         <input
                                             value={form.maxPages}
                                             onChange={(e) =>
@@ -421,9 +418,9 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 }))
                                             }
                                         />
-                                </label>
-                                <label className="field">
-                                    <span className="field-label">Max Depth</span>
+                                    </label>
+                                    <label className="field">
+                                        <span className="field-label">Max Depth</span>
                                         <input
                                             value={form.maxDepth}
                                             onChange={(e) =>
@@ -433,9 +430,9 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 }))
                                             }
                                         />
-                                </label>
-                                <label className="field">
-                                    <span className="field-label">Timeout (ms)</span>
+                                    </label>
+                                    <label className="field">
+                                        <span className="field-label">Timeout (ms)</span>
                                         <input
                                             value={form.timeout}
                                             onChange={(e) =>
@@ -445,37 +442,37 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 }))
                                             }
                                         />
-                                </label>
-                            </div>
+                                    </label>
+                                </div>
 
-                            <div className="options-row">
-                                <label className="toggle">
+                                <div className="options-row">
+                                    <label className="toggle">
                                         <span
                                             className={`toggle-track ${form.skipAuth ? "on" : ""}`}
                                         >
-                                        <span className="toggle-thumb" />
-                                    </span>
-                                    <input
-                                        type="checkbox"
-                                        checked={form.skipAuth}
+                                            <span className="toggle-thumb" />
+                                        </span>
+                                        <input
+                                            type="checkbox"
+                                            checked={form.skipAuth}
                                             onChange={(e) =>
                                                 setForm((prev) => ({
                                                     ...prev,
                                                     skipAuth: e.target.checked,
                                                 }))
                                             }
-                                        className="sr-only"
-                                    />
-                                    <span className="toggle-label">Skip auth pause</span>
-                                </label>
-                            </div>
+                                            className="sr-only"
+                                        />
+                                        <span className="toggle-label">Skip auth pause</span>
+                                    </label>
+                                </div>
 
-                            <div className="exclude-section">
-                                <span className="field-label">Exclude patterns</span>
-                                <div className="tags-wrap">
+                                <div className="exclude-section">
+                                    <span className="field-label">Exclude patterns</span>
+                                    <div className="tags-wrap">
                                         {form.excludePatterns.map((p) => (
-                                        <span key={p} className="tag">
-                                            {p}
+                                            <span key={p} className="tag">
+                                                {p}
                                                 <button
                                                     type="button"
                                                     className="tag-x"
@@ -484,18 +481,18 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 >
                                                     &times;
                                                 </button>
-                                        </span>
-                                    ))}
-                                    <input
-                                        ref={excludeInputRef}
-                                        className="tag-input"
-                                        placeholder="Add pattern…"
-                                        onKeyDown={handleExcludeKeyDown}
-                                    />
+                                            </span>
+                                        ))}
+                                        <input
+                                            ref={excludeInputRef}
+                                            className="tag-input"
+                                            placeholder="Add pattern…"
+                                            onKeyDown={handleExcludeKeyDown}
+                                        />
+                                    </div>
                                 </div>
-                            </div>
 
-                            <div className="action-bar">
+                                <div className="action-bar">
                                     <button
                                         type="button"
                                         className="btn primary"
@@ -507,7 +504,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             : isRunning
                                               ? "Running…"
                                               : "Start Discovery"}
-                                </button>
+                                    </button>
                                     {isRunning && (
                                         <button
                                             type="button"
@@ -519,7 +516,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             {pauseMutation.isPending ? "Pausing…" : "Pause"}
                                         </button>
                                     )}
-                                {canContinue && (
+                                    {canContinue && (
                                         <button
                                             type="button"
                                             className="btn"
@@ -529,9 +526,9 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             {continueMutation.isPending
                                                 ? "Continuing…"
                                                 : "Continue"}
-                                    </button>
-                                )}
-                                {runtime?.requiresAuth && (
+                                        </button>
+                                    )}
+                                    {runtime?.requiresAuth && (
                                         <button
                                             type="button"
                                             className="btn"
@@ -541,33 +538,33 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             {authAssistQuery.isFetching
                                                 ? "Loading…"
                                                 : "Auth Assist"}
-                                    </button>
-                                )}
+                                        </button>
+                                    )}
                                     <button
                                         type="button"
                                         className="btn danger"
                                         onClick={handleClear}
                                         disabled={isActionPending}
                                     >
-                                    {clearMutation.isPending ? "Clearing…" : "Clear Data"}
-                                </button>
-                            </div>
+                                        {clearMutation.isPending ? "Clearing…" : "Clear Data"}
+                                    </button>
+                                </div>
 
-                            {actionError && (
+                                {actionError && (
                                     <div className="error-banner">
                                         <strong>Error:</strong> {actionError}
                                     </div>
-                            )}
-                            {queryError && !actionError && (
+                                )}
+                                {queryError && !actionError && (
                                     <div className="error-banner">
                                         <strong>Data Error:</strong> {queryError}
                                     </div>
-                            )}
-                        </section>
+                                )}
+                            </section>
 
-                        {/* ── Banners ── */}
-                        {isRunning && progressPct !== null && (
-                            <div className="progress-bar-wrap">
+                            {/* ── Banners ── */}
+                            {isRunning && progressPct !== null && (
+                                <div className="progress-bar-wrap">
                                     <div
                                         className="progress-bar"
                                         style={{ width: `${progressPct}%` }}
@@ -576,10 +573,10 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                         {runtime?.pagesDiscovered ?? 0} / {runtime?.maxPages} pages
                                         ({progressPct}%)
                                     </span>
-                            </div>
-                        )}
-                        {showCompletion && (
-                            <div className="banner banner-success">
+                                </div>
+                            )}
+                            {showCompletion && (
+                                <div className="banner banner-success">
                                     <svg
                                         viewBox="0 0 24 24"
                                         fill="none"
@@ -600,10 +597,10 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                     >
                                         &times;
                                     </button>
-                            </div>
-                        )}
+                                </div>
+                            )}
                             {runtime?.phase === "paused" && blockers.length === 0 && (
-                            <div className="banner banner-warn">
+                                <div className="banner banner-warn">
                                     <svg
                                         viewBox="0 0 24 24"
                                         fill="none"
@@ -614,8 +611,8 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                         <path d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                                     </svg>
                                     <span>Discovery paused &mdash; waiting to continue</span>
-                            </div>
-                        )}
+                                </div>
+                            )}
                             {blockers.length > 0 && (
                                 <BlockerPanel
                                     blockers={blockers as BlockerRow[]}
@@ -631,116 +628,116 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                         runtime?.requiresAuth ? authAssistQuery.data?.command : null
                                     }
                                 />
-                        )}
+                            )}
 
-                        {/* ── Status ── */}
-                        <section className="card">
-                            <h2 className="card-title">Status</h2>
-                            <div className="stat-grid">
-                                <div className="stat">
-                                    <span className="stat-label">Phase</span>
+                            {/* ── Status ── */}
+                            <section className="card">
+                                <h2 className="card-title">Status</h2>
+                                <div className="stat-grid">
+                                    <div className="stat">
+                                        <span className="stat-label">Phase</span>
                                         <span
                                             className={`stat-value phase-${runtime?.phase ?? "idle"}`}
                                         >
                                             {runtime?.phase ?? "idle"}
                                         </span>
-                                </div>
-                                <div className="stat">
-                                    <span className="stat-label">Pages</span>
+                                    </div>
+                                    <div className="stat">
+                                        <span className="stat-label">Pages</span>
                                         <span className="stat-value">
                                             {stats?.pagesCount ?? runtime?.pagesDiscovered ?? 0}
                                         </span>
-                                </div>
-                                <div className="stat">
-                                    <span className="stat-label">Links</span>
+                                    </div>
+                                    <div className="stat">
+                                        <span className="stat-label">Links</span>
                                         <span className="stat-value">
                                             {stats?.linksCount ?? runtime?.linksFound ?? 0}
                                         </span>
-                                </div>
-                                <div className="stat">
-                                    <span className="stat-label">Verified</span>
+                                    </div>
+                                    <div className="stat">
+                                        <span className="stat-label">Verified</span>
                                         <span className="stat-value clr-ok">
                                             {stats?.verifiedLinksCount ?? 0}
                                         </span>
-                                </div>
-                                <div className="stat">
-                                    <span className="stat-label">Broken</span>
+                                    </div>
+                                    <div className="stat">
+                                        <span className="stat-label">Broken</span>
                                         <span className="stat-value clr-err">
                                             {stats?.brokenLinksCount ?? 0}
                                         </span>
-                                </div>
-                                <div className="stat">
-                                    <span className="stat-label">Blockers</span>
+                                    </div>
+                                    <div className="stat">
+                                        <span className="stat-label">Blockers</span>
                                         <span
                                             className={`stat-value ${(stats?.unresolvedBlockersCount ?? 0) > 0 ? "clr-warn" : ""}`}
                                         >
                                             {stats?.unresolvedBlockersCount ??
                                                 runtime?.authBlockersFound ??
                                                 0}
-                                    </span>
+                                        </span>
+                                    </div>
                                 </div>
-                            </div>
 
-                            {latestSession && (
-                                <div className="session-strip">
+                                {latestSession && (
+                                    <div className="session-strip">
                                         <span className="session-kv">
                                             <span className="session-k">Session</span>
                                             {latestSession.status}
                                         </span>
-                                    {latestSession.completedAt && (
+                                        {latestSession.completedAt && (
                                             <span className="session-kv">
                                                 <span className="session-k">Completed</span>
                                                 {formatDate(latestSession.completedAt)}
                                             </span>
-                                    )}
-                                    {latestSession.blockedAtUrl && (
+                                        )}
+                                        {latestSession.blockedAtUrl && (
                                             <span className="session-kv">
                                                 <span className="session-k">Blocked at</span>
                                                 <span className="session-url">
                                                     {latestSession.blockedAtUrl}
                                                 </span>
                                             </span>
-                                    )}
-                                </div>
-                            )}
-                        </section>
+                                        )}
+                                    </div>
+                                )}
+                            </section>
 
-                        {/* ── Activity ── */}
+                            {/* ── Activity ── */}
                             {timeline.length > 0 && (
-                            <section className="card">
-                                <h2 className="card-title">Activity</h2>
+                                <section className="card">
+                                    <h2 className="card-title">Activity</h2>
 
-                                {timeline.length > 0 && (
-                                    <div className="timeline">
-                                        {timeline.map((event) => (
-                                            <div key={event.id} className="tl-event">
-                                                <div className="tl-top">
+                                    {timeline.length > 0 && (
+                                        <div className="timeline">
+                                            {timeline.map((event) => (
+                                                <div key={event.id} className="tl-event">
+                                                    <div className="tl-top">
                                                         <span className="tl-type">
                                                             {event.type}
                                                         </span>
                                                         <time className="tl-time">
                                                             {formatDate(event.timestamp)}
                                                         </time>
+                                                    </div>
+                                                    <p className="tl-msg">{event.message}</p>
                                                 </div>
-                                                <p className="tl-msg">{event.message}</p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
+                                            ))}
+                                        </div>
+                                    )}
 
                                     {/* Per-blocker resolution actions live in the
                                      BlockerPanel above so unresolved blockers
                                      don't get rendered twice. The Activity card
                                      keeps just the timeline. */}
-                            </section>
-                        )}
-                    </div>
-                )}
+                                </section>
+                            )}
+                        </div>
+                    )}
 
-                {/* ═══════════ RESULTS ═══════════ */}
-                {activeTab === "results" && (
-                    <div className="tab-content">
-                        <div className="results-sub-tabs">
+                    {/* ═══════════ RESULTS ═══════════ */}
+                    {activeTab === "results" && (
+                        <div className="tab-content">
+                            <div className="results-sub-tabs">
                                 <button
                                     type="button"
                                     className={`results-sub-tab ${resultsSubTab === "pages" ? "active" : ""}`}
@@ -750,7 +747,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                     {pagesTotal > 0 && (
                                         <span className="sub-badge">{pagesTotal}</span>
                                     )}
-                            </button>
+                                </button>
                                 <button
                                     type="button"
                                     className={`results-sub-tab ${resultsSubTab === "verified" ? "active" : ""}`}
@@ -762,7 +759,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             {linksQuery.data?.verifiedCount}
                                         </span>
                                     )}
-                            </button>
+                                </button>
                                 <button
                                     type="button"
                                     className={`results-sub-tab ${resultsSubTab === "broken" ? "active" : ""}`}
@@ -774,11 +771,11 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             {linksQuery.data?.brokenCount}
                                         </span>
                                     )}
-                            </button>
-                        </div>
+                                </button>
+                            </div>
 
-                        {resultsSubTab === "pages" && (
-                            <section className="dv-section">
+                            {resultsSubTab === "pages" && (
+                                <section className="dv-section">
                                     <div className="table-wrap">
                                         <table>
                                             <thead>
@@ -789,8 +786,8 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     <th>Actions</th>
                                                 </tr>
                                             </thead>
-                                    <tbody>
-                                        {pages.length === 0 ? (
+                                            <tbody>
+                                                {pages.length === 0 ? (
                                                     <tr>
                                                         <td colSpan={4} className="empty-cell">
                                                             No pages discovered yet.
@@ -798,15 +795,15 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     </tr>
                                                 ) : (
                                                     pages.map((page) => (
-                                            <tr key={`${page.url}-${page.depth}`}>
+                                                        <tr key={`${page.url}-${page.depth}`}>
                                                             <td
                                                                 className="url-cell"
                                                                 title={page.url}
                                                             >
                                                                 {page.url}
                                                             </td>
-                                                <td>{page.depth}</td>
-                                                <td>{page.title || "Untitled"}</td>
+                                                            <td>{page.depth}</td>
+                                                            <td>{page.title || "Untitled"}</td>
                                                             <td>
                                                                 <div className="page-actions">
                                                                     <button
@@ -843,14 +840,14 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                                     )}
                                                                 </div>
                                                             </td>
-                                            </tr>
+                                                        </tr>
                                                     ))
                                                 )}
-                                    </tbody>
+                                            </tbody>
                                         </table>
                                     </div>
-                                {pagesTotal > PAGES_PER_PAGE && (
-                                    <div className="pagination">
+                                    {pagesTotal > PAGES_PER_PAGE && (
+                                        <div className="pagination">
                                             <button
                                                 type="button"
                                                 className="btn sm"
@@ -878,12 +875,12 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             >
                                                 Next
                                             </button>
-                                    </div>
-                                )}
-                                {selectedPageUrl && (
-                                    <div className="snapshot-drawer">
-                                        <div className="snapshot-bar">
-                                            <span className="snapshot-title">DOM Snapshot</span>
+                                        </div>
+                                    )}
+                                    {selectedPageUrl && (
+                                        <div className="snapshot-drawer">
+                                            <div className="snapshot-bar">
+                                                <span className="snapshot-title">DOM Snapshot</span>
                                                 <button
                                                     type="button"
                                                     className="snapshot-close"
@@ -891,40 +888,40 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 >
                                                     &times;
                                                 </button>
-                                        </div>
-                                        {pageSnapshotQuery.isLoading ? (
-                                            <p className="empty">Loading snapshot…</p>
-                                        ) : !selectedSnapshot?.snapshotJson ? (
+                                            </div>
+                                            {pageSnapshotQuery.isLoading ? (
+                                                <p className="empty">Loading snapshot…</p>
+                                            ) : !selectedSnapshot?.snapshotJson ? (
                                                 <p className="empty">
                                                     No snapshot available for this page.
                                                 </p>
-                                        ) : (
-                                            <>
-                                                <div className="snapshot-meta">
-                                                    <span>{selectedSnapshot.url}</span>
-                                                    <span>Depth {selectedSnapshot.depth}</span>
+                                            ) : (
+                                                <>
+                                                    <div className="snapshot-meta">
+                                                        <span>{selectedSnapshot.url}</span>
+                                                        <span>Depth {selectedSnapshot.depth}</span>
                                                         {selectedSnapshot.title && (
                                                             <span>{selectedSnapshot.title}</span>
                                                         )}
-                                                </div>
+                                                    </div>
                                                     <pre className="snapshot-pre">
                                                         {selectedSnapshot.snapshotJson}
                                                     </pre>
-                                            </>
-                                        )}
-                                    </div>
-                                )}
-                            </section>
-                        )}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+                                </section>
+                            )}
 
-                        {resultsSubTab === "verified" && (
-                            <div className="links-list">
+                            {resultsSubTab === "verified" && (
+                                <div className="links-list">
                                     {verifiedLinks.length === 0 ? (
                                         <p className="empty">No verified paths yet.</p>
                                     ) : (
                                         verifiedLinks.map((link, i) => (
-                                    <div key={`v-${i}`} className="link-row">
-                                        <div className="link-path">
+                                            <div key={`v-${i}`} className="link-row">
+                                                <div className="link-path">
                                                     <span
                                                         className="link-from"
                                                         title={link.fromUrl}
@@ -944,8 +941,8 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     <span className="link-to" title={link.toUrl}>
                                                         {shortenUrl(link.toUrl)}
                                                     </span>
-                                        </div>
-                                        <div className="link-meta">
+                                                </div>
+                                                <div className="link-meta">
                                                     <code className="link-selector">
                                                         {link.selector}
                                                     </code>
@@ -954,21 +951,21 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                             {link.linkText}
                                                         </span>
                                                     )}
-                                        </div>
-                                    </div>
+                                                </div>
+                                            </div>
                                         ))
                                     )}
-                            </div>
-                        )}
+                                </div>
+                            )}
 
-                        {resultsSubTab === "broken" && (
-                            <div className="links-list">
+                            {resultsSubTab === "broken" && (
+                                <div className="links-list">
                                     {brokenLinks.length === 0 ? (
                                         <p className="empty">No broken links detected.</p>
                                     ) : (
                                         brokenLinks.map((link, i) => (
-                                    <div key={`b-${i}`} className="link-row broken">
-                                        <div className="link-path">
+                                            <div key={`b-${i}`} className="link-row broken">
+                                                <div className="link-path">
                                                     <span
                                                         className="link-from"
                                                         title={link.fromUrl}
@@ -991,19 +988,19 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                     >
                                                         {shortenUrl(link.toUrl)}
                                                     </span>
-                                        </div>
+                                                </div>
                                                 {link.errorMessage && (
                                                     <span className="link-error">
                                                         {link.errorMessage}
                                                     </span>
                                                 )}
-                                    </div>
+                                            </div>
                                         ))
                                     )}
-                            </div>
-                        )}
-                    </div>
-                )}
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
 

@@ -1,7 +1,7 @@
-import chalk from "chalk";
-import path from "node:path";
 import fs from "node:fs";
-import { syncCurrentTicket, type SyncResult } from "@raiken/core";
+import path from "node:path";
+import { type SyncResult, syncCurrentTicket } from "@raiken/core";
+import chalk from "chalk";
 
 interface SyncCommandOptions {
     ticket?: string;
@@ -20,7 +20,7 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
         integrationConfig = raw?.integrations;
         if (raw?.ai) {
             aiConfig = {
-                apiKey: raw.ai.apiKey || process.env["OPENROUTER_API_KEY"],
+                apiKey: raw.ai.apiKey || process.env.OPENROUTER_API_KEY,
                 model: raw.ai.model,
                 baseURL: raw.ai.baseURL,
             };
@@ -32,7 +32,7 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
     if (!aiConfig?.apiKey) {
         aiConfig = {
             ...aiConfig,
-            apiKey: process.env["OPENROUTER_API_KEY"],
+            apiKey: process.env.OPENROUTER_API_KEY,
         };
     }
 

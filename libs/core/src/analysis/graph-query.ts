@@ -1,25 +1,25 @@
-import * as path from 'node:path';
-import { CodeGraphDB } from '../database/db';
-import type { GraphEdge, ParsedSymbol } from '../types';
+import * as path from "node:path";
+import { CodeGraphDB } from "../database/db";
+import type { GraphEdge, ParsedSymbol } from "../types";
 
 /**
  * Reason a test was flagged as affected by a source change.
  * Ordered roughly from highest- to lowest- evidence.
  */
 export type AffectReason =
-    | 'source_map'      // explicit user-recorded mapping
-    | 'runtime'         // captured during a real test run
-    | 'imports'         // static dependency: test file imports the changed file
-    | 'calls'           // symbol-level call from a test symbol into changed code
-    | 'renders'         // JSX render of an exported component
-    | 'name_match';     // weakest: name overlap between test file and source
+    | "source_map" // explicit user-recorded mapping
+    | "runtime" // captured during a real test run
+    | "imports" // static dependency: test file imports the changed file
+    | "calls" // symbol-level call from a test symbol into changed code
+    | "renders" // JSX render of an exported component
+    | "name_match"; // weakest: name overlap between test file and source
 
 export interface AffectedTestEvidence {
     testFile: string;
     sourceFile: string;
     reasons: Array<{
         reason: AffectReason;
-        provenance: GraphEdge['provenance'] | 'manual';
+        provenance: GraphEdge["provenance"] | "manual";
         confidence: number;
         line?: number;
         snippet?: string;
@@ -36,7 +36,7 @@ export interface AffectedSymbolEvidence {
     /** What changed source file caused us to flag this symbol. */
     triggeredBy: string;
     reasons: Array<{
-        reason: 'imports' | 'calls' | 'renders' | 'extends' | 'implements';
+        reason: "imports" | "calls" | "renders" | "extends" | "implements";
         confidence: number;
         line?: number;
         snippet?: string;
@@ -78,7 +78,7 @@ export class GraphQueryService {
             const upsert = (
                 testFile: string,
                 sourceFile: string,
-                reason: AffectedTestEvidence['reasons'][number],
+                reason: AffectedTestEvidence["reasons"][number],
             ) => {
                 const key = `${testFile}::${sourceFile}`;
                 const existing = merged.get(key);
@@ -98,16 +98,16 @@ export class GraphQueryService {
             // ---- Signal 1 + 3: explicit source_map and import-based dependents
             const legacy = db.getAffectedTests(changedSourceFiles);
             for (const row of legacy) {
-                if (row.reason === 'source_map') {
+                if (row.reason === "source_map") {
                     upsert(row.testFile, row.sourceFile, {
-                        reason: 'source_map',
-                        provenance: 'manual',
+                        reason: "source_map",
+                        provenance: "manual",
                         confidence: 1.0,
                     });
                 } else {
                     upsert(row.testFile, row.sourceFile, {
-                        reason: 'imports',
-                        provenance: 'static_ast',
+                        reason: "imports",
+                        provenance: "static_ast",
                         confidence: 0.85,
                     });
                 }
@@ -116,16 +116,16 @@ export class GraphQueryService {
             // ---- Signal 2 + 4: edge-based (calls / renders / runtime) from any
             // test file into a changed source file.
             const incoming = db.getIncomingEdges(changedSourceFiles, {
-                kinds: ['calls', 'renders', 'imports'],
+                kinds: ["calls", "renders", "imports"],
             });
 
             for (const edge of incoming) {
                 if (!isLikelyTestPath(edge.sourceFile)) continue;
 
-                if (edge.kind === 'imports') continue; // already covered by Signal 3
+                if (edge.kind === "imports") continue; // already covered by Signal 3
 
                 upsert(edge.sourceFile, edge.targetFile, {
-                    reason: edge.kind === 'calls' ? 'calls' : 'renders',
+                    reason: edge.kind === "calls" ? "calls" : "renders",
                     provenance: edge.provenance,
                     confidence: edge.confidence,
                     line: edge.evidence?.line,
@@ -155,7 +155,7 @@ export class GraphQueryService {
         const db = new CodeGraphDB(this.projectPath);
         try {
             const incoming = db.getIncomingEdges(changedSourceFiles, {
-                kinds: ['calls', 'renders', 'extends', 'implements', 'imports'],
+                kinds: ["calls", "renders", "extends", "implements", "imports"],
             });
 
             const merged = new Map<string, AffectedSymbolEvidence>();
@@ -167,7 +167,7 @@ export class GraphQueryService {
                 const key = `${edge.sourceFile}::${edge.sourceSymbol}::${edge.targetFile}`;
                 const existing = merged.get(key);
                 const reason = {
-                    reason: edge.kind as AffectedSymbolEvidence['reasons'][number]['reason'],
+                    reason: edge.kind as AffectedSymbolEvidence["reasons"][number]["reason"],
                     confidence: edge.confidence,
                     line: edge.evidence?.line,
                     snippet: edge.evidence?.snippet,
@@ -206,7 +206,10 @@ export class GraphQueryService {
      * Best-effort: walks one hop. Multi-hop reasoning belongs in a future
      * extension built on top of this service.
      */
-    explain(testFile: string, changedSourceFiles: string[]): {
+    explain(
+        testFile: string,
+        changedSourceFiles: string[],
+    ): {
         testFile: string;
         chains: Array<{
             sourceFile: string;
@@ -220,7 +223,7 @@ export class GraphQueryService {
             for (const src of changedSourceFiles) {
                 const directEdges = db
                     .getIncomingEdges([src], {
-                        kinds: ['calls', 'renders', 'imports'],
+                        kinds: ["calls", "renders", "imports"],
                     })
                     .filter((e) => e.sourceFile === testFile);
 
@@ -257,9 +260,9 @@ function isLikelyTestPath(filePath: string): boolean {
     const lower = filePath.toLowerCase();
     return (
         /\.(spec|test|e2e)\.[jt]sx?$/.test(lower) ||
-        lower.includes('/tests/') ||
-        lower.includes('/test/') ||
-        lower.includes('/__tests__/') ||
-        lower.includes('/e2e/')
+        lower.includes("/tests/") ||
+        lower.includes("/test/") ||
+        lower.includes("/__tests__/") ||
+        lower.includes("/e2e/")
     );
 }

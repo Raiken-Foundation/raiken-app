@@ -46,7 +46,7 @@ body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg);
 }
 .logout-btn:hover { background: #fef2f2; color: var(--danger); border-color: var(--danger); }
 
-.main-content { flex: 1; padding: 2rem; overflow-auto; }
+.main-content { flex: 1; padding: 2rem; overflow: auto; }
 .page-header { margin-bottom: 1.5rem; }
 .page-header h1 { font-size: 1.5rem; font-weight: 600; }
 .page-header p { color: var(--muted); font-size: .875rem; margin-top: .25rem; }

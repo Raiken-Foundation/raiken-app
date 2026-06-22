@@ -1,150 +1,154 @@
-import { useState, useEffect, useRef } from 'react';
-import { trpc } from '../utils/trpc';
+import { useEffect, useRef, useState } from "react";
+import { trpc } from "../utils/trpc";
 
 interface LandingPageProps {
-  onStart?: (prompt: string) => void;
+    onStart?: (prompt: string) => void;
 }
 
 export function LandingPage({ onStart }: LandingPageProps) {
-  const [prompt, setPrompt] = useState('');
-  const [isReady, setIsReady] = useState(false);
-  const [projectName, setProjectName] = useState('Loading...');
-  const inputRef = useRef<HTMLInputElement>(null);
+    const [prompt, setPrompt] = useState("");
+    const [isReady, setIsReady] = useState(false);
+    const [projectName, setProjectName] = useState("Loading...");
+    const inputRef = useRef<HTMLInputElement>(null);
 
-  // Check backend health
-  const healthQuery = trpc.getHealth.useQuery(undefined, {
-    retry: 3,
-    retryDelay: 1000,
-  });
+    // Check backend health
+    const healthQuery = trpc.getHealth.useQuery(undefined, {
+        retry: 3,
+        retryDelay: 1000,
+    });
 
-  // Get project info
-  const projectQuery = trpc.getProjectInfo.useQuery(undefined, {
-    enabled: healthQuery.isSuccess,
-  });
+    // Get project info
+    const projectQuery = trpc.getProjectInfo.useQuery(undefined, {
+        enabled: healthQuery.isSuccess,
+    });
 
-  useEffect(() => {
-    if (healthQuery.isSuccess) {
-      setIsReady(true);
-    }
-  }, [healthQuery.isSuccess]);
+    useEffect(() => {
+        if (healthQuery.isSuccess) {
+            setIsReady(true);
+        }
+    }, [healthQuery.isSuccess]);
 
-  useEffect(() => {
-    if (projectQuery.data?.path) {
-      // Extract project name from path
-      const parts = projectQuery.data.path.split('/');
-      setProjectName(parts[parts.length - 1] || 'project');
-    }
-  }, [projectQuery.data]);
+    useEffect(() => {
+        if (projectQuery.data?.path) {
+            // Extract project name from path
+            const parts = projectQuery.data.path.split("/");
+            setProjectName(parts[parts.length - 1] || "project");
+        }
+    }, [projectQuery.data]);
 
-  // Focus input on mount
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    // Focus input on mount
+    useEffect(() => {
+        inputRef.current?.focus();
+    }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (prompt.trim() && onStart) {
-      onStart(prompt.trim());
-    }
-  };
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (prompt.trim() && onStart) {
+            onStart(prompt.trim());
+        }
+    };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit(e);
-    }
-  };
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSubmit(e);
+        }
+    };
 
-  return (
-    <div className="landing-container">
-      {/* Main Content */}
-      <main className="landing-main">
-        {/* Logo */}
-        <h1 className="landing-logo">Raiken</h1>
-        <p className="landing-subtitle">AI Test Engineer</p>
+    return (
+        <div className="landing-container">
+            {/* Main Content */}
+            <main className="landing-main">
+                {/* Logo */}
+                <h1 className="landing-logo">Raiken</h1>
+                <p className="landing-subtitle">AI Test Engineer</p>
 
-        {/* Project Selector */}
-        <button type="button" className="project-selector">
-          <svg 
-            className="project-icon" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="1.5"
-            aria-hidden="true"
-          >
-            <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>
-          <span>{projectName}</span>
-        </button>
+                {/* Project Selector */}
+                <button type="button" className="project-selector">
+                    <svg
+                        className="project-icon"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        aria-hidden="true"
+                    >
+                        <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                    </svg>
+                    <span>{projectName}</span>
+                </button>
 
-        {/* Command Input */}
-        <form onSubmit={handleSubmit} className="command-form">
-          <div className="command-input-wrapper">
-            <svg 
-              className="command-icon" 
-              viewBox="0 0 24 24" 
-              fill="none"
-              aria-hidden="true"
-            >
-              <path 
-                d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" 
-                stroke="currentColor" 
-                strokeWidth="1.5" 
-                strokeLinejoin="round"
-              />
-              <path 
-                d="M5 19l1 3 3-1-1-3-3 1z" 
-                stroke="currentColor" 
-                strokeWidth="1.5" 
-                strokeLinejoin="round"
-              />
-              <path 
-                d="M19 19l-1 3-3-1 1-3 3 1z" 
-                stroke="currentColor" 
-                strokeWidth="1.5" 
-                strokeLinejoin="round"
-              />
-            </svg>
-            <input
-              ref={inputRef}
-              type="text"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="What do you want to test today?"
-              className="command-input"
-              disabled={!isReady}
-            />
-            <button 
-              type="submit" 
-              className="command-submit"
-              disabled={!prompt.trim() || !isReady}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </button>
-          </div>
-        </form>
+                {/* Command Input */}
+                <form onSubmit={handleSubmit} className="command-form">
+                    <div className="command-input-wrapper">
+                        <svg
+                            className="command-icon"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            aria-hidden="true"
+                        >
+                            <path
+                                d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="M5 19l1 3 3-1-1-3-3 1z"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="M19 19l-1 3-3-1 1-3 3 1z"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinejoin="round"
+                            />
+                        </svg>
+                        <input
+                            ref={inputRef}
+                            type="text"
+                            value={prompt}
+                            onChange={(e) => setPrompt(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder="What do you want to test today?"
+                            className="command-input"
+                            disabled={!isReady}
+                        />
+                        <button
+                            type="submit"
+                            className="command-submit"
+                            disabled={!prompt.trim() || !isReady}
+                        >
+                            <svg
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                aria-hidden="true"
+                            >
+                                <path d="M5 12h14M12 5l7 7-7 7" />
+                            </svg>
+                        </button>
+                    </div>
+                </form>
 
-        {/* Status Indicator */}
-        <div className="status-indicator">
-          <span className={`status-dot ${isReady ? 'ready' : 'loading'}`} />
-          <span className="status-text">
-            {isReady ? 'Ready' : 'Connecting...'}
-          </span>
-        </div>
-      </main>
+                {/* Status Indicator */}
+                <div className="status-indicator">
+                    <span className={`status-dot ${isReady ? "ready" : "loading"}`} />
+                    <span className="status-text">{isReady ? "Ready" : "Connecting..."}</span>
+                </div>
+            </main>
 
-      {/* Footer Hint */}
-      <footer className="landing-footer">
-        <span className="hint-text">
-          Press <kbd>Enter</kbd> to begin
-        </span>
-      </footer>
+            {/* Footer Hint */}
+            <footer className="landing-footer">
+                <span className="hint-text">
+                    Press <kbd>Enter</kbd> to begin
+                </span>
+            </footer>
 
-      <style>{`
+            <style>{`
         .landing-container {
           min-height: 100vh;
           background: #0a0a0a;
@@ -362,9 +366,8 @@ export function LandingPage({ onStart }: LandingPageProps) {
           margin: 0 0.25rem;
         }
       `}</style>
-    </div>
-  );
+        </div>
+    );
 }
 
 export default LandingPage;
-

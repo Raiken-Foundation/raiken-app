@@ -6,6 +6,17 @@
         "indentWidth": 4,
         "lineWidth": 100
     },
+    "files": {
+        "includes": [
+            "**",
+            "!**/node_modules",
+            "!**/dist",
+            "!**/.nx",
+            "!**/.raiken",
+            "!**/coverage",
+            "!**/test-results"
+        ]
+    },
     "linter": {
         "enabled": true,
         "rules": {

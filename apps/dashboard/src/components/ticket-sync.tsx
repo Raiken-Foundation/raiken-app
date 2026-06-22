@@ -8,10 +8,7 @@ interface TicketSyncProps {
 export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
     const [expanded, setExpanded] = useState(false);
 
-    const statusQuery = trpc.getTicketStatus.useQuery(
-        {},
-        { refetchInterval: 30000, retry: 1 },
-    );
+    const statusQuery = trpc.getTicketStatus.useQuery({}, { refetchInterval: 30000, retry: 1 });
 
     const syncMutation = trpc.syncTicket.useMutation();
 
@@ -56,8 +53,7 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
                     ) : ticketHint ? (
                         <span className="ticket-info">
                             <span className="ticket-hint">
-                                #{ticketHint.id} detected on{" "}
-                                <code>{branch}</code>
+                                #{ticketHint.id} detected on <code>{branch}</code>
                             </span>
                         </span>
                     ) : branch ? (
@@ -79,7 +75,8 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
                         >
                             {impact.affectedTestFiles.length > 0 ? (
                                 <span className="impact-badge warn">
-                                    {new Set(impact.affectedTestFiles.map((t) => t.testFile)).size} test(s) affected
+                                    {new Set(impact.affectedTestFiles.map((t) => t.testFile)).size}{" "}
+                                    test(s) affected
                                 </span>
                             ) : impact.affectedSourceFiles.length > 0 ? (
                                 <span className="impact-badge info">
@@ -122,9 +119,7 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
                 </div>
             </div>
 
-            {expanded && impact && (
-                <ImpactPanel impact={impact} onGenerateTest={onGenerateTest} />
-            )}
+            {expanded && impact && <ImpactPanel impact={impact} onGenerateTest={onGenerateTest} />}
 
             {syncMutation.isError && (
                 <div className="sync-error">
@@ -208,9 +203,7 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
         testGroups.set(row.testFile, existing);
     }
 
-    const uniqueTests = [...testGroups.values()].sort(
-        (a, b) => b.confidence - a.confidence,
-    );
+    const uniqueTests = [...testGroups.values()].sort((a, b) => b.confidence - a.confidence);
 
     return (
         <div className="impact-panel">
@@ -228,9 +221,7 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
                                     <button
                                         type="button"
                                         className="test-row"
-                                        onClick={() =>
-                                            setOpenTest(isOpen ? null : group.testFile)
-                                        }
+                                        onClick={() => setOpenTest(isOpen ? null : group.testFile)}
                                     >
                                         <span className="dot warn" />
                                         <span className="item-path">{group.testFile}</span>
@@ -287,7 +278,8 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
                                                                         {e.provenance}
                                                                     </span>
                                                                 )}
-                                                                {(e.sourceSymbol || e.targetSymbol) && (
+                                                                {(e.sourceSymbol ||
+                                                                    e.targetSymbol) && (
                                                                     <span className="symbol-text">
                                                                         {e.sourceSymbol ?? "?"}
                                                                         {" → "}
@@ -300,7 +292,8 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
                                                                     </code>
                                                                 )}
                                                                 <span className="evidence-conf">
-                                                                    {Math.round(e.confidence * 100)}%
+                                                                    {Math.round(e.confidence * 100)}
+                                                                    %
                                                                 </span>
                                                             </li>
                                                         ))}

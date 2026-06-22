@@ -10,19 +10,19 @@
  * Result: a TicketImpact with affected files, tests, and suggestions.
  */
 
-import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
-import { CodeGraphDB } from "../database/db";
-import { ProjectContext } from "../analysis/project-context";
 import { GraphQueryService } from "../analysis/graph-query";
+import { ProjectContext } from "../analysis/project-context";
+import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
 import type {
-    TicketInfo,
+    SuggestionAction,
     TicketImpact,
     TicketImpactReason,
+    TicketInfo,
     TicketSuggestion,
-    SuggestionAction,
 } from "./types";
 
 interface AnalyzerConfig {
@@ -34,13 +34,19 @@ interface AnalyzerConfig {
 const impactSchema = z.object({
     affectedComponents: z
         .array(z.string())
-        .describe("Names of components, modules, pages, or features likely affected by this ticket"),
+        .describe(
+            "Names of components, modules, pages, or features likely affected by this ticket",
+        ),
     affectedKeywords: z
         .array(z.string())
-        .describe("Code-level keywords: function names, class names, route paths, CSS selectors, API endpoints"),
+        .describe(
+            "Code-level keywords: function names, class names, route paths, CSS selectors, API endpoints",
+        ),
     testImpact: z
         .enum(["new_tests_needed", "existing_tests_need_update", "no_test_impact", "unclear"])
-        .describe("Whether this ticket requires new tests, updates to existing tests, or has no test impact"),
+        .describe(
+            "Whether this ticket requires new tests, updates to existing tests, or has no test impact",
+        ),
     reasoning: z
         .string()
         .describe("Brief explanation of why these components/keywords are affected"),
@@ -134,7 +140,12 @@ export class TicketAnalyzer {
             llmAnalysis,
         );
 
-        const summary = this.buildSummary(ticket, affectedSourceFiles, legacyTestFiles, llmAnalysis);
+        const summary = this.buildSummary(
+            ticket,
+            affectedSourceFiles,
+            legacyTestFiles,
+            llmAnalysis,
+        );
 
         return {
             ticket,
@@ -153,7 +164,12 @@ export class TicketAnalyzer {
      */
     private legacyReason(reasons: string[]): "source_map" | "dependency" | "semantic" {
         if (reasons.includes("source_map")) return "source_map";
-        if (reasons.includes("imports") || reasons.includes("calls") || reasons.includes("renders") || reasons.includes("runtime")) {
+        if (
+            reasons.includes("imports") ||
+            reasons.includes("calls") ||
+            reasons.includes("renders") ||
+            reasons.includes("runtime")
+        ) {
             return "dependency";
         }
         return "semantic";
@@ -163,10 +179,7 @@ export class TicketAnalyzer {
     // LLM Analysis
     // =========================================================================
 
-    private async llmAnalyze(
-        ticket: TicketInfo,
-        apiKey: string,
-    ): Promise<ImpactAnalysis | null> {
+    private async llmAnalyze(ticket: TicketInfo, apiKey: string): Promise<ImpactAnalysis | null> {
         try {
             const model = new ChatOpenAI({
                 apiKey,
@@ -220,19 +233,13 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
         const ctx = ProjectContext.getInstance(this.projectPath);
         if (!ctx.isInitialized()) return [];
 
-        const allKeywords = [
-            ...analysis.affectedComponents,
-            ...analysis.affectedKeywords,
-        ];
+        const allKeywords = [...analysis.affectedComponents, ...analysis.affectedKeywords];
 
         const query = allKeywords.join(" ");
         return ctx.findRelevantFiles(query, 15);
     }
 
-    private async semanticSearch(
-        ticket: TicketInfo,
-        analysis: ImpactAnalysis,
-    ): Promise<string[]> {
+    private async semanticSearch(ticket: TicketInfo, analysis: ImpactAnalysis): Promise<string[]> {
         const embGen = EmbeddingsGenerator.getInstance();
         if (!embGen.isReady()) return [];
 
@@ -276,7 +283,10 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
             analysis?.testImpact === "new_tests_needed" ||
             (sourceFiles.length > 0 && testFiles.length === 0)
         ) {
-            const featureName = ticket.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+            const featureName = ticket.title
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .slice(0, 40);
             suggestions.push({
                 action: "create_test" as SuggestionAction,
                 reason: `No existing tests cover the files affected by #${ticket.id}`,

@@ -20,11 +20,7 @@ export class AuthDetector {
         this.projectPath = projectPath;
     }
 
-    async detect(
-        page: Page,
-        url: string,
-        response?: Response,
-    ): Promise<AuthBlocker | null> {
+    async detect(page: Page, url: string, response?: Response): Promise<AuthBlocker | null> {
         return detectAuth({
             projectPath: this.projectPath,
             page,

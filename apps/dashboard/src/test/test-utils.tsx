@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type RenderOptions, render } from "@testing-library/react";
 import { httpBatchLink } from "@trpc/client";
-import { render, type RenderOptions } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
 import { trpc } from "../utils/trpc";
 
@@ -25,19 +25,14 @@ function createTestWrapper() {
     return function TestWrapper({ children }: { children: ReactNode }) {
         return (
             <trpc.Provider client={trpcClient} queryClient={queryClient}>
-                <QueryClientProvider client={queryClient}>
-                    {children}
-                </QueryClientProvider>
+                <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
             </trpc.Provider>
         );
     };
 }
 
 // Custom render function that wraps components with providers
-function customRender(
-    ui: ReactElement,
-    options?: Omit<RenderOptions, "wrapper">
-) {
+function customRender(ui: ReactElement, options?: Omit<RenderOptions, "wrapper">) {
     return render(ui, { wrapper: createTestWrapper(), ...options });
 }
 

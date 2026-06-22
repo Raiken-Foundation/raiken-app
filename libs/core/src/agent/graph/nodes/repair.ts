@@ -1,9 +1,9 @@
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import type { TestRunResult } from "../../../testing/runner";
 import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
-import type { TestRunResult } from "../../../testing/runner";
 
 interface AutoCorrectConfig {
     autoCorrect: "suggest" | "apply" | "off";
@@ -54,7 +54,11 @@ function extractCodeFromResponse(raw: string): string | null {
 
     // If the response looks like raw TypeScript (has import statements or test blocks)
     const trimmed = raw.trim();
-    if (/^import\s/m.test(trimmed) || /\btest\s*\(/.test(trimmed) || /\btest\.describe\s*\(/.test(trimmed)) {
+    if (
+        /^import\s/m.test(trimmed) ||
+        /\btest\s*\(/.test(trimmed) ||
+        /\btest\.describe\s*\(/.test(trimmed)
+    ) {
         return trimmed;
     }
 
@@ -113,10 +117,11 @@ export const createRepairNode =
             // Context gathering failed; proceed with what we have
         }
 
-        const contextSnippets = context?.files
-            ?.slice(0, 5)
-            .map((f) => `--- ${f.path} ---\n${f.fullContext.slice(0, 1500)}`)
-            .join("\n\n") || "";
+        const contextSnippets =
+            context?.files
+                ?.slice(0, 5)
+                .map((f) => `--- ${f.path} ---\n${f.fullContext.slice(0, 1500)}`)
+                .join("\n\n") || "";
 
         const systemPrompt = `Fix this failing Playwright test so it passes.
 

@@ -1,10 +1,10 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import path from "node:path";
-import type { GraphStateType } from "../state";
-import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
-import type { AgentNodeDeps } from "./types";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ProjectContext } from "../../../analysis/project-context";
+import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
+import type { GraphStateType } from "../state";
 import { normalizeSelector, parseSummaryElements } from "../utils";
+import type { AgentNodeDeps } from "./types";
 
 const PAGE_SUMMARIES_MAX_CHARS = 3000;
 
@@ -147,16 +147,16 @@ export const createAnswerQuestionsNode =
             const lines: string[] = [];
             lines.push("Answers:");
             lines.push(
-                `- Discovery data is available: ${overview.stats.pagesCount} pages, ${overview.stats.linksCount} links, ${overview.stats.verifiedLinksCount} verified links.`
+                `- Discovery data is available: ${overview.stats.pagesCount} pages, ${overview.stats.linksCount} links, ${overview.stats.verifiedLinksCount} verified links.`,
             );
             if (overview.latestSession) {
                 lines.push(
-                    `- Latest session is ${overview.latestSession.status} (start: ${overview.latestSession.startUrl}).`
+                    `- Latest session is ${overview.latestSession.status} (start: ${overview.latestSession.startUrl}).`,
                 );
             }
             if (overview.stats.unresolvedBlockersCount > 0) {
                 lines.push(
-                    `- There are ${overview.stats.unresolvedBlockersCount} unresolved auth blockers.`
+                    `- There are ${overview.stats.unresolvedBlockersCount} unresolved auth blockers.`,
                 );
             }
 
@@ -178,14 +178,18 @@ export const createAnswerQuestionsNode =
                     };
                     const listed = pagesData.pages.slice(0, 8);
                     if (listed.length > 0) {
-                        lines.push(`- Top discovered pages (${listed.length}/${pagesData.total} shown):`);
+                        lines.push(
+                            `- Top discovered pages (${listed.length}/${pagesData.total} shown):`,
+                        );
                         for (const page of listed) {
                             lines.push(
-                                `  - ${page.url} (depth ${page.depth}, visits ${page.visitCount}, title: ${page.title || "Untitled"})`
+                                `  - ${page.url} (depth ${page.depth}, visits ${page.visitCount}, title: ${page.title || "Untitled"})`,
                             );
                         }
                         if (pagesData.hasMore) {
-                            lines.push("- More pages are available; ask for the next batch if needed.");
+                            lines.push(
+                                "- More pages are available; ask for the next batch if needed.",
+                            );
                         }
                     }
                 }
@@ -202,25 +206,25 @@ export const createAnswerQuestionsNode =
                     url: requestedUrl,
                 });
                 if (snapshotResult.success) {
-                    const snapshot = snapshotResult.data as
-                        | {
-                              url: string;
-                              title: string | null;
-                              depth: number;
-                              snapshotJson: string | null;
-                          }
-                        | null;
+                    const snapshot = snapshotResult.data as {
+                        url: string;
+                        title: string | null;
+                        depth: number;
+                        snapshotJson: string | null;
+                    } | null;
                     if (!snapshot) {
                         lines.push(`- No persisted snapshot was found for ${requestedUrl}.`);
                     } else if (!snapshot.snapshotJson) {
-                        lines.push(`- Snapshot exists for ${requestedUrl}, but the stored payload is empty.`);
+                        lines.push(
+                            `- Snapshot exists for ${requestedUrl}, but the stored payload is empty.`,
+                        );
                     } else {
                         const preview =
                             snapshot.snapshotJson.length > 700
                                 ? `${snapshot.snapshotJson.slice(0, 700)}...`
                                 : snapshot.snapshotJson;
                         lines.push(
-                            `- Snapshot preview for ${snapshot.url} (depth ${snapshot.depth}, title: ${snapshot.title || "Untitled"}):`
+                            `- Snapshot preview for ${snapshot.url} (depth ${snapshot.depth}, title: ${snapshot.title || "Untitled"}):`,
                         );
                         lines.push(`  ${preview}`);
                     }
@@ -238,7 +242,7 @@ export const createAnswerQuestionsNode =
             }
             if (overview.latestSession) {
                 lines.push(
-                    `- Session timestamps: started ${formatDate(overview.latestSession.startedAt)}, completed ${formatDate(overview.latestSession.completedAt)}`
+                    `- Session timestamps: started ${formatDate(overview.latestSession.startedAt)}, completed ${formatDate(overview.latestSession.completedAt)}`,
                 );
             }
 
@@ -259,14 +263,20 @@ export const createAnswerQuestionsNode =
         }
 
         const memoryContext = getMemoryContext();
-        let systemPrompt = buildExplorationPrompt(context, state.userPrompt, memoryContext, state.intent, {
-            activeGoal: state.activeGoal,
+        let systemPrompt = buildExplorationPrompt(
+            context,
+            state.userPrompt,
+            memoryContext,
+            state.intent,
+            {
+                activeGoal: state.activeGoal,
 
-            targetFeature: state.targetFeature,
-            targetUrl: state.targetUrl,
-            missingContext: state.missingContext,
-            nextTool: state.nextTool,
-        });
+                targetFeature: state.targetFeature,
+                targetUrl: state.targetUrl,
+                missingContext: state.missingContext,
+                nextTool: state.nextTool,
+            },
+        );
 
         if (state.pageSummaries && state.pageSummaries.length > 1) {
             const truncated = truncatePageSummaries(state.pageSummaries);
@@ -284,7 +294,9 @@ export const createAnswerQuestionsNode =
             systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
         }
 
-        const extractEvidenceInfo = (text: string): {
+        const extractEvidenceInfo = (
+            text: string,
+        ): {
             hasEvidence: boolean;
             filePaths: string[];
             selectors: string[];
@@ -308,7 +320,8 @@ export const createAnswerQuestionsNode =
             if (evidenceLines.length === 0) {
                 return { hasEvidence: false, filePaths: [], selectors: [] };
             }
-            const filePathPattern = /\b[\w./-]+\.(ts|tsx|js|jsx|md|json|yaml|yml|css|scss|html|txt)\b/i;
+            const filePathPattern =
+                /\b[\w./-]+\.(ts|tsx|js|jsx|md|json|yaml|yml|css|scss|html|txt)\b/i;
             const domPattern = /\bDOM\b|selector|getByRole|getByTestId|data-testid|aria/i;
             const filePaths = evidenceLines.flatMap((line) => {
                 const matches = line.match(filePathPattern);
@@ -321,7 +334,7 @@ export const createAnswerQuestionsNode =
                     selectors.add(selectorMatch[1].trim());
                 }
                 const locatorMatches = line.match(
-                    /getBy(Role|TestId|Text|Label|Placeholder|AltText|Title)\([^)]+\)/g
+                    /getBy(Role|TestId|Text|Label|Placeholder|AltText|Title)\([^)]+\)/g,
                 );
                 if (locatorMatches) {
                     for (const match of locatorMatches) {
@@ -384,7 +397,7 @@ export const createAnswerQuestionsNode =
                 }
             }
             const hasEvidence = evidenceLines.some(
-                (line) => filePathPattern.test(line) || domPattern.test(line)
+                (line) => filePathPattern.test(line) || domPattern.test(line),
             );
             return { hasEvidence, filePaths, selectors: Array.from(selectors) };
         };
@@ -424,15 +437,15 @@ export const createAnswerQuestionsNode =
                 const normalized = evidence.filePaths.map(normalizeEvidencePath);
                 const missingInRepo = normalized.filter((filePath) => !repoFileSet.has(filePath));
                 const missingInContext = normalized.filter(
-                    (filePath) => !contextFileSet.has(filePath)
+                    (filePath) => !contextFileSet.has(filePath),
                 );
                 if (missingInRepo.length > 0) {
                     content = `${content}\n\nNote: Evidence references files not found in the repo index: ${missingInRepo.join(
-                        ", "
+                        ", ",
                     )}.`;
                 } else if (missingInContext.length > 0) {
                     content = `${content}\n\nNote: Evidence references files not in retrieved context: ${missingInContext.join(
-                        ", "
+                        ", ",
                     )}.`;
                 }
             }
@@ -455,7 +468,7 @@ export const createAnswerQuestionsNode =
                     });
                     if (missingSelectors.length > 0) {
                         content = `${content}\n\nNote: Evidence references selectors not found in the DOM summary: ${missingSelectors.join(
-                            ", "
+                            ", ",
                         )}.`;
                     }
                 }

@@ -1,50 +1,48 @@
 {
-  "projectType": "react",
-  "testDirectory": "tests/generated",
-  "playwrightConfig": "playwright.config.ts",
-  "outputFormats": [
-    "typescript"
-  ],
-  "ai": {
-    "provider": "openrouter",
-    "model": "anthropic/claude-sonnet-4.5",
-    "baseURL": "https://openrouter.ai/api/v1",
-    "maxTokens": 4000,
-    "temperature": 0.7
-  },
-  "auth": {},
-  "browser": {
-    "defaultBrowser": "chromium",
-    "headless": true,
-    "timeout": 30000,
-    "retries": 1
-  },
-  "features": {
-    "video": true,
-    "screenshots": true,
-    "tracing": false,
-    "network": true
-  },
-  "autonomy": {
-    "autoSaveTests": false,
-    "autoRunTests": false,
-    "autoCorrect": "suggest",
-    "autoLearn": "confirm",
-    "maxRetries": 2
-  },
-  "discovery": {
-    "maxPages": 100,
-    "maxDepth": 5,
-    "maxConcurrency": 3,
-    "timeout": 30000,
-    "excludePatterns": [],
-    "pauseOnAuth": true,
-    "maxRunTimeMs": 1800000
-  },
-  "indexing": {
-    "fullScan": false
-  },
-  "integrations": {
-    "provider": "github"
-  }
+    "projectType": "react",
+    "testDirectory": "tests/generated",
+    "playwrightConfig": "playwright.config.ts",
+    "outputFormats": ["typescript"],
+    "ai": {
+        "provider": "openrouter",
+        "model": "anthropic/claude-sonnet-4.5",
+        "baseURL": "https://openrouter.ai/api/v1",
+        "maxTokens": 4000,
+        "temperature": 0.7
+    },
+    "auth": {},
+    "browser": {
+        "defaultBrowser": "chromium",
+        "headless": true,
+        "timeout": 30000,
+        "retries": 1
+    },
+    "features": {
+        "video": true,
+        "screenshots": true,
+        "tracing": false,
+        "network": true
+    },
+    "autonomy": {
+        "autoSaveTests": false,
+        "autoRunTests": false,
+        "autoCorrect": "suggest",
+        "autoLearn": "confirm",
+        "maxRetries": 2
+    },
+    "discovery": {
+        "maxPages": 100,
+        "maxDepth": 5,
+        "maxConcurrency": 3,
+        "timeout": 30000,
+        "excludePatterns": [],
+        "pauseOnAuth": true,
+        "maxRunTimeMs": 1800000
+    },
+    "indexing": {
+        "fullScan": false
+    },
+    "integrations": {
+        "provider": "github"
+    }
 }

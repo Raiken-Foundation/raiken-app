@@ -16,8 +16,8 @@ const SESSION_COOKIE = "raiken-session";
 // This mirrors how NextAuth's middleware skips static files and its own
 // endpoints while protecting all page routes.
 const PUBLIC_PREFIXES = [
-    "/auth/",       // auth pages and callbacks
-    "/@",           // Vite internals (/@vite/client, /@fs/…)
+    "/auth/", // auth pages and callbacks
+    "/@", // Vite internals (/@vite/client, /@fs/…)
     "/node_modules",
     "/__vite",
 ];
@@ -48,7 +48,9 @@ function isPublic(pathname: string): boolean {
 function readBody(req: IncomingMessage): Promise<string> {
     return new Promise((resolve) => {
         let body = "";
-        req.on("data", (chunk) => (body += chunk));
+        req.on("data", (chunk) => {
+            body += chunk;
+        });
         req.on("end", () => resolve(body));
     });
 }

@@ -6,7 +6,7 @@
  */
 
 import type { Browser, BrowserContext, Page } from "playwright";
-import type { DOMContext, InteractiveElement, FormField, AccessibilityNode } from "./dom-capture";
+import type { AccessibilityNode, DOMContext, FormField, InteractiveElement } from "./dom-capture";
 
 export class BrowserActionError extends Error {
     readonly action: string;
@@ -27,13 +27,7 @@ export class BrowserActionError extends Error {
 /**
  * Type of selector, for selector memory classification.
  */
-export type SelectorKind =
-    | "data-testid"
-    | "role"
-    | "text"
-    | "css"
-    | "xpath"
-    | "other";
+export type SelectorKind = "data-testid" | "role" | "text" | "css" | "xpath" | "other";
 
 /**
  * Sink for selector success/failure, so the session can record outcomes
@@ -67,7 +61,7 @@ export function classifySelector(selector: string): SelectorKind {
         return "text";
     }
     if (s.startsWith("//") || s.startsWith("xpath=")) return "xpath";
-    if (/^[#.\[]/.test(s) || /^[a-zA-Z]+(\[|\.|\s|$)/.test(s)) return "css";
+    if (/^[#.[]/.test(s) || /^[a-zA-Z]+(\[|\.|\s|$)/.test(s)) return "css";
     return "other";
 }
 
@@ -372,8 +366,12 @@ export class BrowserSession {
             if (quote !== "'" && quote !== '"') return null;
             let i = 1;
             while (i < rest.length) {
-                if (rest[i] === "\\" && i + 1 < rest.length) { i += 2; continue; }
-                if (rest[i] === quote) return rest.slice(1, i).replace(/\\'/g, "'").replace(/\\"/g, '"');
+                if (rest[i] === "\\" && i + 1 < rest.length) {
+                    i += 2;
+                    continue;
+                }
+                if (rest[i] === quote)
+                    return rest.slice(1, i).replace(/\\'/g, "'").replace(/\\"/g, '"');
                 i++;
             }
             return null;
@@ -434,7 +432,9 @@ export class BrowserSession {
         this.ensureActive();
         const list = Array.isArray(selectors) ? selectors : [selectors];
         const element = list[0] || "unknown";
-        console.log(`  ${action}: ${element}${list.length > 1 ? ` (+${list.length - 1} alternatives)` : ""}`);
+        console.log(
+            `  ${action}: ${element}${list.length > 1 ? ` (+${list.length - 1} alternatives)` : ""}`,
+        );
         let lastError: unknown;
         const failed: string[] = [];
         for (const sel of list) {
@@ -461,7 +461,9 @@ export class BrowserSession {
      * Type text (appends to existing value)
      */
     async type(selectors: string | string[], text: string): Promise<void> {
-        await this.runWithSelectors("type", selectors, (loc) => loc.pressSequentially(text, { timeout: 5000 }));
+        await this.runWithSelectors("type", selectors, (loc) =>
+            loc.pressSequentially(text, { timeout: 5000 }),
+        );
     }
 
     /**
@@ -481,7 +483,9 @@ export class BrowserSession {
      * Select option from dropdown
      */
     async selectOption(selectors: string | string[], value: string): Promise<void> {
-        await this.runWithSelectors("selectOption", selectors, async (loc) => { await loc.selectOption(value, { timeout: 5000 }); });
+        await this.runWithSelectors("selectOption", selectors, async (loc) => {
+            await loc.selectOption(value, { timeout: 5000 });
+        });
     }
 
     /**
@@ -604,7 +608,11 @@ export class BrowserSession {
                     }
                 }
             }
-            throw new BrowserActionError("captureCurrentPage", this.page?.url() || "unknown", error);
+            throw new BrowserActionError(
+                "captureCurrentPage",
+                this.page?.url() || "unknown",
+                error,
+            );
         }
     }
 
@@ -666,12 +674,14 @@ export class BrowserSession {
         }> = [];
         const seenHrefs = new Set<string>();
 
-        const addLink = (
-            text: string,
-            href: string,
-            suggestedSelectors: string[],
-        ) => {
-            if (!href || href.startsWith("#") || href.startsWith("javascript:") || href === "about:blank") return;
+        const addLink = (text: string, href: string, suggestedSelectors: string[]) => {
+            if (
+                !href ||
+                href.startsWith("#") ||
+                href.startsWith("javascript:") ||
+                href === "about:blank"
+            )
+                return;
             let fullUrl: string;
             try {
                 fullUrl = new URL(href, currentUrl).href;
@@ -698,17 +708,14 @@ export class BrowserSession {
                 const testId = await link.getAttribute("data-testid");
                 const ariaLabel = await link.getAttribute("aria-label");
                 const htmlId = await link.getAttribute("id");
-                const selectors = this.buildSelectors(
-                    "link",
-                    ariaLabel || text,
-                    testId,
-                    {
-                        htmlId: htmlId || undefined,
-                        ariaLabel: ariaLabel || undefined,
-                    },
-                );
+                const selectors = this.buildSelectors("link", ariaLabel || text, testId, {
+                    htmlId: htmlId || undefined,
+                    ariaLabel: ariaLabel || undefined,
+                });
                 addLink(text, href || "", selectors);
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         // 2. SPA-aware: elements with role="link" that aren't <a> tags
@@ -731,12 +738,16 @@ export class BrowserSession {
                     ariaLabel: ariaLabel || undefined,
                 });
                 addLink(text, href, selectors);
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         // 3. SPA-aware: clickable navigation elements inside <nav>
         //    Many SPAs use <button> or <div> inside <nav> for client-side routing
-        const navClickables = await this.page!.locator('nav button, nav [role="button"], nav [role="tab"], nav [role="menuitem"]').all();
+        const navClickables = await this.page!.locator(
+            'nav button, nav [role="button"], nav [role="tab"], nav [role="menuitem"]',
+        ).all();
         for (const el of navClickables.slice(0, 30)) {
             try {
                 if (!(await this.isUsableElement(el))) continue;
@@ -756,7 +767,9 @@ export class BrowserSession {
                     ariaLabel: ariaLabel || undefined,
                 });
                 addLink(text, href, selectors);
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         console.log(`✓ Found ${discovered.length} unique links`);
@@ -809,7 +822,7 @@ export class BrowserSession {
         if (!this.isActive()) return false;
         try {
             const count = await this.page!.locator(
-                '[aria-modal="true"], dialog[open], [role="dialog"], [role="alertdialog"]'
+                '[aria-modal="true"], dialog[open], [role="dialog"], [role="alertdialog"]',
             ).count();
             return count > 0;
         } catch {
@@ -830,11 +843,7 @@ export class BrowserSession {
     private reportSelectorSuccess(element: string, selector: string): void {
         if (!this.selectorMemory) return;
         try {
-            this.selectorMemory.recordSuccess(
-                element,
-                selector,
-                classifySelector(selector),
-            );
+            this.selectorMemory.recordSuccess(element, selector, classifySelector(selector));
         } catch {
             // Memory must never break a browser action.
         }
@@ -843,11 +852,7 @@ export class BrowserSession {
     private reportSelectorFailure(element: string, selector: string): void {
         if (!this.selectorMemory) return;
         try {
-            this.selectorMemory.recordFailure(
-                element,
-                selector,
-                classifySelector(selector),
-            );
+            this.selectorMemory.recordFailure(element, selector, classifySelector(selector));
         } catch {
             // Memory must never break a browser action.
         }
@@ -908,10 +913,14 @@ export class BrowserSession {
         return this.dedupeElements(collected).slice(0, 60);
     }
 
-    private async extractElementsFromScope(scope: import("playwright").Frame): Promise<InteractiveElement[]> {
+    private async extractElementsFromScope(
+        scope: import("playwright").Frame,
+    ): Promise<InteractiveElement[]> {
         const elements: InteractiveElement[] = [];
 
-        const buttons = await scope.locator('button, [role="button"], input[type="submit"], input[type="button"]').all();
+        const buttons = await scope
+            .locator('button, [role="button"], input[type="submit"], input[type="button"]')
+            .all();
         for (const btn of buttons.slice(0, 30)) {
             try {
                 if (!(await this.isUsableElement(btn))) continue;
@@ -935,7 +944,9 @@ export class BrowserSession {
                         type: btnType || undefined,
                     }),
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         const links = await scope.locator("a[href]").all();
@@ -951,10 +962,16 @@ export class BrowserSession {
                     name: text.trim() || href,
                     suggestedSelectors: this.buildSelectors("link", text.trim()),
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
-        const inputs = await scope.locator('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]), textarea, select').all();
+        const inputs = await scope
+            .locator(
+                'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]), textarea, select',
+            )
+            .all();
         for (const input of inputs.slice(0, 30)) {
             try {
                 if (!(await this.isUsableElement(input))) continue;
@@ -995,7 +1012,9 @@ export class BrowserSession {
                         type,
                     }),
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         // Contenteditable elements
@@ -1012,20 +1031,29 @@ export class BrowserSession {
                     text: text.trim(),
                     name: label || text.trim(),
                     testId: testId || undefined,
-                    suggestedSelectors: this.buildSelectors("textbox", label || text.trim(), testId),
+                    suggestedSelectors: this.buildSelectors(
+                        "textbox",
+                        label || text.trim(),
+                        testId,
+                    ),
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         // ARIA role elements
         const roleElements = await scope
-            .locator('[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],[role="option"],[role="combobox"]')
+            .locator(
+                '[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],[role="option"],[role="combobox"]',
+            )
             .all();
         for (const el of roleElements.slice(0, 20)) {
             try {
                 if (!(await this.isUsableElement(el))) continue;
                 const role = (await el.getAttribute("role")) || "";
-                const text = (await el.textContent()) || (await el.getAttribute("aria-label")) || "";
+                const text =
+                    (await el.textContent()) || (await el.getAttribute("aria-label")) || "";
                 const testId = await el.getAttribute("data-testid");
                 elements.push({
                     tagName: "div",
@@ -1035,7 +1063,9 @@ export class BrowserSession {
                     testId: testId || undefined,
                     suggestedSelectors: this.buildSelectors(role || "button", text.trim(), testId),
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         return elements;
@@ -1065,7 +1095,9 @@ export class BrowserSession {
             try {
                 if (!(await this.isUsableElement(input))) continue;
                 const tagName = await input.evaluate((el) => el.tagName.toLowerCase());
-                const type = (await input.getAttribute("type")) || (tagName === "textarea" ? "textarea" : "text");
+                const type =
+                    (await input.getAttribute("type")) ||
+                    (tagName === "textarea" ? "textarea" : "text");
                 const name = (await input.getAttribute("name")) || "";
                 const id = (await input.getAttribute("id")) || "";
                 const placeholder = (await input.getAttribute("placeholder")) || "";
@@ -1079,9 +1111,15 @@ export class BrowserSession {
                     placeholder: placeholder || undefined,
                     required,
                     id: id || undefined,
-                    suggestedSelector: id ? `#${id}` : name ? `[name="${name}"]` : `[placeholder="${placeholder}"]`,
+                    suggestedSelector: id
+                        ? `#${id}`
+                        : name
+                          ? `[name="${name}"]`
+                          : `[placeholder="${placeholder}"]`,
                 });
-            } catch { /* inaccessible */ }
+            } catch {
+                /* inaccessible */
+            }
         }
 
         return fields;
@@ -1112,11 +1150,22 @@ export class BrowserSession {
         role: string,
         name: string,
         testId?: string | null,
-        htmlAttrs?: { htmlName?: string; htmlId?: string; placeholder?: string; ariaLabel?: string; type?: string }
+        htmlAttrs?: {
+            htmlName?: string;
+            htmlId?: string;
+            placeholder?: string;
+            ariaLabel?: string;
+            type?: string;
+        },
     ): string[] {
         const selectors: string[] = [];
         const esc = (s: string) => s.replace(/'/g, "\\'");
-        const isInput = role === "textbox" || role === "combobox" || role === "checkbox" || role === "radio" || role === "slider";
+        const isInput =
+            role === "textbox" ||
+            role === "combobox" ||
+            role === "checkbox" ||
+            role === "radio" ||
+            role === "slider";
         const isButton = role === "button";
 
         // data-testid: most stable, framework-provided
@@ -1162,7 +1211,7 @@ export class BrowserSession {
     private buildSimpleTree(
         title: string,
         elements: InteractiveElement[],
-        fields: FormField[]
+        fields: FormField[],
     ): AccessibilityNode {
         const children: AccessibilityNode[] = [];
 

@@ -18,11 +18,7 @@ node_modules
 *.sublime-workspace
 
 # IDE - VSCode
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+.vscode/
 
 # misc
 /.sass-cache
@@ -38,8 +34,8 @@ testem.log
 .DS_Store
 Thumbs.db
 
-.nx/cache
-.nx/workspace-data
+.nx/
+.vscode/
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
@@ -50,5 +46,19 @@ vitest.config.*.timestamp*
 storage/
 .env
 
+# Local / generated docs
+/docs/
+
+# Playwright and test runner output
+playwright-report/
+**/playwright-report/
+test-results/
+**/test-results/
+test-reports/
+**/test-reports/
+
+# Generated exploratory tests
+**/tests/generated/
+**/e2e/generated/
 
 .local

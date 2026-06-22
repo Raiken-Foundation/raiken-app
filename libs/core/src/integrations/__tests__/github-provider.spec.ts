@@ -165,9 +165,7 @@ describe("GitHubProvider — getTicket", () => {
         expect(ticket.linkedTickets).toEqual(["41"]);
 
         // Verify we sent the bearer token header
-        expect(mock.calls[0].url).toBe(
-            "https://api.github.com/repos/o/r/pulls/42",
-        );
+        expect(mock.calls[0].url).toBe("https://api.github.com/repos/o/r/pulls/42");
         const headers = mock.calls[0].init?.headers as Record<string, string> | undefined;
         expect(headers?.["Authorization"]).toBe("Bearer t");
         expect(headers?.["Accept"]).toBe("application/vnd.github+json");
@@ -275,9 +273,7 @@ describe("GitHubProvider — getTicket", () => {
         ]);
 
         const gh = new GitHubProvider({ token: "t", owner: "o", repo: "r" });
-        await expect(gh.getTicket("999")).rejects.toThrow(
-            /not found in o\/r/,
-        );
+        await expect(gh.getTicket("999")).rejects.toThrow(/not found in o\/r/);
     });
 });
 
@@ -288,7 +284,13 @@ describe("GitHubProvider — getChangedFiles", () => {
                 body: [
                     { filename: "a.ts", status: "added", additions: 10, deletions: 0 },
                     { filename: "b.ts", status: "removed", additions: 0, deletions: 30 },
-                    { filename: "c.ts", status: "renamed", additions: 0, deletions: 0, previous_filename: "old-c.ts" },
+                    {
+                        filename: "c.ts",
+                        status: "renamed",
+                        additions: 0,
+                        deletions: 0,
+                        previous_filename: "old-c.ts",
+                    },
                     { filename: "d.ts", status: "modified", additions: 3, deletions: 1 },
                     // Anything we don't recognise should default to "modified".
                     { filename: "e.ts", status: "weird-future-status", additions: 0, deletions: 0 },
@@ -310,9 +312,7 @@ describe("GitHubProvider — getChangedFiles", () => {
     });
 
     it("returns [] when the API call fails (non-PR ticket, network down, etc)", async () => {
-        mock = installFetchMock([
-            { status: 404, body: { message: "Not Found" } },
-        ]);
+        mock = installFetchMock([{ status: 404, body: { message: "Not Found" } }]);
 
         const gh = new GitHubProvider({ token: "t", owner: "o", repo: "r" });
         const files = await gh.getChangedFiles("999");

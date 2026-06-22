@@ -104,7 +104,7 @@ export interface HITLCheckpoint {
 export function createSaveAction(
     testCode: string,
     suggestedPath: string,
-    testName: string
+    testName: string,
 ): HITLSaveAction {
     return {
         type: "save",
@@ -121,7 +121,7 @@ export function createSaveAction(
 export function createRunAction(
     testFile: string,
     testName: string,
-    warnings?: string[]
+    warnings?: string[],
 ): HITLRunAction {
     return {
         type: "run",
@@ -139,7 +139,7 @@ export function createCorrectAction(
     originalCode: string,
     correctedCode: string,
     failureReason: string,
-    failingSelector?: string
+    failingSelector?: string,
 ): HITLCorrectAction {
     return {
         type: "correct",
@@ -159,7 +159,7 @@ export function createLearnAction(
     learnType: "selector" | "preference" | "pattern",
     description: string,
     value: string,
-    context?: string
+    context?: string,
 ): HITLLearnAction {
     return {
         type: "learn",
@@ -211,7 +211,7 @@ export function shouldSkipHITL(
         autoRunTests?: boolean;
         autoCorrect?: "suggest" | "apply" | "off";
         autoLearn?: "confirm" | "auto" | "off";
-    }
+    },
 ): boolean {
     switch (actionType) {
         case "save":

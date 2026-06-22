@@ -1,6 +1,6 @@
+import type { TestRunResult } from "../../../testing/runner";
 import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
-import type { TestRunResult } from "../../../testing/runner";
 
 const MAX_BASENAME_LENGTH = 40;
 

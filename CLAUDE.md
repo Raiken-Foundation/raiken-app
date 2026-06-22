@@ -15,10 +15,9 @@ This is an Nx Integrated Monorepo with 4 main modules:
 | CLI | `apps/cli` | Node.js binary, spawns server, orchestrates agent | Fastify, Commander |
 | Dashboard | `apps/dashboard` | Visual interface, communicates via tRPC | React, Vite, Tailwind, TanStack Query |
 | Core | `libs/core` | "Brain" - DB, AST parsing, Embeddings | SQLite-vec, Transformers.js, Babel |
-| API | `libs/api` | Shared tRPC Router & Types | tRPC, Zod |
-| Config | `libs/config` | Shared configuration | - |
+| Shared | `libs/shared` | Shared tRPC router and cross-package types | tRPC, Zod |
 
-**Data Flow:** CLI spawns Fastify server (port 7101) → Dashboard connects via tRPC → API calls Core → Core reads/writes to `.raiken/raiken.db`
+**Data Flow:** CLI spawns Fastify server (port 7101) → Dashboard connects via tRPC → Shared router calls Core → Core reads/writes to `.raiken/raiken.db`
 
 **Import Aliases:**
 - `@raiken/core` → `libs/core/src/index.ts`

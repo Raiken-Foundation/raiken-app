@@ -1,7 +1,7 @@
-import traverse, { type NodePath } from '@babel/traverse';
-import * as t from '@babel/types';
-import type { CodeNode, ParsedSymbol, GraphEdge } from '../types';
-import { getParamName, isExportedNode } from '../utils';
+import traverse, { type NodePath } from "@babel/traverse";
+import * as t from "@babel/types";
+import type { CodeNode, GraphEdge, ParsedSymbol } from "../types";
+import { getParamName, isExportedNode } from "../utils";
 
 /**
  * Extract first-class symbols from a Babel AST: functions, arrow functions,
@@ -28,8 +28,7 @@ export function extractSymbolsFromAst(
         return { symbols, intraFileEdges };
     }
 
-    const isComponentName = (name: string): boolean =>
-        /^[A-Z][A-Za-z0-9_]*$/.test(name);
+    const isComponentName = (name: string): boolean => /^[A-Z][A-Za-z0-9_]*$/.test(name);
 
     const looksLikeRouteFile = isRouteLikeFile(filePath);
 
@@ -43,7 +42,7 @@ export function extractSymbolsFromAst(
 
             const sym: ParsedSymbol = {
                 name,
-                kind: isComponentName(name) ? 'component' : 'function',
+                kind: isComponentName(name) ? "component" : "function",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported: isExportedNode(p),
@@ -65,16 +64,16 @@ export function extractSymbolsFromAst(
             const node = p.node;
             if (!t.isIdentifier(node.id)) return;
             if (!node.init) return;
-            if (!t.isArrowFunctionExpression(node.init) && !t.isFunctionExpression(node.init)) return;
+            if (!t.isArrowFunctionExpression(node.init) && !t.isFunctionExpression(node.init))
+                return;
 
             const fn = node.init;
             const name = node.id.name;
             const range = bodyRange(node);
             const body = fn.body;
-            const { callees, rendered } =
-                t.isBlockStatement(body)
-                    ? collectBodyReferences(body)
-                    : collectExpressionReferences(body);
+            const { callees, rendered } = t.isBlockStatement(body)
+                ? collectBodyReferences(body)
+                : collectExpressionReferences(body);
 
             const isExported =
                 isExportedNode(p.parentPath) ||
@@ -82,7 +81,7 @@ export function extractSymbolsFromAst(
 
             const sym: ParsedSymbol = {
                 name,
-                kind: isComponentName(name) ? 'component' : 'arrow_function',
+                kind: isComponentName(name) ? "component" : "arrow_function",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported,
@@ -108,7 +107,7 @@ export function extractSymbolsFromAst(
 
             symbols.push({
                 name: className,
-                kind: 'class',
+                kind: "class",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported: isExportedNode(p),
@@ -118,26 +117,29 @@ export function extractSymbolsFromAst(
             // Edges from class -> superclass / interfaces (intra-file resolution)
             if (node.superClass && t.isIdentifier(node.superClass)) {
                 intraFileEdges.push({
-                    kind: 'extends',
+                    kind: "extends",
                     sourceFile: filePath,
                     targetFile: filePath,
                     sourceSymbol: className,
                     targetSymbol: node.superClass.name,
-                    provenance: 'static_ast',
+                    provenance: "static_ast",
                     confidence: 0.95,
-                    evidence: { line: node.loc?.start.line, snippet: `extends ${node.superClass.name}` },
+                    evidence: {
+                        line: node.loc?.start.line,
+                        snippet: `extends ${node.superClass.name}`,
+                    },
                 });
             }
             if (node.implements) {
                 for (const impl of node.implements) {
                     if (t.isClassImplements(impl) && t.isIdentifier(impl.id)) {
                         intraFileEdges.push({
-                            kind: 'implements',
+                            kind: "implements",
                             sourceFile: filePath,
                             targetFile: filePath,
                             sourceSymbol: className,
                             targetSymbol: impl.id.name,
-                            provenance: 'static_ast',
+                            provenance: "static_ast",
                             confidence: 0.95,
                         });
                     }
@@ -147,7 +149,7 @@ export function extractSymbolsFromAst(
             for (const member of node.body.body) {
                 if (t.isClassMethod(member)) {
                     const key = member.key;
-                    let methodName = '<unknown>';
+                    let methodName = "<unknown>";
                     if (t.isIdentifier(key)) methodName = key.name;
                     else if (t.isPrivateName(key)) {
                         const priv = key as t.PrivateName;
@@ -159,13 +161,13 @@ export function extractSymbolsFromAst(
 
                     symbols.push({
                         name: methodName,
-                        kind: 'method',
+                        kind: "method",
                         startLine: member.loc?.start.line ?? range.start,
                         endLine: methodRange.end,
                         isExported: isExportedNode(p),
                         isAsync: !!member.async,
                         parent: className,
-                        signature: `${className}.${methodName}(${member.params.map((pa) => getParamName(pa)).join(', ')})`,
+                        signature: `${className}.${methodName}(${member.params.map((pa) => getParamName(pa)).join(", ")})`,
                         callees,
                         rendered,
                     });
@@ -179,7 +181,7 @@ export function extractSymbolsFromAst(
             const range = bodyRange(node);
             symbols.push({
                 name: node.id.name,
-                kind: 'interface',
+                kind: "interface",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported: isExportedNode(p),
@@ -193,7 +195,7 @@ export function extractSymbolsFromAst(
             const range = bodyRange(node);
             symbols.push({
                 name: node.id.name,
-                kind: 'type',
+                kind: "type",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported: isExportedNode(p),
@@ -207,7 +209,7 @@ export function extractSymbolsFromAst(
             const range = bodyRange(node);
             symbols.push({
                 name: node.id.name,
-                kind: 'enum',
+                kind: "enum",
                 startLine: node.loc?.start.line ?? 0,
                 endLine: range.end,
                 isExported: isExportedNode(p),
@@ -225,12 +227,12 @@ export function extractSymbolsFromAst(
                 const handlerName = route.handlerName ?? `${route.method}_${route.path}`;
                 symbols.push({
                     name: handlerName,
-                    kind: 'route',
+                    kind: "route",
                     startLine: p.node.loc?.start.line ?? 0,
                     endLine: p.node.loc?.end.line ?? p.node.loc?.start.line ?? 0,
                     isExported: false,
                     signature: `${route.method} ${route.path}`,
-                    routeMeta: { method: route.method, path: route.path, kind: 'handler' },
+                    routeMeta: { method: route.method, path: route.path, kind: "handler" },
                 });
             },
         });
@@ -240,12 +242,12 @@ export function extractSymbolsFromAst(
     if (looksLikeRouteFile) {
         const pageRoute = inferNextRouteFromPath(filePath);
         if (pageRoute) {
-            const pageName = pageRoute.kind === 'page' ? 'Page' : 'Handler';
+            const pageName = pageRoute.kind === "page" ? "Page" : "Handler";
             const exists = symbols.find((s) => s.routeMeta && s.routeMeta.path === pageRoute.path);
             if (!exists) {
                 symbols.push({
                     name: pageName,
-                    kind: 'route',
+                    kind: "route",
                     startLine: 1,
                     endLine: 1,
                     isExported: true,
@@ -271,8 +273,8 @@ function bodyRange(node: t.Node): { start: number; end: number } {
 }
 
 function signatureFor(name: string, params: t.Node[], isAsync: boolean): string {
-    const async = isAsync ? 'async ' : '';
-    return `${async}${name}(${params.map((p) => getParamName(p)).join(', ')})`;
+    const async = isAsync ? "async " : "";
+    return `${async}${name}(${params.map((p) => getParamName(p)).join(", ")})`;
 }
 
 function collectBodyReferences(body: t.Node | null | undefined): {
@@ -308,7 +310,10 @@ function collectBodyReferences(body: t.Node | null | undefined): {
     return { callees: Array.from(callees), rendered: Array.from(rendered) };
 }
 
-function collectExpressionReferences(body: t.Expression): { callees: string[]; rendered: string[] } {
+function collectExpressionReferences(body: t.Expression): {
+    callees: string[];
+    rendered: string[];
+} {
     return collectBodyReferences(body);
 }
 
@@ -325,11 +330,11 @@ function walk(node: t.Node, visit: (n: t.Node) => void): void {
         if (!child) continue;
         if (Array.isArray(child)) {
             for (const c of child) {
-                if (c && typeof c === 'object' && 'type' in c) {
+                if (c && typeof c === "object" && "type" in c) {
                     walk(c as t.Node, visit);
                 }
             }
-        } else if (typeof child === 'object' && 'type' in child) {
+        } else if (typeof child === "object" && "type" in child) {
             walk(child as t.Node, visit);
         }
     }
@@ -354,7 +359,7 @@ function jsxMemberRoot(node: t.JSXMemberExpression): string | null {
 // ---------------------------------------------------------------------------
 
 function isRouteLikeFile(filePath: string): boolean {
-    const norm = filePath.replace(/\\/g, '/');
+    const norm = filePath.replace(/\\/g, "/");
     return (
         /\/(pages|app)\//.test(norm) ||
         /\/api\//.test(norm) ||
@@ -368,7 +373,7 @@ function isExpressLikeFile(ast: t.File): boolean {
     traverse(ast, {
         ImportDeclaration(p) {
             const src = p.node.source.value;
-            if (src === 'express' || src === 'fastify' || src === 'koa' || src === 'hono') {
+            if (src === "express" || src === "fastify" || src === "koa" || src === "hono") {
                 express = true;
                 p.stop();
             }
@@ -384,7 +389,9 @@ function expressRouteFromCall(
     if (!t.isMemberExpression(callee)) return null;
     if (!t.isIdentifier(callee.property)) return null;
     const method = callee.property.name.toUpperCase();
-    if (!['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'ALL', 'USE'].includes(method)) {
+    if (
+        !["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "ALL", "USE"].includes(method)
+    ) {
         return null;
     }
 
@@ -406,35 +413,43 @@ function expressRouteFromCall(
     return { method, path: routePath, handlerName };
 }
 
-function inferRouteMeta(filePath: string, exportName: string): ParsedSymbol['routeMeta'] | undefined {
-    const norm = filePath.replace(/\\/g, '/');
+function inferRouteMeta(
+    filePath: string,
+    exportName: string,
+): ParsedSymbol["routeMeta"] | undefined {
+    const norm = filePath.replace(/\\/g, "/");
     const lower = exportName.toLowerCase();
 
-    if (/\/api\//.test(norm) && ['get', 'post', 'put', 'delete', 'patch', 'options', 'head', 'handler', 'default'].includes(lower)) {
+    if (
+        /\/api\//.test(norm) &&
+        ["get", "post", "put", "delete", "patch", "options", "head", "handler", "default"].includes(
+            lower,
+        )
+    ) {
         return {
-            method: lower === 'default' || lower === 'handler' ? undefined : lower.toUpperCase(),
+            method: lower === "default" || lower === "handler" ? undefined : lower.toUpperCase(),
             path: nextRoutePathFromFile(norm),
-            kind: 'api',
+            kind: "api",
         };
     }
 
-    if (/\/(pages|app)\//.test(norm) && ['default', 'page'].includes(lower)) {
+    if (/\/(pages|app)\//.test(norm) && ["default", "page"].includes(lower)) {
         return {
             path: nextRoutePathFromFile(norm),
-            kind: 'page',
+            kind: "page",
         };
     }
 
     return undefined;
 }
 
-function inferNextRouteFromPath(filePath: string): ParsedSymbol['routeMeta'] | undefined {
-    const norm = filePath.replace(/\\/g, '/');
+function inferNextRouteFromPath(filePath: string): ParsedSymbol["routeMeta"] | undefined {
+    const norm = filePath.replace(/\\/g, "/");
     if (/\/api\//.test(norm)) {
-        return { path: nextRoutePathFromFile(norm), kind: 'api' };
+        return { path: nextRoutePathFromFile(norm), kind: "api" };
     }
     if (/\/(pages|app)\//.test(norm)) {
-        return { path: nextRoutePathFromFile(norm), kind: 'page' };
+        return { path: nextRoutePathFromFile(norm), kind: "page" };
     }
     return undefined;
 }
@@ -443,9 +458,9 @@ function nextRoutePathFromFile(norm: string): string {
     // Strip everything before pages/ or app/ and the extension; collapse index/route segments.
     const m = norm.match(/\/(?:pages|app)\/(.+)$/);
     if (!m) return norm;
-    let route = '/' + m[1].replace(/\.[^/.]+$/, '');
-    route = route.replace(/\/(index|page|route)$/i, '');
-    if (!route) route = '/';
+    let route = "/" + m[1].replace(/\.[^/.]+$/, "");
+    route = route.replace(/\/(index|page|route)$/i, "");
+    if (!route) route = "/";
     return route;
 }
 
@@ -473,10 +488,10 @@ export function buildEdgesForNode(node: CodeNode, intraFileEdges: GraphEdge[]): 
     // --- 1. import edges (file → file)
     for (const target of node.imports) {
         edges.push({
-            kind: 'imports',
+            kind: "imports",
             sourceFile: filePath,
             targetFile: target,
-            provenance: 'static_ast',
+            provenance: "static_ast",
             confidence: 1.0,
         });
     }
@@ -508,12 +523,12 @@ export function buildEdgesForNode(node: CodeNode, intraFileEdges: GraphEdge[]): 
             // Local resolution first (cheapest, highest confidence)
             if (localSymbolNames.has(callee) && callee !== sym.name) {
                 edges.push({
-                    kind: 'calls',
+                    kind: "calls",
                     sourceFile: filePath,
                     targetFile: filePath,
                     sourceSymbol: sym.name,
                     targetSymbol: callee,
-                    provenance: 'static_ast',
+                    provenance: "static_ast",
                     confidence: 0.9,
                     evidence: { line: symEvidenceLine, snippet: `${callee}(...)` },
                 });
@@ -523,12 +538,12 @@ export function buildEdgesForNode(node: CodeNode, intraFileEdges: GraphEdge[]): 
             const targetFile = resolveBinding(callee);
             if (targetFile) {
                 edges.push({
-                    kind: 'calls',
+                    kind: "calls",
                     sourceFile: filePath,
                     targetFile,
                     sourceSymbol: sym.name,
                     targetSymbol: callee,
-                    provenance: 'static_ast',
+                    provenance: "static_ast",
                     confidence: 0.7,
                     evidence: { line: symEvidenceLine, snippet: `${callee}(...)` },
                 });
@@ -538,12 +553,12 @@ export function buildEdgesForNode(node: CodeNode, intraFileEdges: GraphEdge[]): 
         for (const component of sym.rendered ?? []) {
             if (localSymbolNames.has(component) && component !== sym.name) {
                 edges.push({
-                    kind: 'renders',
+                    kind: "renders",
                     sourceFile: filePath,
                     targetFile: filePath,
                     sourceSymbol: sym.name,
                     targetSymbol: component,
-                    provenance: 'static_ast',
+                    provenance: "static_ast",
                     confidence: 0.85,
                     evidence: { line: symEvidenceLine, snippet: `<${component} />` },
                 });
@@ -553,12 +568,12 @@ export function buildEdgesForNode(node: CodeNode, intraFileEdges: GraphEdge[]): 
             const targetFile = resolveBinding(component);
             if (targetFile) {
                 edges.push({
-                    kind: 'renders',
+                    kind: "renders",
                     sourceFile: filePath,
                     targetFile,
                     sourceSymbol: sym.name,
                     targetSymbol: component,
-                    provenance: 'static_ast',
+                    provenance: "static_ast",
                     confidence: 0.7,
                     evidence: { line: symEvidenceLine, snippet: `<${component} />` },
                 });
@@ -578,13 +593,13 @@ function resolveImportSourceToFile(source: string, resolvedImports: string[]): s
     if (resolvedImports.length === 0) return undefined;
 
     // Strip any leading ./ or ../ chain — keep the meaningful tail.
-    const cleaned = source.replace(/^(\.\.?\/)+/, '');
-    const expectedTail = cleaned.replace(/\\/g, '/');
+    const cleaned = source.replace(/^(\.\.?\/)+/, "");
+    const expectedTail = cleaned.replace(/\\/g, "/");
 
     // 1. Exact tail match (with or without extension)
     for (const resolved of resolvedImports) {
-        const norm = resolved.replace(/\\/g, '/');
-        const noExt = norm.replace(/\.[^./]+$/, '');
+        const norm = resolved.replace(/\\/g, "/");
+        const noExt = norm.replace(/\.[^./]+$/, "");
         if (
             norm.endsWith(`/${expectedTail}`) ||
             noExt.endsWith(`/${expectedTail}`) ||

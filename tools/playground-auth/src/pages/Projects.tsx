@@ -7,7 +7,13 @@ const ALL_PROJECTS = [
     { id: "atlas-migration", name: "Atlas Migration", status: "active", tasks: 8, owner: "bob" },
     { id: "helix-redesign", name: "Helix Redesign", status: "active", tasks: 5, owner: "carol" },
     { id: "mercury-sandbox", name: "Mercury Sandbox", status: "active", tasks: 3, owner: "alice" },
-    { id: "legacy-reporting", name: "Legacy Reporting", status: "archived", tasks: 0, owner: "dave" },
+    {
+        id: "legacy-reporting",
+        name: "Legacy Reporting",
+        status: "archived",
+        tasks: 0,
+        owner: "dave",
+    },
     { id: "nova-api", name: "Nova API", status: "archived", tasks: 0, owner: "bob" },
 ];
 
@@ -37,13 +43,24 @@ export default function Projects() {
                             placeholder="Search projects…"
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            style={{ flex: 1, padding: ".4rem .75rem", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: ".875rem" }}
+                            style={{
+                                flex: 1,
+                                padding: ".4rem .75rem",
+                                border: "1px solid var(--border)",
+                                borderRadius: "var(--radius)",
+                                fontSize: ".875rem",
+                            }}
                         />
                         <select
                             data-testid="projects-status-filter"
                             value={status}
                             onChange={(e) => setStatus(e.target.value)}
-                            style={{ padding: ".4rem .75rem", border: "1px solid var(--border)", borderRadius: "var(--radius)", fontSize: ".875rem" }}
+                            style={{
+                                padding: ".4rem .75rem",
+                                border: "1px solid var(--border)",
+                                borderRadius: "var(--radius)",
+                                fontSize: ".875rem",
+                            }}
                         >
                             <option value="all">All statuses</option>
                             <option value="active">Active</option>
@@ -67,7 +84,13 @@ export default function Projects() {
                                 <th>
                                     <button
                                         data-testid="sort-name"
-                                        style={{ background: "none", border: "none", cursor: "pointer", font: "inherit", color: "inherit" }}
+                                        style={{
+                                            background: "none",
+                                            border: "none",
+                                            cursor: "pointer",
+                                            font: "inherit",
+                                            color: "inherit",
+                                        }}
                                         type="button"
                                     >
                                         Name ↕
@@ -90,7 +113,9 @@ export default function Projects() {
                                         </Link>
                                     </td>
                                     <td>
-                                        <span className={`badge badge-${p.status}`}>{p.status}</span>
+                                        <span className={`badge badge-${p.status}`}>
+                                            {p.status}
+                                        </span>
                                     </td>
                                     <td>{p.tasks}</td>
                                     <td>{p.owner}</td>

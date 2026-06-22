@@ -1,6 +1,13 @@
 export type AgentIntent = "explore" | "generateTests" | "explain";
 
-export type InterruptionType = "auth" | "otp" | "captcha" | "paywall" | "error" | "consent" | "unknown";
+export type InterruptionType =
+    | "auth"
+    | "otp"
+    | "captcha"
+    | "paywall"
+    | "error"
+    | "consent"
+    | "unknown";
 
 export interface InterruptionInfo {
     type: InterruptionType;
@@ -39,7 +46,6 @@ export function extractUrlFromText(text: string): string | undefined {
     return match ? match[0] : undefined;
 }
 
-
 export function parseSummaryElements(summary: string): SummaryElement[] {
     const elements: SummaryElement[] = [];
     const lines = summary.split("\n");
@@ -67,7 +73,10 @@ export function parseSummaryElements(summary: string): SummaryElement[] {
         // Parse all selectors (pipe-delimited) or single selector
         const selectorsMatch = nextLine.match(/^Selectors?:\s+(.+)$/);
         const allSelectors = selectorsMatch
-            ? selectorsMatch[1].split(" | ").map((s) => s.trim()).filter(Boolean)
+            ? selectorsMatch[1]
+                  .split(" | ")
+                  .map((s) => s.trim())
+                  .filter(Boolean)
             : [];
         elements.push({
             role,
@@ -106,14 +115,20 @@ export function normalizeSelector(selector?: string): string | undefined {
     if (textMatch) {
         return `text=${textMatch[1]}`;
     }
-    const roleMatch = selector.match(/getByRole\(['"](.+?)['"]\s*,\s*\{\s*name:\s*['"](.+?)['"]\s*\}\)/);
+    const roleMatch = selector.match(
+        /getByRole\(['"](.+?)['"]\s*,\s*\{\s*name:\s*['"](.+?)['"]\s*\}\)/,
+    );
     if (roleMatch) {
         return `role=${roleMatch[1]}[name="${roleMatch[2]}"]`;
     }
     return selector;
 }
 
-export function findSelector(elements: SummaryElement[], nameRegex: RegExp, roles: string[]): string | undefined {
+export function findSelector(
+    elements: SummaryElement[],
+    nameRegex: RegExp,
+    roles: string[],
+): string | undefined {
     for (const el of elements) {
         if (!roles.includes(el.role)) continue;
         if (!nameRegex.test(el.name)) continue;
@@ -155,9 +170,7 @@ const INPUT_ROLES = ["textbox", "combobox"];
  * regardless of labels, names, or placeholder text.
  */
 function findPasswordElement(elements: SummaryElement[]): SummaryElement | null {
-    return elements.find(
-        (el) => INPUT_ROLES.includes(el.role) && el.type === "password"
-    ) || null;
+    return elements.find((el) => INPUT_ROLES.includes(el.role) && el.type === "password") || null;
 }
 
 /**
@@ -166,9 +179,12 @@ function findPasswordElement(elements: SummaryElement[]): SummaryElement | null 
  * this is typically the input immediately before the password field.
  * Falls back to any text/email input if no password field exists.
  */
-function findIdentityElement(elements: SummaryElement[], passwordEl: SummaryElement | null): SummaryElement | null {
+function findIdentityElement(
+    elements: SummaryElement[],
+    passwordEl: SummaryElement | null,
+): SummaryElement | null {
     const textInputs = elements.filter(
-        (el) => INPUT_ROLES.includes(el.role) && el.type !== "password" && el.type !== "checkbox"
+        (el) => INPUT_ROLES.includes(el.role) && el.type !== "password" && el.type !== "checkbox",
     );
 
     if (passwordEl) {
@@ -198,14 +214,16 @@ function findIdentityElement(elements: SummaryElement[], passwordEl: SummaryElem
 function findCodeElement(elements: SummaryElement[]): SummaryElement | null {
     // type=tel or type=number on a dead-end page is often an OTP field
     const telOrNumber = elements.find(
-        (el) => INPUT_ROLES.includes(el.role) && (el.type === "tel" || el.type === "number")
+        (el) => INPUT_ROLES.includes(el.role) && (el.type === "tel" || el.type === "number"),
     );
     if (telOrNumber && elements.length <= 10) return telOrNumber;
 
     // Fallback: any textbox whose name/placeholder hints at a code
-    return elements.find(
-        (el) => INPUT_ROLES.includes(el.role) && /code|otp|verification|token/i.test(el.name)
-    ) || null;
+    return (
+        elements.find(
+            (el) => INPUT_ROLES.includes(el.role) && /code|otp|verification|token/i.test(el.name),
+        ) || null
+    );
 }
 
 /**
@@ -225,7 +243,7 @@ function collectSelectors(el: SummaryElement | null): string[] {
 export function getStructuralSignals(
     elements: SummaryElement[],
     pageTitle: string,
-    hasBlockingOverlay = false
+    hasBlockingOverlay = false,
 ): StructuralSignals {
     const passwordEl = findPasswordElement(elements);
     const identityEl = findIdentityElement(elements, passwordEl);

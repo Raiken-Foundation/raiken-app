@@ -5,20 +5,21 @@
  * The LLM decides when to call each tool based on the user's request.
  */
 
-import { tool } from "ai";
-import { z } from "zod";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { tool } from "ai";
+import { z } from "zod";
 import { ProjectContext } from "../analysis/project-context";
-import { AgentMemory } from "./memory";
-import { TestRunner, type TestRunResult } from "../testing/runner";
-import { formatDOMContext, type DOMContext } from "../browser/dom-capture";
-import { createSaveAction, createRunAction, shouldSkipHITL, type HITLAction } from "./hitl-types";
+import { type DOMContext, formatDOMContext } from "../browser/dom-capture";
 import { BrowserSession } from "../browser/session";
-import { DiscoveryQueryService } from "../site-discovery/query-service";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "../site-discovery/db";
-import * as fsSync from "node:fs";
+import { DiscoveryQueryService } from "../site-discovery/query-service";
+import { TestRunner, type TestRunResult } from "../testing/runner";
+import { createRunAction, createSaveAction, type HITLAction, shouldSkipHITL } from "./hitl-types";
+import { AgentMemory } from "./memory";
+
 export type { HITLAction } from "./hitl-types";
 
 /**
@@ -98,7 +99,10 @@ function formatToolError<T = unknown>(context: string, error: unknown): ToolResu
 // Lazy shared DB connection for site knowledge persistence during a tools session.
 // Bounded to MAX_SITE_DB_ENTRIES entries; evicts least-recently-used when full.
 const MAX_SITE_DB_ENTRIES = 5;
-const siteDbCache = new Map<string, { db: CodeGraphDB; siteDb: SiteKnowledgeDB; lastUsed: number }>();
+const siteDbCache = new Map<
+    string,
+    { db: CodeGraphDB; siteDb: SiteKnowledgeDB; lastUsed: number }
+>();
 
 function getSiteDb(projectPath: string): { db: CodeGraphDB; siteDb: SiteKnowledgeDB } {
     const cached = siteDbCache.get(projectPath);
@@ -120,7 +124,11 @@ function getSiteDb(projectPath: string): { db: CodeGraphDB; siteDb: SiteKnowledg
         if (oldestKey) {
             const evicted = siteDbCache.get(oldestKey);
             siteDbCache.delete(oldestKey);
-            try { evicted?.db.close(); } catch { /* ignore */ }
+            try {
+                evicted?.db.close();
+            } catch {
+                /* ignore */
+            }
         }
     }
 
@@ -132,7 +140,11 @@ function getSiteDb(projectPath: string): { db: CodeGraphDB; siteDb: SiteKnowledg
 
 export function closeSiteDbCache(): void {
     for (const [, entry] of siteDbCache) {
-        try { entry.db.close(); } catch { /* ignore */ }
+        try {
+            entry.db.close();
+        } catch {
+            /* ignore */
+        }
     }
     siteDbCache.clear();
 }
@@ -142,7 +154,11 @@ process.once("SIGINT", closeSiteDbCache);
 process.once("SIGTERM", closeSiteDbCache);
 process.once("beforeExit", closeSiteDbCache);
 
-function persistPageDiscovery(projectPath: string, snapshot: PageSnapshot, parentUrl?: string): void {
+function persistPageDiscovery(
+    projectPath: string,
+    snapshot: PageSnapshot,
+    parentUrl?: string,
+): void {
     try {
         const { siteDb } = getSiteDb(projectPath);
         const now = Date.now();
@@ -189,7 +205,7 @@ function persistPageDiscovery(projectPath: string, snapshot: PageSnapshot, paren
 function persistLinksDiscovery(
     projectPath: string,
     fromUrl: string,
-    links: Array<{ text: string; href: string; suggestedSelectors?: string[] }>
+    links: Array<{ text: string; href: string; suggestedSelectors?: string[] }>,
 ): void {
     try {
         const { siteDb } = getSiteDb(projectPath);
@@ -281,8 +297,16 @@ export function createAgentTools(ctx: ToolContext) {
             description:
                 "Search the codebase for files related to a query. Use this to find relevant source files before reading them.",
             inputSchema: z.object({
-                query: z.string().describe('Search query (e.g., "login form", "auth service", "user validation")'),
-                limit: z.number().optional().default(10).describe("Maximum number of files to return"),
+                query: z
+                    .string()
+                    .describe(
+                        'Search query (e.g., "login form", "auth service", "user validation")',
+                    ),
+                limit: z
+                    .number()
+                    .optional()
+                    .default(10)
+                    .describe("Maximum number of files to return"),
             }),
             execute: async (params): Promise<ToolResult<string[]>> => {
                 const { query, limit = 10 } = params as { query: string; limit?: number };
@@ -295,7 +319,10 @@ export function createAgentTools(ctx: ToolContext) {
                     return {
                         success: true,
                         data: files,
-                        message: files.length > 0 ? `Found ${files.length} relevant files` : "No matching files found",
+                        message:
+                            files.length > 0
+                                ? `Found ${files.length} relevant files`
+                                : "No matching files found",
                     };
                 } catch (error) {
                     return {
@@ -310,9 +337,14 @@ export function createAgentTools(ctx: ToolContext) {
          * Read the contents of a file
          */
         readFile: tool({
-            description: "Read the contents of a source file. Use this to understand code before generating tests.",
+            description:
+                "Read the contents of a source file. Use this to understand code before generating tests.",
             inputSchema: z.object({
-                filePath: z.string().describe("File path relative to project root (e.g., src/components/LoginForm.tsx)"),
+                filePath: z
+                    .string()
+                    .describe(
+                        "File path relative to project root (e.g., src/components/LoginForm.tsx)",
+                    ),
             }),
             execute: async (params): Promise<ToolResult<{ content: string; lines: number }>> => {
                 const { filePath } = params as { filePath: string };
@@ -340,7 +372,9 @@ export function createAgentTools(ctx: ToolContext) {
         listDirectory: tool({
             description: "List files in a directory. Use this to explore the project structure.",
             inputSchema: z.object({
-                dirPath: z.string().describe("Directory path relative to project root (e.g., src/components)"),
+                dirPath: z
+                    .string()
+                    .describe("Directory path relative to project root (e.g., src/components)"),
             }),
             execute: async (params): Promise<ToolResult<string[]>> => {
                 const { dirPath } = params as { dirPath: string };
@@ -369,9 +403,16 @@ export function createAgentTools(ctx: ToolContext) {
             description:
                 "Capture the live DOM from a running web application. Use this to understand the current UI state for test generation.",
             inputSchema: z.object({
-                url: z.string().url().describe("URL to capture (e.g., http://localhost:3000/login)"),
+                url: z
+                    .string()
+                    .url()
+                    .describe("URL to capture (e.g., http://localhost:3000/login)"),
             }),
-            execute: async (params): Promise<ToolResult<{ summary: string; elementCount: number; formCount: number }>> => {
+            execute: async (
+                params,
+            ): Promise<
+                ToolResult<{ summary: string; elementCount: number; formCount: number }>
+            > => {
                 const { url } = params as { url: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
@@ -409,12 +450,18 @@ export function createAgentTools(ctx: ToolContext) {
             description:
                 "Save content to a file. Depending on autonomy settings, this may save immediately or ask for confirmation.",
             inputSchema: z.object({
-                filePath: z.string().describe("File path relative to project root (e.g., tests/login.spec.ts)"),
+                filePath: z
+                    .string()
+                    .describe("File path relative to project root (e.g., tests/login.spec.ts)"),
                 content: z.string().describe("File content to save"),
                 testName: z.string().optional().describe("Name of the test (for display)"),
             }),
             execute: async (params): Promise<ToolResult<{ path: string; saved: boolean }>> => {
-                const { filePath, content, testName } = params as { filePath: string; content: string; testName?: string };
+                const { filePath, content, testName } = params as {
+                    filePath: string;
+                    content: string;
+                    testName?: string;
+                };
                 const name = testName || path.basename(filePath, path.extname(filePath));
 
                 // Check if we can skip HITL
@@ -462,7 +509,10 @@ export function createAgentTools(ctx: ToolContext) {
                 headed: z.boolean().optional().default(false).describe("Run with visible browser"),
             }),
             execute: async (params): Promise<ToolResult<TestRunResult[] | { status: string }>> => {
-                const { testFile, headed = false } = params as { testFile: string; headed?: boolean };
+                const { testFile, headed = false } = params as {
+                    testFile: string;
+                    headed?: boolean;
+                };
 
                 // Check if we can skip HITL
                 if (shouldSkipHITL("run", autonomy)) {
@@ -542,7 +592,8 @@ export function createAgentTools(ctx: ToolContext) {
          * Get project structure overview
          */
         getProjectOverview: tool({
-            description: "Get an overview of the project structure including modules and file counts.",
+            description:
+                "Get an overview of the project structure including modules and file counts.",
             inputSchema: z.object({}),
             execute: async (): Promise<
                 ToolResult<{
@@ -640,8 +691,7 @@ export function createAgentTools(ctx: ToolContext) {
                             unresolvedBlockers: overview.unresolvedBlockers.map((blocker) => ({
                                 id: blocker.id ?? null,
                                 url: blocker.url,
-                                blockerType:
-                                    blocker.blockerType ?? blocker.category ?? "unknown",
+                                blockerType: blocker.blockerType ?? blocker.category ?? "unknown",
                                 discoveredAt: blocker.discoveredAt,
                             })),
                         },
@@ -669,7 +719,9 @@ export function createAgentTools(ctx: ToolContext) {
                 limit: z.number().optional().default(20).describe("Maximum pages to return"),
                 offset: z.number().optional().default(0).describe("Offset for pagination"),
             }),
-            execute: async (params): Promise<
+            execute: async (
+                params,
+            ): Promise<
                 ToolResult<{
                     pages: Array<{
                         url: string;
@@ -728,7 +780,9 @@ export function createAgentTools(ctx: ToolContext) {
             inputSchema: z.object({
                 url: z.string().url().describe("Discovered page URL"),
             }),
-            execute: async (params): Promise<
+            execute: async (
+                params,
+            ): Promise<
                 ToolResult<{
                     url: string;
                     normalizedUrl: string;
@@ -780,9 +834,16 @@ export function createAgentTools(ctx: ToolContext) {
          * Start a browser session for web app exploration
          */
         startBrowser: tool({
-            description: "Start a browser session for exploring and testing a web application. Call this before navigating to URLs.",
+            description:
+                "Start a browser session for exploring and testing a web application. Call this before navigating to URLs.",
             inputSchema: z.object({
-                headless: z.boolean().optional().default(false).describe("Run in headless mode (true) or visible mode (false). Defaults to visible."),
+                headless: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        "Run in headless mode (true) or visible mode (false). Defaults to visible.",
+                    ),
             }),
             execute: async (params): Promise<ToolResult<{ active: boolean }>> => {
                 const { headless = false } = params as { headless?: boolean };
@@ -832,7 +893,8 @@ export function createAgentTools(ctx: ToolContext) {
          * Navigate to a URL and capture the page
          */
         navigateTo: tool({
-            description: "Navigate to a URL in the browser and capture the page state. Automatically starts the browser if not running. Returns interactive elements and form fields found.",
+            description:
+                "Navigate to a URL in the browser and capture the page state. Automatically starts the browser if not running. Returns interactive elements and form fields found.",
             inputSchema: z.object({
                 url: z.string().url().describe("URL to navigate to"),
             }),
@@ -846,7 +908,11 @@ export function createAgentTools(ctx: ToolContext) {
                     }
 
                     let previousUrl: string | undefined;
-                    try { previousUrl = session.getCurrentUrl(); } catch { /* browser just started */ }
+                    try {
+                        previousUrl = session.getCurrentUrl();
+                    } catch {
+                        /* browser just started */
+                    }
                     const domContext = await session.navigate(url);
                     const snapshot = buildPageSnapshot(domContext);
 
@@ -869,7 +935,9 @@ export function createAgentTools(ctx: ToolContext) {
         clickElement: tool({
             description: "Click an element on the page using a selector or array of selectors.",
             inputSchema: z.object({
-                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of DOM-derived selectors to try"),
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of DOM-derived selectors to try"),
             }),
             execute: async (params): Promise<ToolResult<{ clicked: boolean }>> => {
                 const { selector } = params as { selector: string | string[] };
@@ -896,11 +964,16 @@ export function createAgentTools(ctx: ToolContext) {
         fillInput: tool({
             description: "Fill an input field with text (clears existing value first).",
             inputSchema: z.object({
-                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of DOM-derived selectors to try"),
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of DOM-derived selectors to try"),
                 value: z.string().describe("Value to fill"),
             }),
             execute: async (params): Promise<ToolResult<{ filled: boolean }>> => {
-                const { selector, value } = params as { selector: string | string[]; value: string };
+                const { selector, value } = params as {
+                    selector: string | string[];
+                    value: string;
+                };
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     await session.fill(selector, value);
@@ -924,7 +997,9 @@ export function createAgentTools(ctx: ToolContext) {
         pressKey: tool({
             description: "Press a keyboard key (e.g., 'Enter', 'Tab', 'Escape').",
             inputSchema: z.object({
-                key: z.string().describe("Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')"),
+                key: z
+                    .string()
+                    .describe("Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')"),
             }),
             execute: async (params): Promise<ToolResult<{ pressed: boolean }>> => {
                 const { key } = params as { key: string };
@@ -949,7 +1024,8 @@ export function createAgentTools(ctx: ToolContext) {
          * Capture current page state
          */
         captureCurrentPage: tool({
-            description: "Capture the current page state without navigating. Use this after interactions to see what changed.",
+            description:
+                "Capture the current page state without navigating. Use this after interactions to see what changed.",
             inputSchema: z.object({}),
             execute: async (): Promise<ToolResult<PageSnapshot>> => {
                 try {
@@ -978,11 +1054,16 @@ export function createAgentTools(ctx: ToolContext) {
         waitForElement: tool({
             description: "Wait for an element to appear on the page.",
             inputSchema: z.object({
-                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors to wait for"),
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of selectors to wait for"),
                 timeout: z.number().optional().default(5000).describe("Timeout in milliseconds"),
             }),
             execute: async (params): Promise<ToolResult<{ found: boolean }>> => {
-                const { selector, timeout } = params as { selector: string | string[]; timeout?: number };
+                const { selector, timeout } = params as {
+                    selector: string | string[];
+                    timeout?: number;
+                };
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     await session.waitForSelector(selector, timeout);
@@ -1006,11 +1087,16 @@ export function createAgentTools(ctx: ToolContext) {
         selectOption: tool({
             description: "Select an option from a dropdown/select element.",
             inputSchema: z.object({
-                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors for the select element"),
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of selectors for the select element"),
                 value: z.string().describe("Option value to select"),
             }),
             execute: async (params): Promise<ToolResult<{ selected: boolean }>> => {
-                const { selector, value } = params as { selector: string | string[]; value: string };
+                const { selector, value } = params as {
+                    selector: string | string[];
+                    value: string;
+                };
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     await session.selectOption(selector, value);
@@ -1034,11 +1120,16 @@ export function createAgentTools(ctx: ToolContext) {
         toggleCheckbox: tool({
             description: "Check or uncheck a checkbox.",
             inputSchema: z.object({
-                selector: z.union([z.string(), z.array(z.string())]).describe("Selector or array of selectors for the checkbox"),
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of selectors for the checkbox"),
                 checked: z.boolean().describe("True to check, false to uncheck"),
             }),
             execute: async (params): Promise<ToolResult<{ toggled: boolean }>> => {
-                const { selector, checked } = params as { selector: string | string[]; checked: boolean };
+                const { selector, checked } = params as {
+                    selector: string | string[];
+                    checked: boolean;
+                };
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     if (checked) {
@@ -1088,7 +1179,8 @@ export function createAgentTools(ctx: ToolContext) {
          * Save browser auth state for future sessions
          */
         saveAuthState: tool({
-            description: "Save the current browser authentication state (cookies, localStorage) so future sessions start already logged in. Call this after the user has manually logged in.",
+            description:
+                "Save the current browser authentication state (cookies, localStorage) so future sessions start already logged in. Call this after the user has manually logged in.",
             inputSchema: z.object({}),
             execute: async (): Promise<ToolResult<{ saved: boolean; path: string }>> => {
                 try {
@@ -1115,11 +1207,20 @@ export function createAgentTools(ctx: ToolContext) {
          * Discover all links on the current page (lightweight, for exploration)
          */
         discoverLinks: tool({
-            description: "Quickly discover all links on the current page. Use this for app exploration before deciding which pages to visit. Faster than full page capture.",
+            description:
+                "Quickly discover all links on the current page. Use this for app exploration before deciding which pages to visit. Faster than full page capture.",
             inputSchema: z.object({
-                includeExternal: z.boolean().optional().default(false).describe("Include external links (default: false)"),
+                includeExternal: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe("Include external links (default: false)"),
             }),
-            execute: async (params): Promise<ToolResult<{ links: Array<{ text: string; href: string }>; totalFound: number }>> => {
+            execute: async (
+                params,
+            ): Promise<
+                ToolResult<{ links: Array<{ text: string; href: string }>; totalFound: number }>
+            > => {
                 const { includeExternal } = params as { includeExternal?: boolean };
                 try {
                     const session = getBoundBrowserSession(projectPath);
@@ -1128,13 +1229,13 @@ export function createAgentTools(ctx: ToolContext) {
                         await session.start({ headless: false, storageStatePath });
                     }
                     const allLinks = await session.discoverLinks();
-                    
-                    const links = includeExternal 
-                        ? allLinks 
-                        : allLinks.filter(l => !l.isExternal);
+
+                    const links = includeExternal
+                        ? allLinks
+                        : allLinks.filter((l) => !l.isExternal);
 
                     const currentUrl = session.getCurrentUrl() ?? "";
-                    const persisted = links.map(l => ({
+                    const persisted = links.map((l) => ({
                         text: l.text,
                         href: l.href,
                         suggestedSelectors: l.suggestedSelectors,
@@ -1167,11 +1268,18 @@ export function createAgentTools(ctx: ToolContext) {
          * Signal task completion - NO execute function, stops the agent loop
          */
         done: tool({
-            description: "Signal that you have finished the task. Call this when exploration is complete or when you have completed the user's request. This stops the agent loop.",
+            description:
+                "Signal that you have finished the task. Call this when exploration is complete or when you have completed the user's request. This stops the agent loop.",
             inputSchema: z.object({
                 summary: z.string().describe("Summary of what you found or did"),
-                suggestedTests: z.array(z.string()).optional().describe("List of suggested test scenarios based on exploration"),
-                pagesVisited: z.array(z.string()).optional().describe("List of pages/URLs that were visited"),
+                suggestedTests: z
+                    .array(z.string())
+                    .optional()
+                    .describe("List of suggested test scenarios based on exploration"),
+                pagesVisited: z
+                    .array(z.string())
+                    .optional()
+                    .describe("List of pages/URLs that were visited"),
             }),
             // NO execute function - calling this tool stops the agent loop
         }),
@@ -1180,17 +1288,31 @@ export function createAgentTools(ctx: ToolContext) {
          * Send a message to the user - for questions or progress updates
          */
         respond: tool({
-            description: "Send a message to the user. Use this when you need to ask a clarifying question, report progress, or provide information that requires user acknowledgment before continuing.",
+            description:
+                "Send a message to the user. Use this when you need to ask a clarifying question, report progress, or provide information that requires user acknowledgment before continuing.",
             inputSchema: z.object({
                 message: z.string().describe("Message to send to the user"),
-                needsInput: z.boolean().optional().default(false).describe("Whether you need user input to continue (true = wait for response)"),
-                options: z.array(z.string()).optional().describe("Optional list of choices for the user to pick from"),
+                needsInput: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe("Whether you need user input to continue (true = wait for response)"),
+                options: z
+                    .array(z.string())
+                    .optional()
+                    .describe("Optional list of choices for the user to pick from"),
             }),
-            execute: async (params): Promise<ToolResult<{ messageSent: boolean; awaitingInput: boolean }>> => {
-                const { message, needsInput = false, options } = params as { 
-                    message: string; 
-                    needsInput?: boolean; 
-                    options?: string[] 
+            execute: async (
+                params,
+            ): Promise<ToolResult<{ messageSent: boolean; awaitingInput: boolean }>> => {
+                const {
+                    message,
+                    needsInput = false,
+                    options,
+                } = params as {
+                    message: string;
+                    needsInput?: boolean;
+                    options?: string[];
                 };
                 return {
                     success: true,
@@ -1205,10 +1327,14 @@ export function createAgentTools(ctx: ToolContext) {
          * Use this when you need the user to respond before continuing.
          */
         awaitUser: tool({
-            description: "Pause and ask the user for input. This stops the agent loop until the user responds.",
+            description:
+                "Pause and ask the user for input. This stops the agent loop until the user responds.",
             inputSchema: z.object({
                 message: z.string().describe("Question or prompt for the user"),
-                options: z.array(z.string()).optional().describe("Optional list of choices for the user to pick from"),
+                options: z
+                    .array(z.string())
+                    .optional()
+                    .describe("Optional list of choices for the user to pick from"),
             }),
             // NO execute function - calling this tool pauses the agent loop
         }),

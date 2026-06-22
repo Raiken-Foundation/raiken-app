@@ -7,12 +7,7 @@
  * Auth: GITHUB_TOKEN env var or config.github.token
  */
 
-import type {
-    TicketProvider,
-    TicketInfo,
-    ChangedFile,
-    IntegrationConfig,
-} from "./types";
+import type { ChangedFile, IntegrationConfig, TicketInfo, TicketProvider } from "./types";
 
 const API_BASE = "https://api.github.com";
 
@@ -72,7 +67,9 @@ export class GitHubProvider implements TicketProvider {
     async getMyTickets(): Promise<TicketInfo[]> {
         const user = await this.fetchAuthenticatedUser();
         if (!user) {
-            throw new Error("Could not determine authenticated GitHub user. Check your GITHUB_TOKEN.");
+            throw new Error(
+                "Could not determine authenticated GitHub user. Check your GITHUB_TOKEN.",
+            );
         }
 
         const issues = await this.apiFetch<GitHubIssue[]>(
@@ -91,9 +88,7 @@ export class GitHubProvider implements TicketProvider {
                 id: String(issue.number),
                 title: issue.title,
                 description: issue.body || "",
-                labels: issue.labels.map((l) =>
-                    typeof l === "string" ? l : l.name || "",
-                ),
+                labels: issue.labels.map((l) => (typeof l === "string" ? l : l.name || "")),
                 assignee: issue.assignee?.login,
                 status: issue.state,
                 url: issue.html_url,
@@ -168,9 +163,7 @@ export class GitHubProvider implements TicketProvider {
                 id: String(issue.number),
                 title: issue.title,
                 description: issue.body || "",
-                labels: issue.labels.map((l) =>
-                    typeof l === "string" ? l : l.name || "",
-                ),
+                labels: issue.labels.map((l) => (typeof l === "string" ? l : l.name || "")),
                 assignee: issue.assignee?.login,
                 status: issue.state,
                 url: issue.html_url,
@@ -228,9 +221,7 @@ export class GitHubProvider implements TicketProvider {
 
         if (!response.ok) {
             const body = await response.text().catch(() => "");
-            throw new Error(
-                `GitHub API error ${response.status}: ${response.statusText}. ${body}`,
-            );
+            throw new Error(`GitHub API error ${response.status}: ${response.statusText}. ${body}`);
         }
 
         return response.json() as Promise<T>;

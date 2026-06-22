@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
 
 export class TestStorage {
     private projectPath: string;
@@ -24,7 +24,11 @@ export class TestStorage {
         return filePath;
     }
 
-    async saveToProject(testCode: string, testDirectory: string, fileName: string): Promise<string> {
+    async saveToProject(
+        testCode: string,
+        testDirectory: string,
+        fileName: string,
+    ): Promise<string> {
         const testDir = path.join(this.projectPath, testDirectory);
         if (!fs.existsSync(testDir)) {
             fs.mkdirSync(testDir, { recursive: true });

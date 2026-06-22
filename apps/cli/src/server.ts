@@ -1,20 +1,20 @@
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
 import fastifyStatic from "@fastify/static";
+import {
+    AgentMemory,
+    CodeGraph,
+    CodeGraphDB,
+    EntryPointDetector,
+    getCurrentBranch,
+    ProjectContext,
+    parseTicketFromBranch,
+    runOrchestrator,
+} from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
 import { detectProject } from "./project-detector";
-import {
-    runOrchestrator,
-    ProjectContext,
-    CodeGraphDB,
-    EntryPointDetector,
-    CodeGraph,
-    AgentMemory,
-    getCurrentBranch,
-    parseTicketFromBranch,
-} from "@raiken/core";
 
 export async function startServer(port = 7101) {
     // Fastify's default maxParamLength (100) truncates long tRPC batch
@@ -193,7 +193,7 @@ export async function startServer(port = 7101) {
                 fileContext?: string[];
                 conversationHistory?: Array<{ role: string; content: string }>;
             };
-            const { prompt, fileContext, conversationHistory } = body;
+            const { prompt, conversationHistory } = body;
 
             if (!prompt) {
                 reply.code(400).send({ error: "Prompt is required" });

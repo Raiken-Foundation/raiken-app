@@ -932,10 +932,7 @@ export class SiteDiscovery extends EventEmitter {
             // diagnostic can suggest `raiken auth` even when no detector
             // fired (e.g. magic-link login pages with no password field,
             // or `raiken discover` pointed straight at /auth/login).
-            if (
-                looksLikeLoginUrl(resolvedUrl) &&
-                this.resolvedLoginShapedUrls.size < 5
-            ) {
+            if (looksLikeLoginUrl(resolvedUrl) && this.resolvedLoginShapedUrls.size < 5) {
                 this.resolvedLoginShapedUrls.add(resolvedUrl);
             }
 

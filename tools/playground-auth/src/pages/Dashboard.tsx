@@ -46,9 +46,19 @@ export default function Dashboard() {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
                     <div className="card">
                         <h2 style={{ fontSize: "1rem", marginBottom: "1rem" }}>Recent Projects</h2>
-                        <div data-testid="recent-projects" style={{ display: "flex", flexDirection: "column", gap: ".5rem" }}>
+                        <div
+                            data-testid="recent-projects"
+                            style={{ display: "flex", flexDirection: "column", gap: ".5rem" }}
+                        >
                             {RECENT_PROJECTS.map((p) => (
-                                <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <div
+                                    key={p.id}
+                                    style={{
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        alignItems: "center",
+                                    }}
+                                >
                                     <Link
                                         to={`/projects/${p.id}`}
                                         data-testid={`project-link-${p.id}`}
@@ -58,7 +68,11 @@ export default function Dashboard() {
                                     <span className={`badge badge-${p.status}`}>{p.status}</span>
                                 </div>
                             ))}
-                            <Link to="/projects" data-testid="view-all-projects" style={{ fontSize: ".8rem", marginTop: ".5rem" }}>
+                            <Link
+                                to="/projects"
+                                data-testid="view-all-projects"
+                                style={{ fontSize: ".8rem", marginTop: ".5rem" }}
+                            >
                                 View all projects →
                             </Link>
                         </div>
@@ -77,7 +91,11 @@ export default function Dashboard() {
                                 </div>
                             ))}
                         </div>
-                        <Link to="/tasks" data-testid="recent-activity-all" style={{ fontSize: ".8rem", marginTop: ".75rem", display: "block" }}>
+                        <Link
+                            to="/tasks"
+                            data-testid="recent-activity-all"
+                            style={{ fontSize: ".8rem", marginTop: ".75rem", display: "block" }}
+                        >
                             View all tasks →
                         </Link>
                     </div>

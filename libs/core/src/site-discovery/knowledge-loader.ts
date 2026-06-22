@@ -6,11 +6,7 @@
 
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "./db";
-import type {
-    SiteKnowledge,
-    NavigationPath,
-    SelectorHint,
-} from "./types";
+import type { NavigationPath, SelectorHint, SiteKnowledge } from "./types";
 
 /**
  * Load site knowledge from the database.
@@ -22,7 +18,7 @@ import type {
  */
 export async function loadSiteKnowledge(
     projectPath: string,
-    targetUrl?: string
+    targetUrl?: string,
 ): Promise<SiteKnowledge | null> {
     try {
         const db = new CodeGraphDB(projectPath);
@@ -50,7 +46,10 @@ export async function loadSiteKnowledge(
         const authRequiredRoutes = authBlockers.map((blocker) => blocker.url);
 
         // Build selector hints from verified links
-        const selectorCounts = new Map<string, { count: number; url: string; role: string | null }>();
+        const selectorCounts = new Map<
+            string,
+            { count: number; url: string; role: string | null }
+        >();
 
         for (const link of verifiedLinks) {
             const key = link.selector;
@@ -67,9 +66,7 @@ export async function loadSiteKnowledge(
             }
         }
 
-        const workingSelectors: SelectorHint[] = Array.from(
-            selectorCounts.entries()
-        )
+        const workingSelectors: SelectorHint[] = Array.from(selectorCounts.entries())
             .map(([selector, data]) => ({
                 selector,
                 url: data.url,
@@ -109,28 +106,22 @@ export function formatSiteKnowledge(knowledge: SiteKnowledge): string {
 
     sections.push("## Site Discovery Knowledge\n");
     sections.push(
-        `Raiken has autonomously discovered ${knowledge.pagesDiscovered} pages in this application.\n`
+        `Raiken has autonomously discovered ${knowledge.pagesDiscovered} pages in this application.\n`,
     );
 
     // Verified navigation paths
     if (knowledge.verifiedPaths.length > 0) {
         sections.push("### Verified Navigation Paths\n");
-        sections.push(
-            "These navigation paths have been verified to work:\n"
-        );
+        sections.push("These navigation paths have been verified to work:\n");
 
         for (const path of knowledge.verifiedPaths.slice(0, 10)) {
             const linkText = path.linkText ? ` ("${path.linkText}")` : "";
-            sections.push(
-                `- ${path.fromUrl} → ${path.toUrl}${linkText}\n`
-            );
+            sections.push(`- ${path.fromUrl} → ${path.toUrl}${linkText}\n`);
             sections.push(`  Selector: \`${path.selector}\`\n`);
         }
 
         if (knowledge.verifiedPaths.length > 10) {
-            sections.push(
-                `\n...and ${knowledge.verifiedPaths.length - 10} more verified paths.\n`
-            );
+            sections.push(`\n...and ${knowledge.verifiedPaths.length - 10} more verified paths.\n`);
         }
         sections.push("\n");
     }
@@ -138,15 +129,11 @@ export function formatSiteKnowledge(knowledge: SiteKnowledge): string {
     // Working selectors
     if (knowledge.workingSelectors.length > 0) {
         sections.push("### Recommended Selectors\n");
-        sections.push(
-            "These selectors have been used successfully in this application:\n"
-        );
+        sections.push("These selectors have been used successfully in this application:\n");
 
         for (const hint of knowledge.workingSelectors.slice(0, 10)) {
             const role = hint.elementRole ? ` (role: ${hint.elementRole})` : "";
-            sections.push(
-                `- \`${hint.selector}\`${role} - used ${hint.usageCount}x\n`
-            );
+            sections.push(`- \`${hint.selector}\`${role} - used ${hint.usageCount}x\n`);
         }
         sections.push("\n");
     }
@@ -154,9 +141,7 @@ export function formatSiteKnowledge(knowledge: SiteKnowledge): string {
     // Auth-required routes
     if (knowledge.authRequiredRoutes.length > 0) {
         sections.push("### Authentication Required\n");
-        sections.push(
-            "These routes require authentication:\n"
-        );
+        sections.push("These routes require authentication:\n");
 
         for (const route of knowledge.authRequiredRoutes.slice(0, 5)) {
             sections.push(`- ${route}\n`);
@@ -164,7 +149,7 @@ export function formatSiteKnowledge(knowledge: SiteKnowledge): string {
 
         if (knowledge.authRequiredRoutes.length > 5) {
             sections.push(
-                `\n...and ${knowledge.authRequiredRoutes.length - 5} more protected routes.\n`
+                `\n...and ${knowledge.authRequiredRoutes.length - 5} more protected routes.\n`,
             );
         }
         sections.push("\n");
@@ -173,18 +158,14 @@ export function formatSiteKnowledge(knowledge: SiteKnowledge): string {
     // Broken links
     if (knowledge.brokenLinks.length > 0) {
         sections.push("### Known Broken Links\n");
-        sections.push(
-            "These URLs should be avoided in tests:\n"
-        );
+        sections.push("These URLs should be avoided in tests:\n");
 
         for (const url of knowledge.brokenLinks.slice(0, 5)) {
             sections.push(`- ${url}\n`);
         }
 
         if (knowledge.brokenLinks.length > 5) {
-            sections.push(
-                `\n...and ${knowledge.brokenLinks.length - 5} more broken links.\n`
-            );
+            sections.push(`\n...and ${knowledge.brokenLinks.length - 5} more broken links.\n`);
         }
         sections.push("\n");
     }

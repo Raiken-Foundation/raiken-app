@@ -41,10 +41,7 @@ interface FakeLocator {
     first: () => FakeLocator;
 }
 
-function makePage(opts: {
-    content?: string;
-    locators?: Record<string, FakeLocator>;
-}) {
+function makePage(opts: { content?: string; locators?: Record<string, FakeLocator> }) {
     const locators = opts.locators ?? {};
     const empty: FakeLocator = {
         count: async () => 0,
@@ -67,9 +64,7 @@ function makeResponse(status: number, statusText = "OK") {
     } as unknown as import("playwright").Response;
 }
 
-function makeContext(
-    overrides: Partial<BlockerDetectorContext> = {},
-): BlockerDetectorContext {
+function makeContext(overrides: Partial<BlockerDetectorContext> = {}): BlockerDetectorContext {
     return {
         projectPath: overrides.projectPath ?? "/test/project",
         url: overrides.url ?? "http://localhost:3000",

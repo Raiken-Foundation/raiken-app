@@ -7,12 +7,7 @@
  * Host: JIRA_HOST env var or config (e.g. "mycompany.atlassian.net")
  */
 
-import type {
-    TicketProvider,
-    TicketInfo,
-    ChangedFile,
-    IntegrationConfig,
-} from "./types";
+import type { ChangedFile, IntegrationConfig, TicketInfo, TicketProvider } from "./types";
 
 export class JiraProvider implements TicketProvider {
     readonly name = "jira" as const;
@@ -39,9 +34,7 @@ export class JiraProvider implements TicketProvider {
     }
 
     async getMyTickets(): Promise<TicketInfo[]> {
-        const projectClause = this.projectKey
-            ? ` AND project = "${this.projectKey}"`
-            : "";
+        const projectClause = this.projectKey ? ` AND project = "${this.projectKey}"` : "";
 
         const jql = `assignee = currentUser() AND status != Done${projectClause} ORDER BY updated DESC`;
         const response = await this.apiFetch<JiraSearchResponse>(
@@ -111,17 +104,15 @@ export class JiraProvider implements TicketProvider {
 
         const response = await fetch(url, {
             headers: {
-                "Authorization": `Basic ${auth}`,
-                "Accept": "application/json",
+                Authorization: `Basic ${auth}`,
+                Accept: "application/json",
                 "Content-Type": "application/json",
             },
         });
 
         if (!response.ok) {
             const body = await response.text().catch(() => "");
-            throw new Error(
-                `Jira API error ${response.status}: ${response.statusText}. ${body}`,
-            );
+            throw new Error(`Jira API error ${response.status}: ${response.statusText}. ${body}`);
         }
 
         return response.json() as Promise<T>;

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { getProvider, resolveAIConfig } from "@raiken/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import dotenv from "dotenv";
-import { getProvider, resolveAIConfig } from "@raiken/core";
 import { startServer } from "./server";
 
 // Load .env from the current working directory (where the user runs raiken)
@@ -45,7 +45,7 @@ function printBanner(version: string): void {
         `${dim("[")}  ${p("█")}   ${p("█")}  ${dim("]")}`,
     ];
     console.log("");
-    for (const line of lines) console.log("  " + line);
+    for (const line of lines) console.log(`  ${line}`);
     console.log("");
     console.log(
         `  ${chalk.bold("raiken")} ${dim(`v${version}`)}  ${dim("·")}  ${dim("AI QA agent for developers")}`,
@@ -103,7 +103,7 @@ program
     .option("-p, --port <number>", "Port to run on", "7101")
     .action(async (options) => {
         const port = parseInt(options.port, 10);
-        if (isNaN(port) || port < 1 || port > 65535) {
+        if (Number.isNaN(port) || port < 1 || port > 65535) {
             console.error(
                 chalk.red(`Invalid port: "${options.port}". Must be a number between 1 and 65535.`),
             );

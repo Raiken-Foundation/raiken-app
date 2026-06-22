@@ -1,22 +1,30 @@
 // libs/api/src/lib/router.ts
+
+import * as path from "node:path";
+import {
+    CodeGraph,
+    CodeGraphDB,
+    EmbeddingsGenerator,
+    EntryPointDetector,
+    formatBytes,
+    fullAstToSearchableText,
+} from "@raiken/core";
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import * as path from "node:path";
-import { EntryPointDetector, CodeGraph, CodeGraphDB, formatBytes, EmbeddingsGenerator, fullAstToSearchableText } from "@raiken/core";
 
 // Context type for tRPC procedures
 export interface Context {
-  projectPath: string;
+    projectPath: string;
 }
 
 const t = initTRPC.context<Context>().create();
 
 export const appRouter = t.router({
     getHealth: t.procedure.query(() => {
-        return { 
-            status: "ok", 
+        return {
+            status: "ok",
             engine: "raiken",
-            version: "0.0.1"
+            version: "0.0.1",
         };
     }),
 
@@ -35,7 +43,7 @@ export const appRouter = t.router({
                 extensions: z.array(z.string()).optional(),
                 useGitignore: z.boolean().default(true),
                 persist: z.boolean().default(true),
-            })
+            }),
         )
         .mutation(async ({ input }) => {
             const projectPath = input.path || process.cwd();
@@ -49,12 +57,12 @@ export const appRouter = t.router({
                 includeTests: input.includeTests,
                 extensions: input.extensions,
                 useGitignore: input.useGitignore,
-                maxDepth: 15
+                maxDepth: 15,
             });
 
             // Use entry points if available, otherwise scan entire project
             if (entryPoints.length > 0) {
-                await graph.initialize(entryPoints.map(ep => ep.file));
+                await graph.initialize(entryPoints.map((ep) => ep.file));
             } else {
                 await graph.scanProject();
             }
@@ -73,11 +81,11 @@ export const appRouter = t.router({
                     nodes.set(node.filePath, node);
                 }
                 // Map entry points to database format
-                const dbEntryPoints = entryPoints.map(ep => ({
+                const dbEntryPoints = entryPoints.map((ep) => ({
                     file: ep.file,
                     framework: ep.framework,
-                    role: ep.role || 'main',
-                    type: ep.type
+                    role: ep.role || "main",
+                    type: ep.type,
                 }));
                 db.saveGraph(nodes, dbEntryPoints);
                 db.close();
@@ -86,17 +94,17 @@ export const appRouter = t.router({
             // Return graph structure with linkages
             return {
                 projectRoot: projectPath,
-                entryPoints: entryPoints.map(ep => ({
+                entryPoints: entryPoints.map((ep) => ({
                     file: path.relative(projectPath, ep.file),
                     framework: ep.framework,
                     role: ep.role,
-                    type: ep.type
+                    type: ep.type,
                 })),
                 stats,
                 totalSize,
                 totalLines,
                 totalSizeFormatted: formatBytes(totalSize),
-                files: allFiles.map(node => ({
+                files: allFiles.map((node) => ({
                     path: node.relativePath,
                     depth: node.depth,
                     functions: node.parsed.functions.length,
@@ -104,16 +112,18 @@ export const appRouter = t.router({
                     types: node.parsed.types.length,
                     size: node.size,
                     lines: node.lines,
-                    imports: node.imports.map(imp => path.relative(projectPath, imp)),
-                    importedBy: node.importedBy.map(imp => path.relative(projectPath, imp))
-                }))
+                    imports: node.imports.map((imp) => path.relative(projectPath, imp)),
+                    importedBy: node.importedBy.map((imp) => path.relative(projectPath, imp)),
+                })),
             };
         }),
 
     getGraphStats: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
@@ -138,11 +148,13 @@ export const appRouter = t.router({
         }),
 
     getGraphFiles: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-            limit: z.number().default(100),
-            offset: z.number().default(0),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+                limit: z.number().default(100),
+                offset: z.number().default(0),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
@@ -153,7 +165,7 @@ export const appRouter = t.router({
 
             return {
                 total: allFiles.length,
-                files: paginated.map(file => ({
+                files: paginated.map((file) => ({
                     path: file.relative_path,
                     size: file.size,
                     sizeFormatted: formatBytes(file.size),
@@ -173,42 +185,46 @@ export const appRouter = t.router({
         }),
 
     getFileDependencies: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-            filePath: z.string(),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+                filePath: z.string(),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
-            
+
             const dependencies = db.getDependencies(path.join(projectPath, input.filePath));
             const dependents = db.getDependents(path.join(projectPath, input.filePath));
-            
+
             db.close();
 
             return {
                 filePath: input.filePath,
-                imports: dependencies.map(dep => path.relative(projectPath, dep.target_file)),
-                importedBy: dependents.map(dep => path.relative(projectPath, dep.source_file)),
-                timestamp: new Date().toISOString()
-        };
+                imports: dependencies.map((dep) => path.relative(projectPath, dep.target_file)),
+                importedBy: dependents.map((dep) => path.relative(projectPath, dep.source_file)),
+                timestamp: new Date().toISOString(),
+            };
         }),
 
     getFileContent: t.procedure
-        .input(z.object({
-            filePath: z.string(),
-        }))
+        .input(
+            z.object({
+                filePath: z.string(),
+            }),
+        )
         .query(async ({ input }) => {
             const projectPath = process.cwd();
             const fullPath = path.join(projectPath, input.filePath);
-            
+
             try {
-                const fs = await import('node:fs/promises');
-                const content = await fs.readFile(fullPath, 'utf-8');
+                const fs = await import("node:fs/promises");
+                const content = await fs.readFile(fullPath, "utf-8");
                 return {
                     filePath: input.filePath,
                     content,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
                 };
             } catch {
                 throw new Error(`Failed to read file: ${input.filePath}`);
@@ -220,40 +236,44 @@ export const appRouter = t.router({
     // ============================================================================
 
     getDatabaseTables: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
-            
+
             const tables = db.getTables();
-            
+
             db.close();
 
             return {
-                tables: tables.map(table => ({
+                tables: tables.map((table) => ({
                     name: table.name,
-                    rowCount: table.row_count || 0
+                    rowCount: table.row_count || 0,
                 })),
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
             };
         }),
 
     getTableData: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-            table: z.string(),
-            limit: z.number().default(50),
-            offset: z.number().default(0),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+                table: z.string(),
+                limit: z.number().default(50),
+                offset: z.number().default(0),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
-            
+
             const data = db.queryTable(input.table, input.limit, input.offset);
             const total = db.getTableCount(input.table);
-            
+
             db.close();
 
             return {
@@ -262,20 +282,22 @@ export const appRouter = t.router({
                 total,
                 limit: input.limit,
                 offset: input.offset,
-                hasMore: input.offset + input.limit < total
+                hasMore: input.offset + input.limit < total,
             };
         }),
 
     executeQuery: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-            query: z.string(),
-            params: z.array(z.any()).optional(),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+                query: z.string(),
+                params: z.array(z.any()).optional(),
+            }),
+        )
         .mutation(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
-            
+
             try {
                 const results = db.executeQuery(input.query, input.params || []);
                 db.close();
@@ -284,16 +306,16 @@ export const appRouter = t.router({
                     success: true,
                     results,
                     rowCount: Array.isArray(results) ? results.length : 0,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
                 };
             } catch (error) {
                 db.close();
                 return {
                     success: false,
-                    error: error instanceof Error ? error.message : 'Unknown error',
+                    error: error instanceof Error ? error.message : "Unknown error",
                     results: [],
                     rowCount: 0,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
                 };
             }
         }),
@@ -307,7 +329,7 @@ export const appRouter = t.router({
             z.object({
                 path: z.string().optional(),
                 forceRegenerate: z.boolean().default(false),
-            })
+            }),
         )
         .mutation(async ({ input }) => {
             const projectPath = input.path || process.cwd();
@@ -356,14 +378,16 @@ export const appRouter = t.router({
 
                     // For now, embed the entire file as one chunk
                     // Future: Can split into semantic chunks based on AST nodes
-                    const chunks = [{
-                        type: 'file' as const,
-                        name: file.relative_path,
-                        text: searchableText,
-                    }];
+                    const chunks = [
+                        {
+                            type: "file" as const,
+                            name: file.relative_path,
+                            text: searchableText,
+                        },
+                    ];
 
                     // Generate embeddings
-                    const texts = chunks.map(c => c.text);
+                    const texts = chunks.map((c) => c.text);
                     const embeddings = await embGen.generateEmbeddingsBatch(texts);
 
                     // Store in database
@@ -388,7 +412,7 @@ export const appRouter = t.router({
                     filesProcessed,
                     totalFiles: files.length,
                     chunksGenerated: totalChunks,
-                    modelUsed: 'Xenova/all-MiniLM-L6-v2',
+                    modelUsed: "Xenova/all-MiniLM-L6-v2",
                     embeddingDimension: 384,
                     timestamp: new Date().toISOString(),
                 };
@@ -396,7 +420,7 @@ export const appRouter = t.router({
                 db.close();
                 return {
                     success: false,
-                    error: error instanceof Error ? error.message : 'Unknown error',
+                    error: error instanceof Error ? error.message : "Unknown error",
                     filesProcessed: 0,
                     totalFiles: 0,
                     chunksGenerated: 0,
@@ -411,8 +435,8 @@ export const appRouter = t.router({
                 path: z.string().optional(),
                 query: z.string(),
                 limit: z.number().default(10),
-                chunkTypes: z.array(z.enum(['function', 'class', 'file', 'type'])).optional(),
-            })
+                chunkTypes: z.array(z.enum(["function", "class", "file", "type"])).optional(),
+            }),
         )
         .query(async ({ input }) => {
             const projectPath = input.path || process.cwd();
@@ -427,7 +451,7 @@ export const appRouter = t.router({
                     return {
                         query: input.query,
                         results: [],
-                        message: 'No embeddings found. Please run generateEmbeddings first.',
+                        message: "No embeddings found. Please run generateEmbeddings first.",
                         timestamp: new Date().toISOString(),
                     };
                 }
@@ -437,17 +461,13 @@ export const appRouter = t.router({
                 const queryEmbedding = await embGen.generateEmbedding(input.query);
 
                 // Search database
-                const results = db.searchSimilar(
-                    queryEmbedding,
-                    input.limit,
-                    input.chunkTypes
-                );
+                const results = db.searchSimilar(queryEmbedding, input.limit, input.chunkTypes);
 
                 db.close();
 
                 return {
                     query: input.query,
-                    results: results.map(r => ({
+                    results: results.map((r) => ({
                         filePath: r.filePath,
                         chunkType: r.chunkType,
                         chunkName: r.chunkName,
@@ -463,30 +483,32 @@ export const appRouter = t.router({
                 return {
                     query: input.query,
                     results: [],
-                    error: error instanceof Error ? error.message : 'Unknown error',
+                    error: error instanceof Error ? error.message : "Unknown error",
                     timestamp: new Date().toISOString(),
                 };
             }
         }),
 
     getEmbeddingsStats: t.procedure
-        .input(z.object({
-            path: z.string().optional(),
-        }))
+        .input(
+            z.object({
+                path: z.string().optional(),
+            }),
+        )
         .query(({ input }) => {
             const projectPath = input.path || process.cwd();
             const db = new CodeGraphDB(projectPath);
-            
+
             const totalEmbeddings = db.getEmbeddingsCount();
             const totalFiles = db.getStats()?.total_files || 0;
-            
+
             db.close();
 
             return {
                 totalEmbeddings,
                 totalFiles,
-                embeddingsPerFile: totalFiles > 0 ? (totalEmbeddings / totalFiles).toFixed(2) : '0',
-                modelUsed: 'Xenova/all-MiniLM-L6-v2',
+                embeddingsPerFile: totalFiles > 0 ? (totalEmbeddings / totalFiles).toFixed(2) : "0",
+                modelUsed: "Xenova/all-MiniLM-L6-v2",
                 embeddingDimension: 384,
                 timestamp: new Date().toISOString(),
             };

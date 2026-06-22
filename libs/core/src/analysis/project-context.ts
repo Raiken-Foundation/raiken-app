@@ -1,9 +1,9 @@
 import * as path from "path";
-import { CodeGraph } from "./code-graph";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
-import { fullAstToSearchableText } from "./ast-parser";
 import type { CodeNode, UpdateEvent } from "../types";
+import { fullAstToSearchableText } from "./ast-parser";
+import { CodeGraph } from "./code-graph";
 
 /**
  * File change information from the orchestrator
@@ -70,13 +70,13 @@ export class ProjectContext {
      * Singleton pattern ensures one instance per project.
      */
     static getInstance(projectPath: string): ProjectContext {
-        const existing = this.instances.get(projectPath);
+        const existing = ProjectContext.instances.get(projectPath);
         if (existing) {
             return existing;
         }
 
         const instance = new ProjectContext(projectPath);
-        this.instances.set(projectPath, instance);
+        ProjectContext.instances.set(projectPath, instance);
         return instance;
     }
 
@@ -84,10 +84,10 @@ export class ProjectContext {
      * Clear all instances (for testing)
      */
     static clearInstances(): void {
-        for (const instance of this.instances.values()) {
+        for (const instance of ProjectContext.instances.values()) {
             instance.destroy();
         }
-        this.instances.clear();
+        ProjectContext.instances.clear();
     }
 
     // =========================================================================

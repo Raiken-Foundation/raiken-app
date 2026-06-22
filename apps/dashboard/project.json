@@ -19,6 +19,13 @@
             "options": {
                 "command": "pnpm biome lint apps/dashboard"
             }
+        },
+        "test": {
+            "executor": "@nx/vitest:test",
+            "outputs": ["{workspaceRoot}/coverage/apps/dashboard"],
+            "options": {
+                "config": "apps/dashboard/vite.config.mts"
+            }
         }
     }
 }

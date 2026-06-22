@@ -13,13 +13,20 @@ interface RaikenConfig {
     features: { video: boolean; screenshots: boolean; tracing: boolean; network: boolean };
     indexing?: { fullScan: boolean };
     discovery?: {
-        maxPages?: number; maxDepth?: number; maxConcurrency?: number;
-        timeout?: number; excludePatterns?: string[]; pauseOnAuth?: boolean;
+        maxPages?: number;
+        maxDepth?: number;
+        maxConcurrency?: number;
+        timeout?: number;
+        excludePatterns?: string[];
+        pauseOnAuth?: boolean;
     };
     browser: { defaultBrowser: string; headless: boolean; timeout: number; retries: number };
     autonomy?: {
-        autoSaveTests: boolean; autoRunTests: boolean;
-        autoCorrect: "suggest" | "apply" | "off"; autoLearn: string; maxRetries: number;
+        autoSaveTests: boolean;
+        autoRunTests: boolean;
+        autoCorrect: "suggest" | "apply" | "off";
+        autoLearn: string;
+        maxRetries: number;
     };
 }
 
@@ -30,21 +37,57 @@ const defaultConfig: RaikenConfig = {
     outputFormats: ["typescript"],
     ai: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
     features: { video: true, screenshots: true, tracing: false, network: true },
-    discovery: { maxPages: 100, maxDepth: 5, maxConcurrency: 3, timeout: 30000, excludePatterns: [], pauseOnAuth: true },
+    discovery: {
+        maxPages: 100,
+        maxDepth: 5,
+        maxConcurrency: 3,
+        timeout: 30000,
+        excludePatterns: [],
+        pauseOnAuth: true,
+    },
     browser: { defaultBrowser: "chromium", headless: true, timeout: 30000, retries: 1 },
-    autonomy: { autoSaveTests: false, autoRunTests: false, autoCorrect: "suggest", autoLearn: "confirm", maxRetries: 2 },
+    autonomy: {
+        autoSaveTests: false,
+        autoRunTests: false,
+        autoCorrect: "suggest",
+        autoLearn: "confirm",
+        maxRetries: 2,
+    },
 };
-
 
 type Section = "general" | "ai" | "browser" | "discovery" | "features" | "autonomy";
 
 const SECTIONS: { id: Section; label: string; icon: string }[] = [
-    { id: "general", label: "General", icon: "M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" },
-    { id: "ai", label: "AI Provider", icon: "M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" },
-    { id: "browser", label: "Browser", icon: "M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" },
-    { id: "discovery", label: "Discovery", icon: "M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 0z" },
-    { id: "features", label: "Features", icon: "M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" },
-    { id: "autonomy", label: "Autonomy", icon: "M4.5 12a7.5 7.5 0 0015 0m-15 0a7.5 7.5 0 1115 0m-15 0H3m16.5 0H21m-1.645-7.5h-2.818m2.818 15h-2.818M4.145 4.5h2.818m-2.818 15h2.818" },
+    {
+        id: "general",
+        label: "General",
+        icon: "M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75",
+    },
+    {
+        id: "ai",
+        label: "AI Provider",
+        icon: "M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z",
+    },
+    {
+        id: "browser",
+        label: "Browser",
+        icon: "M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418",
+    },
+    {
+        id: "discovery",
+        label: "Discovery",
+        icon: "M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 0z",
+    },
+    {
+        id: "features",
+        label: "Features",
+        icon: "M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z",
+    },
+    {
+        id: "autonomy",
+        label: "Autonomy",
+        icon: "M4.5 12a7.5 7.5 0 0015 0m-15 0a7.5 7.5 0 1115 0m-15 0H3m16.5 0H21m-1.645-7.5h-2.818m2.818 15h-2.818M4.145 4.5h2.818m-2.818 15h2.818",
+    },
 ];
 
 export function SettingsView() {
@@ -75,11 +118,7 @@ export function SettingsView() {
         }
     }, [configQuery.data]);
 
-    const update = <K extends keyof RaikenConfig>(
-        section: K,
-        field: string,
-        value: unknown,
-    ) => {
+    const update = <K extends keyof RaikenConfig>(section: K, field: string, value: unknown) => {
         setForm((prev) => ({
             ...prev,
             [section]:
@@ -106,10 +145,7 @@ export function SettingsView() {
         setDirty(false);
     };
 
-    const val = <K extends keyof RaikenConfig>(
-        section: K,
-        field: string,
-    ): unknown => {
+    const val = <K extends keyof RaikenConfig>(section: K, field: string): unknown => {
         const s = form[section];
         if (s && typeof s === "object") {
             return (s as Record<string, unknown>)[field];
@@ -117,10 +153,7 @@ export function SettingsView() {
         return undefined;
     };
 
-    const def = <K extends keyof RaikenConfig>(
-        section: K,
-        field: string,
-    ): unknown => {
+    const def = <K extends keyof RaikenConfig>(section: K, field: string): unknown => {
         const s = defaultConfig[section];
         if (s && typeof s === "object") {
             return (s as Record<string, unknown>)[field];
@@ -150,11 +183,31 @@ export function SettingsView() {
             <div className="settings-view">
                 <Header projectName="Settings" />
                 <div className="settings-loading">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="var(--fail)" strokeWidth="1.5" style={{ width: 24, height: 24 }}>
+                    <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="var(--fail)"
+                        strokeWidth="1.5"
+                        style={{ width: 24, height: 24 }}
+                    >
                         <path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                     <span>Failed to load configuration: {configQuery.error?.message}</span>
-                    <button type="button" onClick={() => configQuery.refetch()} style={{ padding: '4px 10px', background: 'transparent', border: '1px solid var(--accent-dim)', color: 'var(--accent)', cursor: 'pointer', fontSize: '11.5px', fontFamily: 'var(--mono)' }}>retry</button>
+                    <button
+                        type="button"
+                        onClick={() => configQuery.refetch()}
+                        style={{
+                            padding: "4px 10px",
+                            background: "transparent",
+                            border: "1px solid var(--accent-dim)",
+                            color: "var(--accent)",
+                            cursor: "pointer",
+                            fontSize: "11.5px",
+                            fontFamily: "var(--mono)",
+                        }}
+                    >
+                        retry
+                    </button>
                 </div>
                 <style>{`
                     .settings-view { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg); color: var(--ink); font-family: var(--mono); overflow: hidden; }
@@ -177,7 +230,13 @@ export function SettingsView() {
                             className={`nav-item ${activeSection === s.id ? "active" : ""}`}
                             onClick={() => setActiveSection(s.id)}
                         >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                            <svg
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                aria-hidden="true"
+                            >
                                 <path strokeLinecap="round" strokeLinejoin="round" d={s.icon} />
                             </svg>
                             {s.label}
@@ -190,12 +249,18 @@ export function SettingsView() {
                         <div>
                             <h1>{SECTIONS.find((s) => s.id === activeSection)?.label}</h1>
                             <p className="settings-desc">
-                                {activeSection === "general" && "Project-level settings for test output and configuration paths."}
-                                {activeSection === "ai" && "Configure the AI provider used for test generation and analysis."}
-                                {activeSection === "browser" && "Browser settings for running Playwright tests."}
-                                {activeSection === "discovery" && "Control how Raiken crawls and discovers your site structure."}
-                                {activeSection === "features" && "Toggle test recording features and artifacts."}
-                                {activeSection === "autonomy" && "Control how much Raiken does automatically vs. asking for confirmation."}
+                                {activeSection === "general" &&
+                                    "Project-level settings for test output and configuration paths."}
+                                {activeSection === "ai" &&
+                                    "Configure the AI provider used for test generation and analysis."}
+                                {activeSection === "browser" &&
+                                    "Browser settings for running Playwright tests."}
+                                {activeSection === "discovery" &&
+                                    "Control how Raiken crawls and discovers your site structure."}
+                                {activeSection === "features" &&
+                                    "Toggle test recording features and artifacts."}
+                                {activeSection === "autonomy" &&
+                                    "Control how much Raiken does automatically vs. asking for confirmation."}
                             </p>
                         </div>
                         <div className="save-bar">
@@ -222,33 +287,66 @@ export function SettingsView() {
                     {saveError && (
                         <div className="save-error-banner">
                             <span>Save failed: {saveError}</span>
-                            <button type="button" onClick={() => setSaveError(null)} style={{ background: 'none', border: 'none', color: 'var(--fail)', cursor: 'pointer', fontSize: '14px', fontFamily: 'var(--mono)' }}>×</button>
+                            <button
+                                type="button"
+                                onClick={() => setSaveError(null)}
+                                style={{
+                                    background: "none",
+                                    border: "none",
+                                    color: "var(--fail)",
+                                    cursor: "pointer",
+                                    fontSize: "14px",
+                                    fontFamily: "var(--mono)",
+                                }}
+                            >
+                                ×
+                            </button>
                         </div>
                     )}
 
                     <div className="field-list">
                         {activeSection === "general" && (
                             <>
-                                <FieldGroup label="Test Directory" hint="Where generated tests are saved, relative to the project root.">
+                                <FieldGroup
+                                    label="Test Directory"
+                                    hint="Where generated tests are saved, relative to the project root."
+                                >
                                     <input
                                         type="text"
-                                        value={(form.testDirectory as string) ?? defaultConfig.testDirectory}
+                                        value={
+                                            (form.testDirectory as string) ??
+                                            defaultConfig.testDirectory
+                                        }
                                         onChange={(e) => updateTop("testDirectory", e.target.value)}
                                         placeholder={defaultConfig.testDirectory}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Playwright Config" hint="Path to your Playwright configuration file.">
+                                <FieldGroup
+                                    label="Playwright Config"
+                                    hint="Path to your Playwright configuration file."
+                                >
                                     <input
                                         type="text"
-                                        value={(form.playwrightConfig as string) ?? defaultConfig.playwrightConfig}
-                                        onChange={(e) => updateTop("playwrightConfig", e.target.value)}
+                                        value={
+                                            (form.playwrightConfig as string) ??
+                                            defaultConfig.playwrightConfig
+                                        }
+                                        onChange={(e) =>
+                                            updateTop("playwrightConfig", e.target.value)
+                                        }
                                         placeholder={defaultConfig.playwrightConfig}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Project Type" hint="Type of project (generic, react, nextjs, etc.)">
+                                <FieldGroup
+                                    label="Project Type"
+                                    hint="Type of project (generic, react, nextjs, etc.)"
+                                >
                                     <input
                                         type="text"
-                                        value={(form.projectType as string) ?? defaultConfig.projectType}
+                                        value={
+                                            (form.projectType as string) ??
+                                            defaultConfig.projectType
+                                        }
                                         onChange={(e) => updateTop("projectType", e.target.value)}
                                         placeholder={defaultConfig.projectType}
                                     />
@@ -268,38 +366,68 @@ export function SettingsView() {
 
                         {activeSection === "browser" && (
                             <>
-                                <FieldGroup label="Default Browser" hint="Which browser engine Playwright uses by default.">
+                                <FieldGroup
+                                    label="Default Browser"
+                                    hint="Which browser engine Playwright uses by default."
+                                >
                                     <select
-                                        value={(val("browser", "defaultBrowser") as string) ?? defaultConfig.browser.defaultBrowser}
-                                        onChange={(e) => update("browser", "defaultBrowser", e.target.value)}
+                                        value={
+                                            (val("browser", "defaultBrowser") as string) ??
+                                            defaultConfig.browser.defaultBrowser
+                                        }
+                                        onChange={(e) =>
+                                            update("browser", "defaultBrowser", e.target.value)
+                                        }
                                     >
                                         <option value="chromium">Chromium</option>
                                         <option value="firefox">Firefox</option>
                                         <option value="webkit">WebKit</option>
                                     </select>
                                 </FieldGroup>
-                                <FieldGroup label="Headless" hint="Run tests without a visible browser window.">
+                                <FieldGroup
+                                    label="Headless"
+                                    hint="Run tests without a visible browser window."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("browser", "headless") as boolean) ?? defaultConfig.browser.headless}
+                                        checked={
+                                            (val("browser", "headless") as boolean) ??
+                                            defaultConfig.browser.headless
+                                        }
                                         onChange={(v) => update("browser", "headless", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Timeout (ms)" hint="Maximum time for each browser action before failing.">
+                                <FieldGroup
+                                    label="Timeout (ms)"
+                                    hint="Maximum time for each browser action before failing."
+                                >
                                     <input
                                         type="number"
                                         min={1000}
                                         step={1000}
-                                        value={(val("browser", "timeout") as number) ?? defaultConfig.browser.timeout}
-                                        onChange={(e) => update("browser", "timeout", Number(e.target.value))}
+                                        value={
+                                            (val("browser", "timeout") as number) ??
+                                            defaultConfig.browser.timeout
+                                        }
+                                        onChange={(e) =>
+                                            update("browser", "timeout", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Retries" hint="Number of times to retry a failed test.">
+                                <FieldGroup
+                                    label="Retries"
+                                    hint="Number of times to retry a failed test."
+                                >
                                     <input
                                         type="number"
                                         min={0}
                                         max={5}
-                                        value={(val("browser", "retries") as number) ?? defaultConfig.browser.retries}
-                                        onChange={(e) => update("browser", "retries", Number(e.target.value))}
+                                        value={
+                                            (val("browser", "retries") as number) ??
+                                            defaultConfig.browser.retries
+                                        }
+                                        onChange={(e) =>
+                                            update("browser", "retries", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
                             </>
@@ -307,51 +435,97 @@ export function SettingsView() {
 
                         {activeSection === "discovery" && (
                             <>
-                                <FieldGroup label="Max Pages" hint={`Maximum pages to discover in a single crawl session (default: ${def("discovery", "maxPages")}).`}>
+                                <FieldGroup
+                                    label="Max Pages"
+                                    hint={`Maximum pages to discover in a single crawl session (default: ${def("discovery", "maxPages")}).`}
+                                >
                                     <input
                                         type="number"
                                         min={1}
-                                        value={(val("discovery", "maxPages") as number) ?? (def("discovery", "maxPages") as number)}
-                                        onChange={(e) => update("discovery", "maxPages", Number(e.target.value))}
+                                        value={
+                                            (val("discovery", "maxPages") as number) ??
+                                            (def("discovery", "maxPages") as number)
+                                        }
+                                        onChange={(e) =>
+                                            update("discovery", "maxPages", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Max Depth" hint={`How many navigation levels deep to crawl (default: ${def("discovery", "maxDepth")}).`}>
+                                <FieldGroup
+                                    label="Max Depth"
+                                    hint={`How many navigation levels deep to crawl (default: ${def("discovery", "maxDepth")}).`}
+                                >
                                     <input
                                         type="number"
                                         min={1}
                                         max={20}
-                                        value={(val("discovery", "maxDepth") as number) ?? (def("discovery", "maxDepth") as number)}
-                                        onChange={(e) => update("discovery", "maxDepth", Number(e.target.value))}
+                                        value={
+                                            (val("discovery", "maxDepth") as number) ??
+                                            (def("discovery", "maxDepth") as number)
+                                        }
+                                        onChange={(e) =>
+                                            update("discovery", "maxDepth", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Concurrency" hint="Number of pages crawled simultaneously.">
+                                <FieldGroup
+                                    label="Concurrency"
+                                    hint="Number of pages crawled simultaneously."
+                                >
                                     <input
                                         type="number"
                                         min={1}
                                         max={10}
-                                        value={(val("discovery", "maxConcurrency") as number) ?? (def("discovery", "maxConcurrency") as number)}
-                                        onChange={(e) => update("discovery", "maxConcurrency", Number(e.target.value))}
+                                        value={
+                                            (val("discovery", "maxConcurrency") as number) ??
+                                            (def("discovery", "maxConcurrency") as number)
+                                        }
+                                        onChange={(e) =>
+                                            update(
+                                                "discovery",
+                                                "maxConcurrency",
+                                                Number(e.target.value),
+                                            )
+                                        }
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Timeout (ms)" hint="Per-page navigation timeout.">
+                                <FieldGroup
+                                    label="Timeout (ms)"
+                                    hint="Per-page navigation timeout."
+                                >
                                     <input
                                         type="number"
                                         min={1000}
                                         step={1000}
-                                        value={(val("discovery", "timeout") as number) ?? (def("discovery", "timeout") as number)}
-                                        onChange={(e) => update("discovery", "timeout", Number(e.target.value))}
+                                        value={
+                                            (val("discovery", "timeout") as number) ??
+                                            (def("discovery", "timeout") as number)
+                                        }
+                                        onChange={(e) =>
+                                            update("discovery", "timeout", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Pause on Auth" hint="Pause crawling when an authentication wall is detected.">
+                                <FieldGroup
+                                    label="Pause on Auth"
+                                    hint="Pause crawling when an authentication wall is detected."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("discovery", "pauseOnAuth") as boolean) ?? true}
+                                        checked={
+                                            (val("discovery", "pauseOnAuth") as boolean) ?? true
+                                        }
                                         onChange={(v) => update("discovery", "pauseOnAuth", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Exclude Patterns" hint="Comma-separated URL patterns to skip (e.g. /admin, /logout).">
+                                <FieldGroup
+                                    label="Exclude Patterns"
+                                    hint="Comma-separated URL patterns to skip (e.g. /admin, /logout)."
+                                >
                                     <input
                                         type="text"
-                                        value={((val("discovery", "excludePatterns") as string[]) ?? []).join(", ")}
+                                        value={(
+                                            (val("discovery", "excludePatterns") as string[]) ?? []
+                                        ).join(", ")}
                                         onChange={(e) =>
                                             update(
                                                 "discovery",
@@ -370,27 +544,51 @@ export function SettingsView() {
 
                         {activeSection === "features" && (
                             <>
-                                <FieldGroup label="Video Recording" hint="Record video of test runs for debugging.">
+                                <FieldGroup
+                                    label="Video Recording"
+                                    hint="Record video of test runs for debugging."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("features", "video") as boolean) ?? defaultConfig.features.video}
+                                        checked={
+                                            (val("features", "video") as boolean) ??
+                                            defaultConfig.features.video
+                                        }
                                         onChange={(v) => update("features", "video", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Screenshots" hint="Capture screenshots on test failure.">
+                                <FieldGroup
+                                    label="Screenshots"
+                                    hint="Capture screenshots on test failure."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("features", "screenshots") as boolean) ?? defaultConfig.features.screenshots}
+                                        checked={
+                                            (val("features", "screenshots") as boolean) ??
+                                            defaultConfig.features.screenshots
+                                        }
                                         onChange={(v) => update("features", "screenshots", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Tracing" hint="Enable Playwright trace recording for post-mortem debugging.">
+                                <FieldGroup
+                                    label="Tracing"
+                                    hint="Enable Playwright trace recording for post-mortem debugging."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("features", "tracing") as boolean) ?? defaultConfig.features.tracing}
+                                        checked={
+                                            (val("features", "tracing") as boolean) ??
+                                            defaultConfig.features.tracing
+                                        }
                                         onChange={(v) => update("features", "tracing", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Network Logging" hint="Capture network requests during test runs.">
+                                <FieldGroup
+                                    label="Network Logging"
+                                    hint="Capture network requests during test runs."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("features", "network") as boolean) ?? defaultConfig.features.network}
+                                        checked={
+                                            (val("features", "network") as boolean) ??
+                                            defaultConfig.features.network
+                                        }
                                         onChange={(v) => update("features", "network", v)}
                                     />
                                 </FieldGroup>
@@ -399,45 +597,74 @@ export function SettingsView() {
 
                         {activeSection === "autonomy" && (
                             <>
-                                <FieldGroup label="Auto-save Tests" hint="Save generated tests without asking for confirmation.">
+                                <FieldGroup
+                                    label="Auto-save Tests"
+                                    hint="Save generated tests without asking for confirmation."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("autonomy", "autoSaveTests") as boolean) ?? false}
+                                        checked={
+                                            (val("autonomy", "autoSaveTests") as boolean) ?? false
+                                        }
                                         onChange={(v) => update("autonomy", "autoSaveTests", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Auto-run Tests" hint="Automatically run tests after generating them.">
+                                <FieldGroup
+                                    label="Auto-run Tests"
+                                    hint="Automatically run tests after generating them."
+                                >
                                     <ToggleSwitch
-                                        checked={(val("autonomy", "autoRunTests") as boolean) ?? false}
+                                        checked={
+                                            (val("autonomy", "autoRunTests") as boolean) ?? false
+                                        }
                                         onChange={(v) => update("autonomy", "autoRunTests", v)}
                                     />
                                 </FieldGroup>
-                                <FieldGroup label="Auto-correct Behavior" hint="How Raiken handles test failures: suggest a diff, auto-apply fixes, or do nothing.">
+                                <FieldGroup
+                                    label="Auto-correct Behavior"
+                                    hint="How Raiken handles test failures: suggest a diff, auto-apply fixes, or do nothing."
+                                >
                                     <select
-                                        value={(val("autonomy", "autoCorrect") as string) ?? "suggest"}
-                                        onChange={(e) => update("autonomy", "autoCorrect", e.target.value)}
+                                        value={
+                                            (val("autonomy", "autoCorrect") as string) ?? "suggest"
+                                        }
+                                        onChange={(e) =>
+                                            update("autonomy", "autoCorrect", e.target.value)
+                                        }
                                     >
                                         <option value="suggest">Suggest (show diff)</option>
                                         <option value="apply">Auto-apply</option>
                                         <option value="off">Off</option>
                                     </select>
                                 </FieldGroup>
-                                <FieldGroup label="Auto-learn" hint="How Raiken learns from test outcomes: ask first, learn silently, or disable.">
+                                <FieldGroup
+                                    label="Auto-learn"
+                                    hint="How Raiken learns from test outcomes: ask first, learn silently, or disable."
+                                >
                                     <select
-                                        value={(val("autonomy", "autoLearn") as string) ?? "confirm"}
-                                        onChange={(e) => update("autonomy", "autoLearn", e.target.value)}
+                                        value={
+                                            (val("autonomy", "autoLearn") as string) ?? "confirm"
+                                        }
+                                        onChange={(e) =>
+                                            update("autonomy", "autoLearn", e.target.value)
+                                        }
                                     >
                                         <option value="confirm">Confirm first</option>
                                         <option value="auto">Auto (silent)</option>
                                         <option value="off">Off</option>
                                     </select>
                                 </FieldGroup>
-                                <FieldGroup label="Max Retries" hint="Maximum auto-retries on test failure (0 = no retry).">
+                                <FieldGroup
+                                    label="Max Retries"
+                                    hint="Maximum auto-retries on test failure (0 = no retry)."
+                                >
                                     <input
                                         type="number"
                                         min={0}
                                         max={10}
                                         value={(val("autonomy", "maxRetries") as number) ?? 2}
-                                        onChange={(e) => update("autonomy", "maxRetries", Number(e.target.value))}
+                                        onChange={(e) =>
+                                            update("autonomy", "maxRetries", Number(e.target.value))
+                                        }
                                     />
                                 </FieldGroup>
                             </>

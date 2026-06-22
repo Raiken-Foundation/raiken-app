@@ -38,11 +38,13 @@ const LINEAR_PATTERN = /\b([A-Z]{2,5}-\d+)\b/;
  */
 export function getCurrentBranch(cwd?: string): string | null {
     try {
-        return execSync("git symbolic-ref --short HEAD", {
-            cwd: cwd || process.cwd(),
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-        }).trim() || null;
+        return (
+            execSync("git symbolic-ref --short HEAD", {
+                cwd: cwd || process.cwd(),
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+            }).trim() || null
+        );
     } catch {
         // detached HEAD or no git available → no branch
         return null;

@@ -1,4 +1,4 @@
-import type { ChatOpenAI } from "@langchain/openai";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { AgentClassifierResult, ContextData, MemoryContext } from "../../prompts";
 import type { ToolResult } from "../../tools";
 import type { AgentIntent } from "../utils";
@@ -8,7 +8,7 @@ export type CallTool = (toolName: string, args: unknown) => Promise<ToolResult>;
 export interface AgentNodeDeps {
     callTool: CallTool;
     projectPath: string;
-    model: ChatOpenAI;
+    model: BaseChatModel;
     gatherContext: (
         prompt: string,
         projectPath: string,
@@ -56,4 +56,14 @@ export interface AgentNodeDeps {
         nextTool: string | null;
     };
     setGoalState?: (state: Partial<AgentClassifierResult>) => void;
+    /** Emit a live phase-progress update (e.g. "Exploring 3/8 pages"). */
+    onProgress?: (label: string, detail?: string) => void;
+    /** Stream a token of the test being generated, for live UI updates. */
+    onToken?: (token: string) => void;
+    /**
+     * Abort signal for the run. LangGraph only checks abort at step boundaries,
+     * so long-running nodes (explore crawl, interruption resolution) check this
+     * directly to stop promptly when the user hits Stop.
+     */
+    signal?: AbortSignal;
 }

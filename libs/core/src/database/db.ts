@@ -89,6 +89,11 @@ export class CodeGraphDB {
             this.db.pragma("foreign_keys = ON");
             this.db.pragma("synchronous = NORMAL");
             this.db.pragma("wal_autocheckpoint = 5000");
+            // Wait (instead of failing immediately) when another connection holds
+            // a write lock. Raiken opens several connections to the same file
+            // (agent memory, discovery, ephemeral router queries); without this a
+            // concurrent write throws SQLITE_BUSY after the short retry spin.
+            this.db.pragma("busy_timeout = 5000");
 
             // ✅ Ensure schema is present (single version)
             this.ensureSchema();
@@ -161,6 +166,33 @@ export class CodeGraphDB {
         this.ensureDependencyColumns();
         this.ensureFileColumns();
         this.ensureSymbolGraphSchema();
+        this.ensureDiscoveredPageColumns();
+    }
+
+    /**
+     * Idempotently add columns to `discovered_pages` that post-date its v4
+     * creation. `forms_json` stores the structured form fields discovery
+     * extracted from a page (label/type/selector per input) so test generation
+     * can reference real form controls instead of guessing them.
+     *
+     * The table only exists once the v4 discovery migration has run, so this is
+     * a no-op on databases that have never done discovery.
+     */
+    private ensureDiscoveredPageColumns(): void {
+        const tables = this.db
+            .prepare(
+                `SELECT name FROM sqlite_master WHERE type='table' AND name='discovered_pages'`,
+            )
+            .all() as Array<{ name: string }>;
+        if (tables.length === 0) return;
+
+        const columnNames = (
+            this.db.prepare(`PRAGMA table_info(discovered_pages)`).all() as Array<{ name: string }>
+        ).map((col) => col.name);
+
+        if (!columnNames.includes("forms_json")) {
+            this.db.exec(`ALTER TABLE discovered_pages ADD COLUMN forms_json TEXT`);
+        }
     }
 
     /**
@@ -1480,9 +1512,12 @@ export class CodeGraphDB {
                         Date.now(),
                     );
 
-                    // Insert into vector search table
-                    // Keep rowid aligned with embeddings.id for reliable joins
-                    insertVecStmt.run(result.lastInsertRowid, embeddingBuffer);
+                    // Insert into vector search table, keeping rowid aligned with
+                    // embeddings.id for reliable joins. sqlite-vec's vec0 requires
+                    // the primary key to be bound as a BigInt — a plain JS number
+                    // is rejected ("Only integers are allowed for primary key
+                    // values"), so coerce explicitly.
+                    insertVecStmt.run(BigInt(result.lastInsertRowid), embeddingBuffer);
                 }
             });
 
@@ -1847,13 +1882,15 @@ export class CodeGraphDB {
                 | undefined;
 
             if (existing) {
+                // Increment in SQL (not read value + 1) so concurrent updates
+                // from multiple connections don't clobber each other's count.
                 this.db
                     .prepare(`
           UPDATE selector_history 
-          SET success_count = ?, last_used = ?
+          SET success_count = success_count + 1, last_used = ?
           WHERE id = ?
         `)
-                    .run(existing.success_count + 1, now, existing.id);
+                    .run(now, existing.id);
             } else {
                 this.db
                     .prepare(`
@@ -1887,13 +1924,14 @@ export class CodeGraphDB {
                 | undefined;
 
             if (existing) {
+                // Increment in SQL to avoid lost updates under concurrency.
                 this.db
                     .prepare(`
           UPDATE selector_history 
-          SET failure_count = ?, last_used = ?
+          SET failure_count = failure_count + 1, last_used = ?
           WHERE id = ?
         `)
-                    .run(existing.failure_count + 1, now, existing.id);
+                    .run(now, existing.id);
             } else {
                 this.db
                     .prepare(`
@@ -2117,6 +2155,26 @@ export class CodeGraphDB {
                 for (const src of sourceFiles) {
                     stmt.run(this.projectPath, testFile, src, now);
                 }
+            });
+            transaction();
+        });
+    }
+
+    /**
+     * Remove all persisted records for a deleted test file so impact analysis
+     * (getAffectedTests) and the failures-in-prompts memory don't keep pointing
+     * at a test that no longer exists on disk. `testFile` is the project-relative
+     * path used when the mapping was recorded.
+     */
+    deleteTestRecords(testFile: string): void {
+        this.runWithRetry(() => {
+            const transaction = this.db.transaction(() => {
+                this.db
+                    .prepare("DELETE FROM test_source_map WHERE project_path = ? AND test_file = ?")
+                    .run(this.projectPath, testFile);
+                this.db
+                    .prepare("DELETE FROM test_outcomes WHERE project_path = ? AND test_file = ?")
+                    .run(this.projectPath, testFile);
             });
             transaction();
         });
@@ -2566,14 +2624,23 @@ export class CodeGraphDB {
      */
     pruneHistory(maxSelectors = 500, maxOutcomes = 200): void {
         this.runWithRetry(() => {
-            this.db.exec(`
-        DELETE FROM selector_history WHERE id NOT IN (
-          SELECT id FROM selector_history ORDER BY last_used DESC LIMIT ${maxSelectors}
-        );
-        DELETE FROM test_outcomes WHERE id NOT IN (
-          SELECT id FROM test_outcomes ORDER BY created_at DESC LIMIT ${maxOutcomes}
-        );
-      `);
+            // Scope pruning to THIS project so a shared/copied DB holding more
+            // than one project can't have project A's caps delete project B's
+            // learned selectors and outcomes.
+            this.db
+                .prepare(`
+        DELETE FROM selector_history WHERE project_path = ? AND id NOT IN (
+          SELECT id FROM selector_history WHERE project_path = ? ORDER BY last_used DESC LIMIT ?
+        )
+      `)
+                .run(this.projectPath, this.projectPath, maxSelectors);
+            this.db
+                .prepare(`
+        DELETE FROM test_outcomes WHERE project_path = ? AND id NOT IN (
+          SELECT id FROM test_outcomes WHERE project_path = ? ORDER BY created_at DESC LIMIT ?
+        )
+      `)
+                .run(this.projectPath, this.projectPath, maxOutcomes);
         });
     }
 

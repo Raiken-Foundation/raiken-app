@@ -29,10 +29,20 @@ export const createHitlSaveNode =
     async (state: GraphStateType) => {
         if (!state.testDraft) return {};
         const testDirectory = state.testDirectory || "e2e";
-        const llmDerivedName = deriveFileNameFromTestCode(state.testDraft);
-        const baseName = sanitizeBaseName(state.userPrompt);
-        const fileName = llmDerivedName ?? `${baseName || "raiken-test"}.spec.ts`;
-        const filePath = `${testDirectory}/${fileName}`;
+        // If the user had a test file highlighted/open, overwrite it instead of
+        // deriving a brand-new file name. The save-approval card still shows
+        // this path (editable) so the user confirms before it is written.
+        let filePath: string;
+        let fileName: string;
+        if (state.targetTestFile) {
+            filePath = state.targetTestFile;
+            fileName = filePath.split("/").pop() || filePath;
+        } else {
+            const llmDerivedName = deriveFileNameFromTestCode(state.testDraft);
+            const baseName = sanitizeBaseName(state.userPrompt);
+            fileName = llmDerivedName ?? `${baseName || "raiken-test"}.spec.ts`;
+            filePath = `${testDirectory}/${fileName}`;
+        }
         const saveResult = await callTool("saveFile", {
             filePath,
             content: state.testDraft,

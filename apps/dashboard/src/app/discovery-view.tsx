@@ -155,6 +155,11 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
     const clearMutation = trpc.clearDiscoveryData.useMutation({ onSuccess: refreshAll });
     const pauseMutation = trpc.pauseDiscovery.useMutation({ onSuccess: refreshAll });
     const handoffMutation = trpc.requestBrowserHandoff.useMutation({ onSuccess: refreshAll });
+    // Stop a wedged run, and clear a terminal error so the panel returns to
+    // idle. Both endpoints existed server-side but had no UI trigger, leaving a
+    // crashed run stuck in the `error` phase with no way to recover but reload.
+    const abortMutation = trpc.abortDiscovery.useMutation({ onSuccess: refreshAll });
+    const dismissErrorMutation = trpc.dismissDiscoveryError.useMutation({ onSuccess: refreshAll });
 
     // Per-row action tracking so we can disable just the button the user
     // clicked, instead of greying out the whole panel while a single
@@ -166,11 +171,15 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
         startMutation.isPending ||
         continueMutation.isPending ||
         clearMutation.isPending ||
-        pauseMutation.isPending;
+        pauseMutation.isPending ||
+        abortMutation.isPending ||
+        dismissErrorMutation.isPending;
     const isRunning = runtime?.phase === "running";
-    const canContinue =
-        (runtime?.phase === "paused" || sessionQuery.data?.status === "paused") && !isActionPending;
-    const canStart = Boolean(form.url.trim()) && !isRunning && !isActionPending;
+    const isPaused = runtime?.phase === "paused" || sessionQuery.data?.status === "paused";
+    const canContinue = isPaused && !isActionPending;
+    // Starting while paused orphans the paused session/blockers instead of
+    // resuming it — route the user to Continue or Clear instead.
+    const canStart = Boolean(form.url.trim()) && !isRunning && !isPaused && !isActionPending;
 
     const actionError = useMemo(() => {
         if (startMutation.error) return startMutation.error.message;
@@ -287,6 +296,16 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
         setSelectedPageUrl(null);
         setPageOffset(0);
         clearMutation.mutate({});
+    };
+
+    const handleAbort = () => {
+        if (!isRunning || abortMutation.isPending) return;
+        abortMutation.mutate({});
+    };
+
+    const handleDismissError = () => {
+        if (dismissErrorMutation.isPending) return;
+        dismissErrorMutation.mutate({});
     };
 
     const addExcludePattern = (value: string) => {
@@ -498,6 +517,11 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                         className="btn primary"
                                         onClick={handleStart}
                                         disabled={!canStart}
+                                        title={
+                                            isPaused
+                                                ? "Discovery is paused. Resolve the blocker and Continue, or Clear before starting a new crawl."
+                                                : undefined
+                                        }
                                     >
                                         {startMutation.isPending
                                             ? "Starting…"
@@ -514,6 +538,17 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             title="Pause the running crawl. You can inspect blockers, drive a browser, or resume from the dashboard."
                                         >
                                             {pauseMutation.isPending ? "Pausing…" : "Pause"}
+                                        </button>
+                                    )}
+                                    {isRunning && (
+                                        <button
+                                            type="button"
+                                            className="btn danger"
+                                            onClick={handleAbort}
+                                            disabled={abortMutation.isPending}
+                                            title="Stop the running crawl immediately."
+                                        >
+                                            {abortMutation.isPending ? "Stopping…" : "Stop"}
                                         </button>
                                     )}
                                     {canContinue && (
@@ -552,7 +587,22 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
 
                                 {actionError && (
                                     <div className="error-banner">
-                                        <strong>Error:</strong> {actionError}
+                                        <span>
+                                            <strong>Error:</strong> {actionError}
+                                        </span>
+                                        {runtime?.phase === "error" && (
+                                            <button
+                                                type="button"
+                                                className="btn"
+                                                onClick={handleDismissError}
+                                                disabled={dismissErrorMutation.isPending}
+                                                title="Clear the error and return discovery to idle."
+                                            >
+                                                {dismissErrorMutation.isPending
+                                                    ? "Dismissing…"
+                                                    : "Dismiss"}
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                                 {queryError && !actionError && (
@@ -1453,6 +1503,7 @@ const STYLES = `
         background: var(--fail-soft); border: 1px solid rgba(215, 92, 92, 0.3);
         border-left-width: 2px; color: var(--ink);
         padding: 0.4375rem 0.625rem; font-size: 11.5px; font-family: var(--mono);
+        display: flex; align-items: center; justify-content: space-between; gap: 0.625rem;
     }
     .error-banner strong { color: var(--fail); }
 

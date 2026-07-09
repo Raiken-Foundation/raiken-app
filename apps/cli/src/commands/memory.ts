@@ -1,0 +1,83 @@
+import { AgentMemory } from "@raiken/core";
+import { appRouter } from "@raiken/shared";
+import chalk from "chalk";
+import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
+
+interface MemoryOptions {
+    json?: boolean;
+}
+
+/** Group a flat preference map into human-friendly sections for display. */
+function categorize(prefs: Record<string, string>): Record<string, [string, string][]> {
+    const groups: Record<string, [string, string][]> = {
+        Project: [],
+        "Learned actions": [],
+        "Learned selectors": [],
+        Auth: [],
+        Other: [],
+    };
+    for (const [key, value] of Object.entries(prefs)) {
+        if (key.startsWith("action_path:")) groups["Learned actions"].push([key, value]);
+        else if (key.startsWith("selector:")) groups["Learned selectors"].push([key, value]);
+        else if (key === "auth_login" || key.includes("auth") || key.includes("entry"))
+            groups.Auth.push([key, value]);
+        else if (key.includes("base_url") || key.includes("project"))
+            groups.Project.push([key, value]);
+        else groups.Other.push([key, value]);
+    }
+    return groups;
+}
+
+/**
+ * `raiken memory [clear]` — inspect (or reset) what the agent has learned about
+ * this project: the base URL, remembered authenticated entry, action paths, and
+ * learned selectors. Makes the agent's persistent memory transparent instead of
+ * a black box.
+ */
+export async function memoryCommand(
+    sub: string | undefined,
+    options: MemoryOptions,
+): Promise<void> {
+    const projectPath = process.cwd();
+
+    if ((sub || "").toLowerCase() === "clear") {
+        const caller = appRouter.createCaller({ projectPath });
+        await caller.clearChatMessages();
+        console.log(
+            chalk.green("\n  ✓ Reset agent working memory") +
+                dim(" (goal, remembered exploration, pause + observed login).\n"),
+        );
+        return;
+    }
+
+    // Route diagnostics to stderr BEFORE initialize() (which logs) so --json
+    // stdout stays clean for scripting.
+    const restore = options.json ? routeDiagnosticsToStderr() : null;
+    const mem = AgentMemory.getInstance(projectPath);
+    mem.initialize();
+    const prefs = mem.getAllPreferences();
+
+    if (options.json) {
+        restore?.();
+        process.stdout.write(`${JSON.stringify(prefs, null, 2)}\n`);
+        return;
+    }
+
+    const keys = Object.keys(prefs);
+    if (keys.length === 0) {
+        console.log(dim("\n  Agent memory is empty. It fills in as you run the agent.\n"));
+        return;
+    }
+
+    console.log(accent("\n  Agent memory") + dim(`  ·  ${keys.length} entries`));
+    const groups = categorize(prefs);
+    for (const [group, entries] of Object.entries(groups)) {
+        if (entries.length === 0) continue;
+        console.log(accent(`\n  ${group}`));
+        for (const [key, value] of entries) {
+            const shown = value.length > 100 ? `${value.slice(0, 100)}…` : value;
+            console.log(`  ${dim("•")} ${chalk.white(key)} ${dim("=")} ${dim(shown)}`);
+        }
+    }
+    console.log(dim("\n  Reset with `raiken memory clear`.\n"));
+}

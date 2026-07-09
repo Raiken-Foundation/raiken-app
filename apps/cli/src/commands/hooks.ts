@@ -35,7 +35,7 @@ export async function hooksInstallCommand(options: HooksInstallOptions): Promise
         husky: options.husky === true,
     });
 
-    console.log(chalk.green(`✅ Installed ${result.type} hook → ${result.relativePath}`));
+    console.log(chalk.green(`✓ Installed ${result.type} hook → ${result.relativePath}`));
     console.log(chalk.dim(`   ${result.description}`));
     if (result.kind === "husky") {
         console.log(chalk.dim("   Husky-managed: hooks live under .husky/."));
@@ -55,9 +55,9 @@ export async function hooksUninstallCommand(options: HooksUninstallOptions): Pro
 
     for (const entry of result.affected) {
         if (entry.action === "deleted") {
-            console.log(chalk.green(`✅ Removed ${entry.relativePath}`));
+            console.log(chalk.green(`✓ Removed ${entry.relativePath}`));
         } else {
-            console.log(chalk.green(`✅ Stripped raiken block from ${entry.relativePath}`));
+            console.log(chalk.green(`✓ Stripped raiken block from ${entry.relativePath}`));
         }
     }
 }

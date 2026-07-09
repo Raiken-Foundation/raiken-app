@@ -88,6 +88,13 @@
             "options": {
                 "command": "pnpm biome lint apps/cli"
             }
+        },
+        "test": {
+            "executor": "@nx/vitest:test",
+            "outputs": ["{workspaceRoot}/coverage/apps/cli"],
+            "options": {
+                "config": "apps/cli/vitest.config.ts"
+            }
         }
     }
 }

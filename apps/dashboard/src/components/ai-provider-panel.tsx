@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { trpc } from "../utils/trpc";
 
 interface ProviderOption {
@@ -12,6 +12,47 @@ interface ProviderOption {
     apiKeyUrl?: string | null;
     apiKeyPlaceholder?: string | null;
     hasKey: boolean;
+    recommendedModels?: ModelOption[];
+}
+
+interface ModelOption {
+    id: string;
+    name?: string;
+    context?: number;
+    description?: string;
+    deprecated?: boolean;
+    source?: "live" | "recommended";
+}
+
+export function normalizeModelOptions(models: ModelOption[], currentModel?: string): ModelOption[] {
+    const seen = new Set<string>();
+    const normalized: ModelOption[] = [];
+
+    for (const model of models) {
+        const id = model.id?.trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        normalized.push({
+            ...model,
+            id,
+            name: model.name?.trim() || id,
+        });
+    }
+
+    const customId = currentModel?.trim();
+    if (customId && !seen.has(customId)) {
+        normalized.unshift({
+            id: customId,
+            name: customId,
+            description: "Current custom model",
+        });
+    }
+
+    return normalized;
+}
+
+function optionDomId(listboxId: string, modelId: string): string {
+    return `${listboxId}-${modelId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 interface AIProviderPanelProps {
@@ -53,11 +94,6 @@ export function AIProviderPanel({
     const activeProviderId = provider ?? providersQuery.data?.current.provider ?? "openrouter";
     const activeProvider = providers.find((p) => p.id === activeProviderId);
 
-    const showBaseUrl =
-        activeProviderId === "custom" ||
-        activeProviderId === "ollama" ||
-        Boolean(baseURL && baseURL !== activeProvider?.defaultBaseURL);
-
     // Defer model fetch until either the provider exposes a public catalog
     // or the user has supplied a key (avoid spamming /models with no auth).
     const canFetchModels = Boolean(
@@ -85,7 +121,15 @@ export function AIProviderPanel({
 
     const [search, setSearch] = useState("");
     const [open, setOpen] = useState(false);
+    const [activeOptionIndex, setActiveOptionIndex] = useState(0);
+    const [showAdvancedEndpoint, setShowAdvancedEndpoint] = useState(false);
     const wrapperRef = useRef<HTMLDivElement>(null);
+
+    const showBaseUrl =
+        activeProviderId === "custom" ||
+        activeProviderId === "ollama" ||
+        showAdvancedEndpoint ||
+        Boolean(baseURL && baseURL !== activeProvider?.defaultBaseURL);
 
     useEffect(() => {
         function onClick(e: MouseEvent) {
@@ -96,29 +140,77 @@ export function AIProviderPanel({
         return () => document.removeEventListener("mousedown", onClick);
     }, []);
 
-    const allModels = modelsQuery.data?.models ?? [];
+    const allModels = useMemo(() => {
+        const liveModels = (modelsQuery.data?.models ?? []) as ModelOption[];
+        const providerModels =
+            liveModels.length > 0 ? liveModels : (activeProvider?.recommendedModels ?? []);
+        return normalizeModelOptions(providerModels, model);
+    }, [activeProvider?.recommendedModels, model, modelsQuery.data?.models]);
     const filteredModels = useMemo(() => {
         if (!search.trim()) return allModels;
         const q = search.trim().toLowerCase();
         return allModels.filter(
-            (m) => m.id.toLowerCase().includes(q) || (m.name?.toLowerCase().includes(q) ?? false),
+            (m) =>
+                m.id.toLowerCase().includes(q) ||
+                (m.name?.toLowerCase().includes(q) ?? false) ||
+                (m.description?.toLowerCase().includes(q) ?? false),
         );
     }, [allModels, search]);
+
+    useEffect(() => {
+        setActiveOptionIndex(0);
+    }, [activeProviderId, filteredModels.length, search]);
 
     const modelsError = modelsQuery.data?.error;
     const modelsHaveResults = filteredModels.length > 0;
     const isFetchingModels = modelsQuery.isFetching;
+    const activeOption = filteredModels[activeOptionIndex];
 
     function handleProviderChange(nextId: string) {
         const next = providers.find((p) => p.id === nextId);
         onChange("provider", nextId);
-        if (next?.defaultModel && !model) onChange("model", next.defaultModel);
+        onChange("apiKey", "");
+        onChange("model", next?.defaultModel ?? "");
+        onChange("baseURL", next?.defaultBaseURL ?? "");
+        setSearch("");
+        setOpen(false);
+        setShowAdvancedEndpoint(false);
     }
 
     function selectModel(id: string) {
         onChange("model", id);
         setOpen(false);
         setSearch("");
+    }
+
+    function handleModelKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setOpen(true);
+            setActiveOptionIndex((index) =>
+                filteredModels.length === 0 ? 0 : Math.min(index + 1, filteredModels.length - 1),
+            );
+            return;
+        }
+
+        if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            setActiveOptionIndex((index) => Math.max(index - 1, 0));
+            return;
+        }
+
+        if (e.key === "Enter" && open && activeOption) {
+            e.preventDefault();
+            selectModel(activeOption.id);
+            return;
+        }
+
+        if (e.key === "Escape") {
+            e.preventDefault();
+            setOpen(false);
+            setSearch("");
+        }
     }
 
     return (
@@ -128,19 +220,18 @@ export function AIProviderPanel({
                 <label htmlFor={providerId} className="ai-row-label">
                     Provider
                     <span className="ai-row-hint">
-                        Pick the AI service Raiken should call. All providers use the same
-                        chat-completions interface.
+                        Pick the AI service Raiken should call. DeepSeek and custom endpoints use
+                        the OpenAI-compatible path.
                     </span>
                 </label>
-                <div className="ai-provider-grid" role="radiogroup" aria-label="AI provider">
+                <div className="ai-provider-grid">
                     {providers.map((p) => {
                         const active = p.id === activeProviderId;
                         return (
                             <button
                                 key={p.id}
                                 type="button"
-                                role="radio"
-                                aria-checked={active}
+                                aria-pressed={active}
                                 className={`ai-provider-card ${active ? "active" : ""}`}
                                 onClick={() => handleProviderChange(p.id)}
                             >
@@ -222,12 +313,12 @@ export function AIProviderPanel({
                         {!isFetchingModels &&
                             !modelsError &&
                             allModels.length > 0 &&
-                            `${allModels.length} model${allModels.length === 1 ? "" : "s"} available from ${activeProvider?.label}.`}
+                            `${allModels.length} model${allModels.length === 1 ? "" : "s"} available from ${activeProvider?.label}. Recommended models are shown when live discovery is unavailable.`}
                         {!isFetchingModels &&
                             !modelsError &&
                             allModels.length === 0 &&
                             !canFetchModels &&
-                            "Enter an API key to load the live model catalog."}
+                            "Enter an API key to load the live model catalog, or type a model ID."}
                     </span>
                 </label>
 
@@ -246,11 +337,17 @@ export function AIProviderPanel({
                             setSearch(model ?? "");
                             setOpen(true);
                         }}
+                        onKeyDown={handleModelKeyDown}
                         placeholder={activeProvider?.defaultModel || "model-id"}
                         className="ai-input"
                         role="combobox"
                         aria-expanded={open}
                         aria-controls={listboxId}
+                        aria-activedescendant={
+                            open && activeOption
+                                ? optionDomId(listboxId, activeOption.id)
+                                : undefined
+                        }
                         aria-autocomplete="list"
                     />
                     <button
@@ -281,6 +378,7 @@ export function AIProviderPanel({
                                     {filteredModels.slice(0, 200).map((m) => (
                                         <li key={m.id}>
                                             <button
+                                                id={optionDomId(listboxId, m.id)}
                                                 type="button"
                                                 role="option"
                                                 aria-selected={m.id === model}
@@ -302,6 +400,11 @@ export function AIProviderPanel({
                                                             : ""}
                                                         {m.context && m.description ? " · " : ""}
                                                         {m.description?.slice(0, 80)}
+                                                    </span>
+                                                )}
+                                                {m.source === "recommended" && (
+                                                    <span className="ai-combobox-option-source">
+                                                        recommended
                                                     </span>
                                                 )}
                                             </button>
@@ -327,13 +430,22 @@ export function AIProviderPanel({
             </div>
 
             {/* Optional base URL */}
+            {!showBaseUrl && (
+                <button
+                    type="button"
+                    className="ai-advanced-toggle"
+                    onClick={() => setShowAdvancedEndpoint(true)}
+                >
+                    Override provider endpoint
+                </button>
+            )}
             {showBaseUrl && (
                 <div className="ai-row ai-row--col">
                     <label htmlFor={baseUrlId} className="ai-row-label">
                         Base URL
                         <span className="ai-row-hint">
-                            OpenAI-compatible endpoint (used for self-hosted Ollama or custom
-                            proxies).
+                            Provider endpoint. Use this for OpenAI-compatible providers such as
+                            DeepSeek-compatible proxies, local Ollama, or custom gateways.
                         </span>
                     </label>
                     <input
@@ -386,6 +498,18 @@ export function AIProviderPanel({
                     border-bottom: 1px dotted var(--accent-dim);
                 }
                 .ai-link:hover { color: var(--accent-strong); }
+                .ai-advanced-toggle {
+                    align-self: flex-start;
+                    background: transparent;
+                    border: 0;
+                    padding: 0;
+                    color: var(--accent);
+                    font-family: var(--mono);
+                    font-size: 11px;
+                    cursor: pointer;
+                    border-bottom: 1px dotted var(--accent-dim);
+                }
+                .ai-advanced-toggle:hover { color: var(--accent-strong); }
                 .ai-input {
                     width: 100%;
                     padding: 0.5rem 0.625rem;
@@ -533,6 +657,16 @@ export function AIProviderPanel({
                 .ai-combobox-option-meta {
                     font-size: 10.5px;
                     color: var(--ink-faint);
+                }
+                .ai-combobox-option-source {
+                    align-self: flex-start;
+                    margin-top: 2px;
+                    font-size: 9.5px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.04em;
+                    color: var(--ink-faint);
+                    border: 1px solid var(--hair-strong);
+                    padding: 1px 4px;
                 }
                 .ai-combobox-empty,
                 .ai-combobox-truncated {

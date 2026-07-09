@@ -46,7 +46,7 @@ export interface PromptTemplate {
     name: string;
     description: string;
     buildPrompt: (context: ContextData, userPrompt: string) => string;
-    formatSiteKnowledgeSection?: (siteKnowledge: SiteKnowledge) => string;
+    formatSiteKnowledgeSection?: (siteKnowledge: SiteKnowledge, baseURL?: string | null) => string;
     changelog?: string[];
     performanceMetrics?: {
         successRate?: number;
@@ -60,6 +60,8 @@ export interface AgentClassifierResult {
     goal: string | null;
     targetFeature: string | null;
     targetUrl: string | null;
+    targetAction?: string | null;
+    performAction?: boolean;
     nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "discoveryRead" | "none" | null;
     missingContext: string[];
 }
@@ -82,9 +84,9 @@ export const goldenFrameworkTemplate: PromptTemplate = {
         // failure, so the test must hardcode the full URL.
         const urlRule = context.baseURL
             ? `- A Playwright \`use.baseURL\` is configured: \`${context.baseURL}\`.
-  URLs MUST be relative paths starting with "/" (e.g. \`page.goto('/login')\`).
+  URLs MUST be relative paths starting with "/". Use the exact path observed in [LIVE DOM CONTEXT] / [SITE DISCOVERY KNOWLEDGE] or given by the user — never guess or assume a route.
   Do NOT emit \`http://\` / \`https://\` URLs unless navigating to an external origin.`
-            : `- URLs MUST be absolute (no baseURL is configured). Source from user prompt, [SITE DISCOVERY KNOWLEDGE], or DOM context. If none, ask.`;
+            : `- URLs MUST be absolute (no baseURL is configured). Source from user prompt, [SITE DISCOVERY KNOWLEDGE], or DOM context. Never invent a route. If none is available, ask.`;
 
         return `[ROLE]
 Senior Playwright/TypeScript engineer. Target: ${context.projectType}.
@@ -108,7 +110,7 @@ Imports: ${
 ${f.fullContext}`,
     )
     .join("\n\n")}
-${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge) : ""}
+${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge, context.baseURL) : ""}
 
 [TASK]
 ${userPrompt}
@@ -117,21 +119,34 @@ ${userPrompt}
 Complete .ts test file. No markdown fences. No prose.
 Structure: imports → describe → optional beforeEach → test cases (Arrange/Act/Assert).
 
+[GROUNDING]
+- Drive the test from [LIVE DOM CONTEXT]: the flow, steps, and assertions all come from what is actually on the page (roles, labels, text, fields, links). Do not invent pages, routes, fields, or copy.
+- Fill each relevant field with a realistic value; assert the outcome the page exposes (validation, success, navigation, new content).
+- Assert concrete observable results (visible text, URL, element state, a response) — never restate the test's intent.
+
+[BEHAVIOR & TIMING]
+- If a [PAGE BEHAVIOR] block is present, use its HINT/numbers to size timeouts to the observed settle time, not Playwright defaults.
+- Navigate with page.goto(url, { waitUntil: "domcontentloaded" }). Do NOT rely on the default "load" event: real apps hold resources open and it times out.
+- NEVER wait for "networkidle" — apps with websockets/SSE/polling never go idle, so it always times out. Wait on a concrete signal instead: waitForURL, waitForResponse, or expect(locator).toBeVisible({ timeout }).
+- After actions that navigate or load data, assert a specific element/URL/response is present rather than a global load state.
+- If the page was slow, add explicit generous timeouts on the elements/URLs you assert; prefer waitForResponse on any listed slow endpoints in the flow.
+
 [RULES]
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
+- Every locator you assert/act on MUST resolve to exactly ONE element (Playwright strict mode fails otherwise). The same name often appears twice (a sidebar link AND a breadcrumb, a heading AND a link). Disambiguate by scoping to a landmark — page.getByRole("navigation").getByRole("link", { name: "X" }) or page.getByRole("main")… — or use { exact: true }, or .first() only when any match is truly acceptable.
 - If a [LIVE DOM CONTEXT] block is present, use ONLY selectors from it. Do not invent.
 ${urlRule}
 - If [LIVE DOM CONTEXT] includes [PREREQUISITES], add beforeEach handling them; use env vars for credentials.
 - No fixed sleeps. NEVER emit page.waitForTimeout, setTimeout, or sleep.
-  Use expect.toBeVisible/toHaveText with timeout, waitForURL, or waitForResponse.
+  Use web-first assertions with a timeout, waitForURL, or waitForResponse (never waitForLoadState("networkidle")).
 - No vague assertions (expect(true).toBe(true)).
 - No deprecated APIs. No Jest/Vitest syntax.
 - Use TypeScript types and async/await correctly.`;
     },
 
-    formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge): string {
+    formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge, baseURL?: string | null): string {
         const { formatSiteKnowledge } = require("../site-discovery");
-        return "\n" + formatSiteKnowledge(siteKnowledge);
+        return "\n" + formatSiteKnowledge(siteKnowledge, baseURL);
     },
 
     changelog: [
@@ -259,15 +274,26 @@ Unknowns / Next checks:
 function buildMemoryContextSection(memory: MemoryContext): string {
     const sections: string[] = [];
 
+    // Memory is a *hint from past runs*, always subordinate to the live DOM.
+    // The LIVE DOM CONTEXT is the source of truth; these only break ties or
+    // guide style when the same element genuinely appears on the current page.
+    if (memory.selectorStrategy || memory.successfulSelectors.length > 0) {
+        sections.push(
+            `\n[MEMORY — HINTS ONLY]
+- The [LIVE DOM CONTEXT] below is authoritative. Only use a selector if it is present there.
+- Treat everything in this section as a preference from past runs, not a fact about this page.`,
+        );
+    }
+
     if (memory.selectorStrategy) {
         sections.push(
-            `\n[PREFERRED SELECTOR] ${memory.selectorStrategy} (prioritize when available)`,
+            `- When the live DOM offers a choice, prefer the ${memory.selectorStrategy} style.`,
         );
     }
 
     if (memory.successfulSelectors.length > 0) {
-        sections.push(`\n[KNOWN-GOOD SELECTORS]
-${memory.successfulSelectors.map((s) => `- ${s.element}: ${s.selector} (${s.type})`).join("\n")}`);
+        sections.push(`- Selectors that worked before (reuse ONLY if the same element is in the live DOM):
+${memory.successfulSelectors.map((s) => `  - ${s.element}: ${s.selector} (${s.type})`).join("\n")}`);
     }
 
     if (memory.recentFailures.length > 0) {
@@ -338,6 +364,8 @@ Rules:
 - intent ∈ explore | generateTests | explain.
 - nextTool ∈ domCapture | codeSearch | testGen | explain | discoveryRead | none | null.
 - discoveryRead when the user asks for persisted discovery data (pages, snapshots, stats, blockers).
+- targetAction: the concrete on-page control the user wants located or performed (e.g. "sign out", "add to cart", "delete account"). null when the request is not about a specific UI action.
+- performAction=true when the user wants that action actually carried out in the browser now (e.g. "sign out", "log me out", "click delete"); false when they only ask about it or want a test written for it.
 - isContinuation=true ONLY when directly replying to the Pause below; false otherwise or when no Pause.
 
 History:
@@ -349,84 +377,5 @@ CurrentPrompt:
 ${input.userPrompt}
 
 Schema:
-{"intent":"explore|generateTests|explain","goal":string|null,"targetFeature":string|null,"targetUrl":string|null,"nextTool":"domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,"missingContext":string[],"shouldRunTests":boolean,"isContinuation":boolean}`;
+{"intent":"explore|generateTests|explain","goal":string|null,"targetFeature":string|null,"targetUrl":string|null,"targetAction":string|null,"performAction":boolean,"nextTool":"domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,"missingContext":string[],"shouldRunTests":boolean,"isContinuation":boolean}`;
 }
-
-/**
- * Build intent classification prompt for the orchestrator.
- */
-export function buildIntentClassificationPrompt(context: string): string {
-    return `Classify a Playwright test-gen agent request.
-
-${context}
-
-Output four fields:
-1) control: stop | cancel | go | retry | continue | refine | clarify | new
-2) intent: test-generation | chat | help
-3) nextTool: domCapture | codeSearch | testGen | explain | discoveryRead | none
-4) effectivePrompt: for retry/continue, the most recent prior task message (not a control phrase). For refine, the prior task merged with the new request.
-
-Definitions:
-- control: stop=halt now; cancel=abandon current; go=proceed; retry=redo last task; continue=resume same flow; refine=modify previous; clarify=ambiguous, ask follow-up; new=fresh request.
-- intent: test-generation=user wants test code produced; chat=questions/explanations about the code; help=questions about Raiken itself.
-- nextTool: domCapture=need live DOM selectors; codeSearch=need files; testGen=enough context, generate now; explain=Q&A; discoveryRead=read persisted discovery data; none=no tool (help/simple reply).
-
-Use the conversation context to disambiguate. Respond with reasoning then the four fields.`;
-}
-
-/**
- * Build page state analysis prompt.
- */
-export function buildPageStateAnalysisPrompt(
-    domSummary: string,
-    userIntent: string,
-    targetFunctionality: string,
-): string {
-    return `Decide if this page contains what the user wants to test. Be factual; only describe what is visible.
-
-User wants to test: ${userIntent}
-Target: ${targetFunctionality}
-
-Page:
-${domSummary}
-
-Answer:
-1. What kind of page is this (login, dashboard, form, error, etc.)?
-2. Does it contain the requested functionality? yes/no.
-3. If no, name the mismatch concretely (e.g. "wants counter, this is login").`;
-}
-
-/**
- * Build conversational chat prompt for Raiken.
- */
-export function buildChatPrompt(
-    userPrompt: string,
-    resolvedFiles: string[],
-    fileContextSummary: string,
-): string {
-    return `You are Raiken, an assistant for web development and testing. Be concise, accurate, and honest about uncertainty.
-
-Request: ${userPrompt}
-
-Context:
-${
-    resolvedFiles.length > 0
-        ? `Files: ${resolvedFiles.join(", ")}\n\n${fileContextSummary}`
-        : "No files in context. Suggest @ mentions if you need them."
-}
-
-Guidance:
-- Answer directly. If explaining code, ground in the provided context.
-- For architecture questions, name tradeoffs.
-- For tests, point at the next concrete step.
-- Be brief but complete.`;
-}
-
-// ============================================================================
-// Tool-Based Agent System Prompt
-// ============================================================================
-
-/**
- * Build the system prompt for the tool-based agent.
- * This prompt instructs the LLM on how to use tools effectively.
- */

@@ -8,6 +8,7 @@ import type { DiscoveryEvent, DiscoverySession, DiscoveryStats, SiteDiscovery } 
 import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
+import { cliExit } from "../repl/exit";
 
 interface DiscoverOptions {
     maxPages?: string;
@@ -86,7 +87,7 @@ const attachDiscoveryListeners = (params: {
             }
         ).blocker;
         const label = blocker.blockerType ?? blocker.category ?? "auth_required";
-        console.log(chalk.yellow(`\n🛑 ${authHeader}`));
+        console.log(chalk.yellow(`\n${authHeader}`));
         console.log(chalk.dim(`   URL: ${blocker.url}`));
         console.log(chalk.dim(`   Type: ${label.replace(/_/g, " ")}`));
         console.log();
@@ -143,13 +144,13 @@ const attachDiscoveryListeners = (params: {
         const category = blocker.category ?? "unknown";
         const detector = blocker.detectorId ?? `${category}:detected`;
         const headers: Record<string, string> = {
-            captcha: "🤖 Captcha challenge detected",
-            error_page: "💥 Error page returned",
-            manual: "⏸️  Manually paused",
-            rate_limit: "⏱️  Rate limit hit",
-            anti_bot: "🛡️  Anti-bot challenge detected",
+            captcha: "Captcha challenge detected",
+            error_page: "Error page returned",
+            manual: "Manually paused",
+            rate_limit: "Rate limit hit",
+            anti_bot: "Anti-bot challenge detected",
         };
-        const header = headers[category] ?? `🛑 Discovery paused (${category})`;
+        const header = headers[category] ?? `Discovery paused (${category})`;
 
         console.log(chalk.yellow(`\n${header}`));
         console.log(chalk.dim(`   URL:      ${blocker.url}`));
@@ -197,7 +198,7 @@ const attachDiscoveryListeners = (params: {
 
         if (lastStats) {
             console.log();
-            console.log(chalk.cyan("📊 Summary:"));
+            console.log(chalk.cyan("Summary:"));
             console.log(chalk.dim(`   Pages discovered: ${lastStats.pagesDiscovered}`));
             console.log(chalk.dim(`   Links found:      ${lastStats.linksFound}`));
             console.log(chalk.dim(`   Auth blockers:    ${lastStats.authBlockersFound}`));
@@ -205,7 +206,7 @@ const attachDiscoveryListeners = (params: {
                 chalk.dim(`   Time elapsed:     ${Math.round(lastStats.elapsedMs / 1000)}s`),
             );
             console.log();
-            console.log(chalk.dim("✨ Site knowledge saved to .raiken/raiken.db"));
+            console.log(chalk.dim("Site knowledge saved to .raiken/raiken.db"));
         }
 
         onCompleted?.(lastStats);
@@ -241,15 +242,15 @@ export async function discoverCommand(
 
         // Start new discovery
         if (!url) {
-            console.error(chalk.red("❌ Error: URL is required for new discovery"));
+            console.error(chalk.red("Error: URL is required for new discovery"));
             console.log(chalk.dim("Usage: raiken discover <url> [options]"));
-            process.exit(1);
+            cliExit(1);
         }
 
         await startDiscovery(url, projectPath, options);
     } catch (error) {
-        console.error(chalk.red("\n❌ Discovery failed:"), (error as Error).message);
-        process.exit(1);
+        console.error(chalk.red("\n✗ Discovery failed:"), (error as Error).message);
+        cliExit(1);
     }
 }
 
@@ -271,7 +272,7 @@ async function startDiscovery(
         await authCommand({ url });
     }
 
-    console.log(chalk.cyan("\n🔍 Starting site discovery...\n"));
+    console.log(chalk.cyan("\nStarting site discovery...\n"));
     console.log(chalk.dim(`  URL:       ${url}`));
     console.log(chalk.dim(`  Max pages: ${maxPages}`));
     console.log(chalk.dim(`  Max depth: ${maxDepth}`));
@@ -333,7 +334,7 @@ async function startDiscovery(
 }
 
 async function continueDiscovery(projectPath: string, options: DiscoverOptions): Promise<void> {
-    console.log(chalk.cyan("\n▶️  Resuming discovery...\n"));
+    console.log(chalk.cyan("\nResuming discovery...\n"));
 
     const config = loadDiscoveryConfig(projectPath);
     const session = await getActiveDiscoverySession(projectPath);
@@ -393,7 +394,7 @@ async function showDiscoveryStatus(projectPath: string): Promise<void> {
         const session = discovery.getLatestSession();
         const stats = discovery.getStats();
 
-        console.log(chalk.cyan("\n📊 Discovery Status\n"));
+        console.log(chalk.cyan("\nDiscovery Status\n"));
 
         if (!session) {
             console.log(chalk.dim("   No discovery sessions found."));
@@ -429,7 +430,7 @@ async function showDiscoveryStatus(projectPath: string): Promise<void> {
 
         if (session.status === "paused") {
             console.log(
-                chalk.yellow("⏸️  Session is paused. Resume with 'raiken discover --continue'."),
+                chalk.yellow("Session is paused. Resume with 'raiken discover --continue'."),
             );
         }
     } finally {

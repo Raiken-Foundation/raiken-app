@@ -110,13 +110,9 @@ export function resolveRefs(
  */
 export function getChangedFiles(projectPath: string, refs: ResolvedRefs): CiChangedFile[] {
     const raw = runGit(
-        [
-            "diff",
-            "--name-status",
-            "-M",
-            "--no-renames=false",
-            `${quote(refs.base)}...${quote(refs.head)}`,
-        ],
+        // `-M` already enables rename detection (renames show as `R<score>`).
+        // Don't add `--no-renames=false` — git rejects it (the flag takes no value).
+        ["diff", "--name-status", "-M", `${quote(refs.base)}...${quote(refs.head)}`],
         projectPath,
     );
 

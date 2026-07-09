@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+    expandActionSynonyms,
     extractPageTitle,
     getStructuralSignals,
+    goalTargetsUnauthedPage,
     hasAuthFormFields,
+    matchesAction,
+    normalizeExploreUrl,
     parseSummaryElements,
     type SummaryElement,
     shouldClassifyInterruption,
@@ -48,6 +52,17 @@ describe("Structural Signals & Pre-filter", () => {
             const signals = getStructuralSignals(elements, "Dashboard");
             expect(signals.isDeadEnd).toBe(false);
             expect(signals.elementCount).toBe(15);
+        });
+
+        it("does NOT mark an empty capture as a dead-end", () => {
+            // Zero interactive elements means the page is blank, still
+            // loading, or the capture failed — not a user-actionable
+            // dead-end. Flagging it triggered a bogus "Dead-end page with
+            // no interactive elements" blocker.
+            const signals = getStructuralSignals([], "");
+            expect(signals.isDeadEnd).toBe(false);
+            expect(signals.elementCount).toBe(0);
+            expect(shouldClassifyInterruption(signals)).toBe(false);
         });
 
         it("passes through hasBlockingOverlay flag", () => {
@@ -226,6 +241,130 @@ SELECTOR PRIORITY:
             expect(elements[0].selector).toBe("getByText('OK')");
             expect(elements[0].selectors).toEqual(["getByText('OK')"]);
         });
+
+        it("parses the [href=...] suffix on link elements", () => {
+            const summary = `INTERACTIVE ELEMENTS:
+• link: "Account" [href=/account/settings]
+  Selectors: getByRole('link', { name: 'Account' })
+• link: "Sign out" [type=button] [href=/logout]
+  Selectors: getByRole('link', { name: 'Sign out' })
+SELECTOR PRIORITY:
+`;
+            const elements = parseSummaryElements(summary);
+            expect(elements).toHaveLength(2);
+            expect(elements[0].name).toBe("Account");
+            expect(elements[0].href).toBe("/account/settings");
+            expect(elements[1].name).toBe("Sign out");
+            expect(elements[1].type).toBe("button");
+            expect(elements[1].href).toBe("/logout");
+        });
+    });
+});
+
+describe("Goal-directed action helpers", () => {
+    describe("goalTargetsUnauthedPage", () => {
+        it("detects explicit logged-out / unauthenticated intent", () => {
+            expect(goalTargetsUnauthedPage("test the unauthenticated entry experience")).toBe(true);
+            expect(goalTargetsUnauthedPage("as a logged out user, view the landing page")).toBe(
+                true,
+            );
+            expect(goalTargetsUnauthedPage("without signing in, open the home page")).toBe(true);
+        });
+
+        it("treats a real login-page goal as unauthenticated", () => {
+            expect(goalTargetsUnauthedPage("test the login page")).toBe(true);
+            expect(goalTargetsUnauthedPage("verify the sign-in form")).toBe(true);
+            expect(goalTargetsUnauthedPage("cover the get started screen")).toBe(true);
+        });
+
+        it("does NOT flag authenticated goals that merely mention the login page", () => {
+            expect(
+                goalTargetsUnauthedPage(
+                    "Verify the page loads authenticated, NOT the login/Get Started page",
+                ),
+            ).toBe(false);
+            expect(
+                goalTargetsUnauthedPage("ensure it does not redirect to the login page"),
+            ).toBe(false);
+            expect(
+                goalTargetsUnauthedPage("the user is signed in; test the overview dashboard"),
+            ).toBe(false);
+            expect(
+                goalTargetsUnauthedPage("as a logged-in user, open the customers table"),
+            ).toBe(false);
+        });
+
+        it("returns false for ordinary authenticated page goals", () => {
+            expect(goalTargetsUnauthedPage("test the customers page")).toBe(false);
+            expect(goalTargetsUnauthedPage("exercise the invoices table filters")).toBe(false);
+        });
+    });
+
+    describe("expandActionSynonyms", () => {
+        it("expands sign out into logout synonyms", () => {
+            const synonyms = expandActionSynonyms("sign out");
+            expect(synonyms).toContain("sign out");
+            expect(synonyms).toContain("logout");
+            expect(synonyms).toContain("log out");
+        });
+
+        it("normalizes hyphens/underscores and includes the original", () => {
+            const synonyms = expandActionSynonyms("Log-Out");
+            expect(synonyms).toContain("log out");
+            expect(synonyms).toContain("sign out");
+        });
+
+        it("returns just the phrase when it has no known synonyms", () => {
+            const synonyms = expandActionSynonyms("frobnicate widget");
+            expect(synonyms).toEqual(["frobnicate widget"]);
+        });
+    });
+
+    describe("matchesAction", () => {
+        it("matches an element name to an action via synonyms", () => {
+            expect(matchesAction("Log out", "sign out")).toBe(true);
+            expect(matchesAction("Sign Out", "logout")).toBe(true);
+            expect(matchesAction("Logout", "sign out")).toBe(true);
+        });
+
+        it("matches when the element name contains the action phrase", () => {
+            expect(matchesAction("Add to cart", "add to cart")).toBe(true);
+            expect(matchesAction("Delete account", "delete")).toBe(true);
+        });
+
+        it("does not match unrelated controls", () => {
+            expect(matchesAction("Dashboard", "sign out")).toBe(false);
+            expect(matchesAction("", "sign out")).toBe(false);
+            expect(matchesAction("Sign out", "")).toBe(false);
+        });
+    });
+
+    describe("normalizeExploreUrl", () => {
+        it("drops the hash fragment", () => {
+            expect(normalizeExploreUrl("https://x.com/settings#top")).toBe(
+                "https://x.com/settings",
+            );
+        });
+
+        it("treats trailing slash as the same page", () => {
+            expect(normalizeExploreUrl("https://x.com/settings/")).toBe(
+                normalizeExploreUrl("https://x.com/settings"),
+            );
+        });
+
+        it("keeps the root path intact", () => {
+            expect(normalizeExploreUrl("https://x.com/")).toBe("https://x.com/");
+        });
+
+        it("preserves query strings", () => {
+            expect(normalizeExploreUrl("https://x.com/search?q=1#frag")).toBe(
+                "https://x.com/search?q=1",
+            );
+        });
+
+        it("falls back gracefully for non-URL input", () => {
+            expect(normalizeExploreUrl("/relative/path/")).toBe("/relative/path");
+        });
     });
 });
 
@@ -318,12 +457,18 @@ describe("Real-world Site Scenarios", () => {
         ];
         const title = "GitHub";
 
-        it("does NOT trigger interruption pre-filter", () => {
+        it("triggers pre-filter via its search box, but LLM would classify as none", () => {
             const signals = getStructuralSignals(elements, title);
             expect(signals.hasPasswordField).toBe(false);
             expect(signals.hasCodeField).toBe(false);
             expect(signals.isDeadEnd).toBe(false);
-            expect(shouldClassifyInterruption(signals)).toBe(false);
+            // The "Search or jump to..." box is a fillable input, so the
+            // permissive pre-filter now passes it to the LLM (which correctly
+            // returns "none"). This is intentional: the LLM — not the rules —
+            // decides whether a form gates content, so arbitrary field blockers
+            // (a bare phone/name gate) are never silently skipped.
+            expect(signals.hasFormInputs).toBe(true);
+            expect(shouldClassifyInterruption(signals)).toBe(true);
         });
 
         it("does NOT have auth form fields", () => {

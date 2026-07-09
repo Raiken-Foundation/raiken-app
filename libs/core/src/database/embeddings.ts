@@ -38,7 +38,7 @@ export class EmbeddingsGenerator {
     async initialize(): Promise<void> {
         if (this.isInitialized) return;
 
-        console.log("📥 Loading embeddings model (first run may download ~23MB)...");
+        console.log("Loading embeddings model (first run may download ~23MB)...");
 
         try {
             const { pipeline } = await import("@xenova/transformers");
@@ -47,9 +47,9 @@ export class EmbeddingsGenerator {
             });
 
             this.isInitialized = true;
-            console.log("✅ Embeddings model ready");
+            console.log("Embeddings model ready");
         } catch (error) {
-            console.error("❌ Failed to load embeddings model:", error);
+            console.error("Failed to load embeddings model:", error);
             throw new Error(`Embeddings model initialization failed: ${error}`);
         }
     }
@@ -205,7 +205,7 @@ export class EmbeddingsGenerator {
      */
     clearCache(): void {
         this.cache.clear();
-        console.log("🧹 Embedding cache cleared");
+        console.log("Embedding cache cleared");
     }
 
     /**

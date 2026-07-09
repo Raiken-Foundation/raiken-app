@@ -4,7 +4,6 @@
  * Autonomous DOM traversal for discovering web application structure.
  */
 
-export * from "./auth-detector";
 export * from "./crawler";
 export * from "./db";
 export * from "./detectors";

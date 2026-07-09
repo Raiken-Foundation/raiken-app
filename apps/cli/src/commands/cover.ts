@@ -7,8 +7,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type CoverEvent, type CoverResult, runCover } from "@raiken/core";
+import { type CoverEvent, type CoverResult, resolveAIConfig, runCover } from "@raiken/core";
 import chalk from "chalk";
+import { cliExit } from "../repl/exit";
 
 interface CoverCommandOptions {
     ticket?: string;
@@ -27,23 +28,27 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
                 'Missing target. Usage: raiken cover <AC-N | symbolName | "free-text scenario">',
             ),
         );
-        process.exit(2);
+        cliExit(2);
     }
 
     const integrationConfig = loadIntegrationConfig(projectPath);
-    const ai = loadAiConfig(projectPath);
+    // Use the shared provider-aware resolver so `cover` honors the configured
+    // provider + provider-specific env vars (e.g. ANTHROPIC_API_KEY), not just
+    // OPENROUTER_API_KEY / the raw `ai` block.
+    const resolved = resolveAIConfig(projectPath);
+    const ai = { apiKey: resolved.apiKey, model: resolved.model, baseURL: resolved.baseURL };
 
     if (!options.dryRun && !ai.apiKey) {
         console.warn(
             chalk.yellow(
-                "⚠️  No AI API key found (OPENROUTER_API_KEY / raiken.config.json). " +
+                "⚠ No AI API key found (OPENROUTER_API_KEY / raiken.config.json). " +
                     "Falling back to scaffold mode (--dry-run).",
             ),
         );
     }
 
     if (!options.json) {
-        console.log(chalk.cyan(`\n✍️  raiken cover — drafting test for "${target}"\n`));
+        console.log(chalk.cyan(`\nraiken cover — drafting test for "${target}"\n`));
     }
 
     let result: CoverResult;
@@ -61,9 +66,9 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
         });
     } catch (err) {
         console.error(
-            chalk.red(`\n❌ raiken cover failed: ${err instanceof Error ? err.message : err}`),
+            chalk.red(`\n✗ raiken cover failed: ${err instanceof Error ? err.message : err}`),
         );
-        process.exit(2);
+        cliExit(2);
     }
 
     if (options.json) {
@@ -72,7 +77,7 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     }
 
     console.log();
-    console.log(chalk.green(`✅ Wrote ${path.relative(projectPath, result.outputPath)}`));
+    console.log(chalk.green(`✓ Wrote ${path.relative(projectPath, result.outputPath)}`));
     if (result.usedModel) {
         console.log(chalk.dim(`   model: ${result.usedModel}`));
     } else {
@@ -135,22 +140,4 @@ function loadIntegrationConfig(projectPath: string) {
     } catch {
         return undefined;
     }
-}
-
-function loadAiConfig(projectPath: string) {
-    let fromFile: { apiKey?: string; model?: string; baseURL?: string } = {};
-    try {
-        const raw = JSON.parse(
-            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
-        );
-        if (raw?.ai) fromFile = raw.ai;
-    } catch {
-        // ignore
-    }
-
-    return {
-        apiKey: fromFile.apiKey || process.env.OPENROUTER_API_KEY,
-        model: fromFile.model,
-        baseURL: fromFile.baseURL,
-    };
 }

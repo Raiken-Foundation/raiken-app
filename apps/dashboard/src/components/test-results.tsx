@@ -83,6 +83,24 @@ interface TestResultsProps {
      */
     interpretationSource?: "disk" | "client-snapshot" | "client-snapshot-fallback" | null;
     isInterpreting?: boolean;
+    /**
+     * Fired when the user clicks "Fix test". The parent generates a corrected
+     * spec (grounded in the same evidence as the analysis, plus the analysis
+     * text itself) and drops it into the editor for review/run/save. This is
+     * the actionable other half of "Analyze with AI".
+     */
+    onRequestFix?: (results: TestResult[]) => void;
+    isFixing?: boolean;
+    /** Inline error surfaced when a fix request fails (replaces window.alert). */
+    fixError?: string | null;
+    /**
+     * Fired when the user clicks "Export report". The parent writes a detailed
+     * HTML report (with embedded screenshots) from the last run and returns the
+     * saved path via `exportedReportPath`.
+     */
+    onExportReport?: () => void;
+    isExporting?: boolean;
+    exportedReportPath?: string | null;
 }
 
 export function TestResults({
@@ -96,6 +114,12 @@ export function TestResults({
     interpretation,
     interpretationSource,
     isInterpreting,
+    onRequestFix,
+    isFixing,
+    fixError,
+    onExportReport,
+    isExporting,
+    exportedReportPath,
 }: TestResultsProps) {
     void _filePath; // Reserved for future use
     const [isExpanded, setIsExpanded] = useState(false);
@@ -108,19 +132,39 @@ export function TestResults({
     const passedTests = results.filter((r) => r.status === "passed");
     const hasResults = results.length > 0;
 
-    // Auto-select first failed test and expand when results arrive
+    // Expand the panel whenever a run produces results — pass OR fail — so the
+    // outcome is always visible instead of the panel silently staying collapsed
+    // on a green run. Auto-select the first failure to surface the error inline.
     useEffect(() => {
-        if (failedTests.length > 0) {
-            setSelectedTest(failedTests[0].id);
+        if (results.length > 0) {
             setIsExpanded(true);
+            if (failedTests.length > 0) {
+                setSelectedTest(failedTests[0].id);
+            }
         }
     }, [results.length]);
 
+    // Expand as soon as a run starts so the user immediately sees "Running…"
+    // (the panel used to stay collapsed, making it look like nothing happened).
+    useEffect(() => {
+        if (isRunning) setIsExpanded(true);
+    }, [isRunning]);
+
     // Switch to insights view when interpretation is available
     const handleAnalyzeClick = () => {
-        if (onRequestInterpretation && testCode) {
+        // Guard against a second analysis firing while one is already in
+        // flight — mirrors the `!isFixing` guard on handleFixClick below.
+        // The disabled attribute covers mouse clicks, but this keeps the
+        // handler itself safe regardless of how it's triggered.
+        if (onRequestInterpretation && testCode && !isInterpreting) {
             onRequestInterpretation(results);
             setViewMode("insights");
+        }
+    };
+
+    const handleFixClick = () => {
+        if (onRequestFix && !isFixing) {
+            onRequestFix(results);
         }
     };
 
@@ -263,6 +307,33 @@ export function TestResults({
                                     Raw
                                 </button>
                             </div>
+                            {hasResults && onExportReport && (
+                                <button
+                                    className="analyze-btn"
+                                    onClick={onExportReport}
+                                    disabled={isExporting}
+                                    title="Write a detailed HTML report with screenshots"
+                                >
+                                    {isExporting ? (
+                                        <>
+                                            <div className="btn-spinner"></div>
+                                            Exporting...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="2"
+                                            >
+                                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                                            </svg>
+                                            Export report
+                                        </>
+                                    )}
+                                </button>
+                            )}
                             {hasResults && testCode && onRequestInterpretation && (
                                 <button
                                     className="analyze-btn"
@@ -289,6 +360,18 @@ export function TestResults({
                                     )}
                                 </button>
                             )}
+                        </div>
+                    )}
+                    {exportedReportPath && (
+                        <div
+                            className="export-report-note"
+                            style={{
+                                padding: "8px 12px",
+                                fontSize: 12,
+                                color: "var(--text-secondary, #8b99a6)",
+                            }}
+                        >
+                            Report saved to <code>{exportedReportPath}</code>
                         </div>
                     )}
 
@@ -692,6 +775,48 @@ export function TestResults({
                                             {interpretation}
                                         </Markdown>
                                     </div>
+                                    {/* Actionable next step: turn the diagnosis
+                                        into a corrected spec. Only offered when
+                                        there's a failure to fix and the parent
+                                        wired up the handler. */}
+                                    {onRequestFix && failedTests.length > 0 && (
+                                        <div className="interpretation-actions">
+                                            <button
+                                                type="button"
+                                                className="fix-test-btn"
+                                                onClick={handleFixClick}
+                                                disabled={isFixing}
+                                            >
+                                                {isFixing ? (
+                                                    <>
+                                                        <span className="fix-spinner" />
+                                                        Generating fix…
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <svg
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                        >
+                                                            <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                                                        </svg>
+                                                        Fix test — update the spec
+                                                    </>
+                                                )}
+                                            </button>
+                                            <span className="fix-test-hint">
+                                                Opens a corrected spec in the editor to review, run,
+                                                and save.
+                                            </span>
+                                            {fixError && (
+                                                <div className="fix-error" role="alert">
+                                                    {fixError}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             ) : (
                                 <div className="no-insights">
@@ -705,24 +830,62 @@ export function TestResults({
                                     </svg>
                                     <h3>No Analysis Yet</h3>
                                     <p>
-                                        Click "Analyze with AI" to get intelligent insights about
-                                        your test results.
+                                        Click "Analyze with AI" for intelligent insights, or fix the
+                                        failing test directly.
                                     </p>
-                                    {testCode && onRequestInterpretation && (
-                                        <button
-                                            className="start-analysis-btn"
-                                            onClick={handleAnalyzeClick}
-                                        >
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="2"
+                                    <div className="no-insights-actions">
+                                        {testCode && onRequestInterpretation && (
+                                            <button
+                                                className="start-analysis-btn"
+                                                onClick={handleAnalyzeClick}
                                             >
-                                                <path d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                            </svg>
-                                            Start Analysis
-                                        </button>
+                                                <svg
+                                                    viewBox="0 0 24 24"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth="2"
+                                                >
+                                                    <path d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                                </svg>
+                                                Start Analysis
+                                            </button>
+                                        )}
+                                        {/* Repair does NOT require a prior analysis — the
+                                            failures + raw output are enough context. This
+                                            lets the user go straight from a red run to a
+                                            proposed fix. */}
+                                        {onRequestFix && failedTests.length > 0 && (
+                                            <button
+                                                type="button"
+                                                className="fix-test-btn"
+                                                onClick={handleFixClick}
+                                                disabled={isFixing}
+                                            >
+                                                {isFixing ? (
+                                                    <>
+                                                        <span className="fix-spinner" />
+                                                        Generating fix…
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <svg
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                        >
+                                                            <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                                                        </svg>
+                                                        Fix test — update the spec
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
+                                    </div>
+                                    {fixError && (
+                                        <div className="fix-error" role="alert">
+                                            {fixError}
+                                        </div>
                                     )}
                                 </div>
                             )}
@@ -732,6 +895,67 @@ export function TestResults({
                     {/* Formatted Results View */}
                     {!isRunning && viewMode === "formatted" && hasResults && (
                         <div className="formatted-results">
+                            {/* Action bar — keep Fix/Analyze visible right here on
+                                the Results tab so the user never has to hunt for
+                                them in the AI Insights tab after a red run. */}
+                            {failedTests.length > 0 &&
+                                (onRequestFix || (onRequestInterpretation && testCode)) && (
+                                    <div className="results-actions">
+                                        <span className="results-actions-label">
+                                            {failedTests.length} failing —
+                                        </span>
+                                        {onRequestFix && (
+                                            <button
+                                                type="button"
+                                                className="fix-test-btn"
+                                                onClick={handleFixClick}
+                                                disabled={isFixing}
+                                            >
+                                                {isFixing ? (
+                                                    <>
+                                                        <span className="fix-spinner" />
+                                                        Generating fix…
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <svg
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                        >
+                                                            <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                                                        </svg>
+                                                        Fix with AI
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
+                                        {onRequestInterpretation && testCode && (
+                                            <button
+                                                type="button"
+                                                className="analyze-btn"
+                                                onClick={handleAnalyzeClick}
+                                                disabled={isInterpreting}
+                                            >
+                                                {isInterpreting ? (
+                                                    <>
+                                                        <div className="btn-spinner" />
+                                                        Analyzing…
+                                                    </>
+                                                ) : (
+                                                    "Analyze"
+                                                )}
+                                            </button>
+                                        )}
+                                        {fixError && (
+                                            <div className="fix-error" role="alert">
+                                                {fixError}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
                             {/* Test List */}
                             <div className="test-list">
                                 {results.map((result) => (
@@ -1166,6 +1390,24 @@ export function TestResults({
         .toggle-btn svg { width: 11px; height: 11px; }
 
         .analyze-btn,
+        .no-insights-actions {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 0.5rem;
+          flex-wrap: wrap;
+        }
+        .fix-error {
+          margin-top: 0.5rem;
+          padding: 0.375rem 0.625rem;
+          border: 1px solid var(--danger, #e5484d);
+          color: var(--danger, #e5484d);
+          background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent);
+          font-family: var(--mono);
+          font-size: 11px;
+          line-height: 1.4;
+          word-break: break-word;
+        }
         .start-analysis-btn {
           display: inline-flex;
           align-items: center;
@@ -1206,6 +1448,22 @@ export function TestResults({
           flex-direction: column;
           min-height: 0;
           overflow: hidden;
+        }
+        .results-actions {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 0.5rem;
+          padding: 0.4375rem 0.75rem;
+          background: var(--fail-soft);
+          border-bottom: 1px solid var(--hair);
+          flex-shrink: 0;
+        }
+        .results-actions-label {
+          color: var(--fail);
+          font-family: var(--mono);
+          font-size: 11px;
+          font-weight: 500;
         }
         .test-list {
           flex: 1;
@@ -1582,6 +1840,49 @@ export function TestResults({
           border-left: 2px solid var(--warn, #ffb800);
           padding-left: 0.5rem;
         }
+        .interpretation-actions {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          flex-wrap: wrap;
+          margin-top: 1rem;
+          padding-top: 0.875rem;
+          border-top: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+        }
+        .fix-test-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.4rem;
+          padding: 0.45rem 0.75rem;
+          border: 1px solid var(--accent, #4f8cff);
+          border-radius: 4px;
+          background: var(--accent, #4f8cff);
+          color: #fff;
+          font-family: var(--mono);
+          font-size: 12px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: opacity 0.15s ease, transform 0.05s ease;
+        }
+        .fix-test-btn:hover:not(:disabled) { opacity: 0.9; }
+        .fix-test-btn:active:not(:disabled) { transform: translateY(1px); }
+        .fix-test-btn:disabled { opacity: 0.6; cursor: default; }
+        .fix-test-btn svg { width: 13px; height: 13px; }
+        .fix-test-hint {
+          color: var(--ink-dim);
+          font-family: var(--mono);
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .fix-spinner {
+          width: 12px;
+          height: 12px;
+          border: 2px solid rgba(255, 255, 255, 0.4);
+          border-top-color: #fff;
+          border-radius: 50%;
+          animation: fix-spin 0.7s linear infinite;
+        }
+        @keyframes fix-spin { to { transform: rotate(360deg); } }
         .interpretation-body {
           color: var(--ink);
           font-family: var(--mono);

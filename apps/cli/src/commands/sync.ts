@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { type SyncResult, syncCurrentTicket } from "@raiken/core";
+import { resolveAIConfig, type SyncResult, syncCurrentTicket } from "@raiken/core";
 import chalk from "chalk";
 
 interface SyncCommandOptions {
@@ -12,31 +12,24 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
 
     // Load integration config from raiken.config.json
     let integrationConfig: Record<string, unknown> | undefined;
-    let aiConfig: { apiKey?: string; model?: string; baseURL?: string } | undefined;
-
     try {
         const configPath = path.join(projectPath, "raiken.config.json");
         const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
         integrationConfig = raw?.integrations;
-        if (raw?.ai) {
-            aiConfig = {
-                apiKey: raw.ai.apiKey || process.env.OPENROUTER_API_KEY,
-                model: raw.ai.model,
-                baseURL: raw.ai.baseURL,
-            };
-        }
     } catch {
         // No config file, use defaults
     }
 
-    if (!aiConfig?.apiKey) {
-        aiConfig = {
-            ...aiConfig,
-            apiKey: process.env.OPENROUTER_API_KEY,
-        };
-    }
+    // Provider-aware AI resolution (honors configured provider + its env var),
+    // instead of only the raw `ai` block / OPENROUTER_API_KEY.
+    const resolved = resolveAIConfig(projectPath);
+    const aiConfig = {
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+        baseURL: resolved.baseURL,
+    };
 
-    console.log(chalk.cyan("\n🔄 Syncing with ticket system...\n"));
+    console.log(chalk.cyan("\nSyncing with ticket system...\n"));
 
     const result = await syncCurrentTicket({
         projectPath,

@@ -9,7 +9,7 @@ export function LandingPage({ onStart }: LandingPageProps) {
     const [prompt, setPrompt] = useState("");
     const [isReady, setIsReady] = useState(false);
     const [projectName, setProjectName] = useState("Loading...");
-    const inputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
 
     // Check backend health
     const healthQuery = trpc.getHealth.useQuery(undefined, {
@@ -40,6 +40,15 @@ export function LandingPage({ onStart }: LandingPageProps) {
     useEffect(() => {
         inputRef.current?.focus();
     }, []);
+
+    // Grow the composer vertically as the prompt wraps onto new lines instead
+    // of scrolling sideways.
+    useEffect(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    }, [prompt]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -106,9 +115,9 @@ export function LandingPage({ onStart }: LandingPageProps) {
                                 strokeLinejoin="round"
                             />
                         </svg>
-                        <input
+                        <textarea
                             ref={inputRef}
-                            type="text"
+                            rows={1}
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
                             onKeyDown={handleKeyDown}
@@ -239,7 +248,7 @@ export function LandingPage({ onStart }: LandingPageProps) {
 
         .command-input-wrapper {
           display: flex;
-          align-items: center;
+          align-items: flex-end;
           gap: 0.75rem;
           padding: 1rem 1.25rem;
           background: #18181b;
@@ -263,12 +272,21 @@ export function LandingPage({ onStart }: LandingPageProps) {
 
         .command-input {
           flex: 1;
+          min-width: 0;
           background: transparent;
           border: none;
           outline: none;
           color: #e5e7eb;
           font-size: 1rem;
           font-weight: 400;
+          font-family: inherit;
+          line-height: 1.5;
+          resize: none;
+          max-height: 200px;
+          overflow-y: auto;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
 
         .command-input::placeholder {

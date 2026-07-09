@@ -8,13 +8,86 @@ import { TestStorage } from "./storage";
 export interface TestRunResult {
     testFile: string;
     testName: string;
-    status: "passed" | "failed" | "error" | "timeout";
+    status: "passed" | "failed" | "error" | "timeout" | "skipped";
     duration: number;
     error?: {
         message: string;
         stack?: string;
         selector?: string;
     };
+}
+
+/** Minimal shape of the Playwright JSON reporter output we consume. */
+interface PlaywrightJsonResult {
+    status?: string;
+    duration?: number;
+    error?: { message?: string; stack?: string };
+}
+interface PlaywrightJsonSpec {
+    title: string;
+    tests?: Array<{ results?: PlaywrightJsonResult[] }>;
+}
+interface PlaywrightJsonSuite {
+    specs?: PlaywrightJsonSpec[];
+    suites?: PlaywrightJsonSuite[];
+}
+interface PlaywrightJsonReport {
+    suites?: PlaywrightJsonSuite[];
+}
+
+/**
+ * Extract the Playwright JSON reporter object from a mixed stdout stream.
+ *
+ * The reporter prints one JSON object, but npm/npx and other tooling can emit
+ * unrelated text (and even other JSON-ish blobs) around it. Rather than a
+ * greedy regex — which can span across the wrong braces — we scan for balanced
+ * `{...}` objects (ignoring braces inside strings) and return the first one
+ * that parses and contains a `suites` array.
+ */
+export function extractReporterJson(output: string): PlaywrightJsonReport | null {
+    // Fast path: the whole stream is the JSON object.
+    try {
+        const parsed = JSON.parse(output);
+        if (parsed && typeof parsed === "object" && "suites" in parsed) return parsed;
+    } catch {
+        // fall through to scanning
+    }
+
+    for (let i = 0; i < output.length; i++) {
+        if (output[i] !== "{") continue;
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let j = i; j < output.length; j++) {
+            const ch = output[j];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === "\\") escaped = true;
+                else if (ch === '"') inString = false;
+                continue;
+            }
+            if (ch === '"') inString = true;
+            else if (ch === "{") depth++;
+            else if (ch === "}") {
+                depth--;
+                if (depth === 0) {
+                    const candidate = output.slice(i, j + 1);
+                    try {
+                        const parsed = JSON.parse(candidate);
+                        if (parsed && typeof parsed === "object" && "suites" in parsed) {
+                            return parsed;
+                        }
+                    } catch {
+                        // not valid JSON; keep scanning from next "{"
+                    }
+                    i = j; // advance outer loop past this object
+                    break;
+                }
+            }
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -77,12 +150,19 @@ export class TestRunner {
             const results: TestRunResult[] = [];
             const startTime = Date.now();
 
-            // Build npx playwright test command
+            // Build npx playwright test command.
+            //
+            // Force serial execution (--workers=1). Raiken runs a suite against a
+            // single live app instance backed by ONE authenticated account: parallel
+            // workers overwhelm dev servers (load-event timeouts) and race on shared
+            // account state, producing flaky failures unrelated to the code. Serial
+            // is the reliable default for agent-driven E2E.
             const args = [
                 "playwright",
                 "test",
                 testFile,
                 "--reporter=json",
+                "--workers=1",
                 "--timeout",
                 timeout.toString(),
             ];
@@ -108,9 +188,26 @@ export class TestRunner {
                 stderr += data.toString();
             });
 
+            // Guards so the timeout and close/error handlers can't both settle
+            // the promise (which would push duplicate results).
+            let settled = false;
+            let killTimer: NodeJS.Timeout | null = null;
+
             // Handle timeout
             const timeoutId = setTimeout(() => {
+                // Ask the process group to terminate; if it ignores SIGTERM
+                // (hung driver/browser), escalate to SIGKILL so we don't leave
+                // orphaned npx/Chromium processes accumulating across runs.
                 child.kill("SIGTERM");
+                killTimer = setTimeout(() => {
+                    try {
+                        child.kill("SIGKILL");
+                    } catch {
+                        // Already exited.
+                    }
+                }, 5000);
+                if (settled) return;
+                settled = true;
                 results.push({
                     testFile,
                     testName: "unknown",
@@ -125,6 +222,9 @@ export class TestRunner {
 
             child.on("close", (code) => {
                 clearTimeout(timeoutId);
+                if (killTimer) clearTimeout(killTimer);
+                if (settled) return;
+                settled = true;
                 const duration = Date.now() - startTime;
 
                 // Try to parse JSON reporter output
@@ -158,6 +258,9 @@ export class TestRunner {
 
             child.on("error", (err) => {
                 clearTimeout(timeoutId);
+                if (killTimer) clearTimeout(killTimer);
+                if (settled) return;
+                settled = true;
                 results.push({
                     testFile,
                     testName: "unknown",
@@ -173,102 +276,6 @@ export class TestRunner {
     }
 
     /**
-     * Run a specific test by name within a file.
-     */
-    async runTestByName(
-        testFile: string,
-        testName: string,
-        options: TestRunOptions = {},
-    ): Promise<TestRunResult> {
-        const { timeout = 60000, headed = false } = options;
-
-        return new Promise((resolve) => {
-            const startTime = Date.now();
-
-            const args = [
-                "playwright",
-                "test",
-                testFile,
-                "--grep",
-                testName,
-                "--reporter=json",
-                "--timeout",
-                timeout.toString(),
-            ];
-
-            if (headed) {
-                args.push("--headed");
-            }
-
-            const child = spawn("npx", args, {
-                cwd: this.projectPath,
-                shell: true,
-                env: { ...process.env },
-            });
-
-            let stdout = "";
-            let stderr = "";
-
-            child.stdout?.on("data", (data) => {
-                stdout += data.toString();
-            });
-
-            child.stderr?.on("data", (data) => {
-                stderr += data.toString();
-            });
-
-            const timeoutId = setTimeout(() => {
-                child.kill("SIGTERM");
-                resolve({
-                    testFile,
-                    testName,
-                    status: "timeout",
-                    duration: timeout,
-                    error: {
-                        message: `Test timed out after ${timeout}ms`,
-                    },
-                });
-            }, timeout + 5000);
-
-            child.on("close", (code) => {
-                clearTimeout(timeoutId);
-                const duration = Date.now() - startTime;
-
-                if (code === 0) {
-                    resolve({
-                        testFile,
-                        testName,
-                        status: "passed",
-                        duration,
-                    });
-                } else {
-                    const error = this.parseError(stderr || stdout);
-                    resolve({
-                        testFile,
-                        testName,
-                        status: "failed",
-                        duration,
-                        error,
-                    });
-                }
-            });
-
-            child.on("error", (err) => {
-                clearTimeout(timeoutId);
-                resolve({
-                    testFile,
-                    testName,
-                    status: "error",
-                    duration: Date.now() - startTime,
-                    error: {
-                        message: err.message,
-                    },
-                });
-            });
-        });
-    }
-
-    /**
      * Parse Playwright JSON reporter output.
      */
     private parseJsonOutput(
@@ -279,24 +286,30 @@ export class TestRunner {
         const results: TestRunResult[] = [];
 
         try {
-            // Find JSON in output (might have other text around it)
-            const jsonMatch = output.match(/\{[\s\S]*"suites"[\s\S]*\}/);
-            if (!jsonMatch) return results;
+            const json = extractReporterJson(output);
+            if (!json) return results;
 
-            const json = JSON.parse(jsonMatch[0]);
-
-            for (const suite of json.suites || []) {
-                for (const spec of suite.specs || []) {
-                    for (const test of spec.tests || []) {
-                        const result = test.results?.[0];
-                        if (!result) continue;
+            // Playwright nests `suites` recursively (project → file → describe →
+            // nested describe). Walk the whole tree so tests inside describe
+            // blocks are not silently dropped, which would otherwise force a
+            // fallback to weaker regex parsing.
+            const walkSuites = (suites: PlaywrightJsonSuite[]) => {
+                for (const suite of suites || []) {
+                    for (const spec of suite.specs || []) {
+                        // Aggregate across retries: prefer the final attempt's
+                        // outcome, but keep the error from the last failing run.
+                        const attempts = spec.tests?.flatMap((t) => t.results || []) || [];
+                        if (attempts.length === 0) continue;
+                        const result = attempts[attempts.length - 1];
 
                         const status =
                             result.status === "passed"
                                 ? "passed"
                                 : result.status === "timedOut"
                                   ? "timeout"
-                                  : "failed";
+                                  : result.status === "skipped"
+                                    ? "skipped"
+                                    : "failed";
 
                         const testResult: TestRunResult = {
                             testFile,
@@ -305,20 +318,27 @@ export class TestRunner {
                             duration: result.duration || fallbackDuration,
                         };
 
-                        if (status !== "passed" && result.error) {
+                        const failure =
+                            status !== "passed" && status !== "skipped"
+                                ? attempts.find((a) => a.error) || result
+                                : undefined;
+                        if (failure?.error) {
                             testResult.error = {
-                                message: result.error.message || "Unknown error",
-                                stack: result.error.stack,
+                                message: failure.error.message || "Unknown error",
+                                stack: failure.error.stack,
                                 selector:
-                                    this.extractSelectorFromError(result.error.message || "") ||
+                                    this.extractSelectorFromError(failure.error.message || "") ||
                                     undefined,
                             };
                         }
 
                         results.push(testResult);
                     }
+                    if (suite.suites) walkSuites(suite.suites);
                 }
-            }
+            };
+
+            walkSuites(json.suites || []);
         } catch {
             // Invalid JSON output
         }

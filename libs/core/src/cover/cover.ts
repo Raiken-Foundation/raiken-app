@@ -20,6 +20,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
+import { readConfiguredTestDirectory } from "../utils";
 
 export type CoverTargetKind = "ac" | "symbol" | "free";
 
@@ -88,7 +89,7 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     });
 
     // ---- 3. Determine output path
-    const testDir = options.testDirectory ?? loadTestDirectory(projectPath) ?? "e2e";
+    const testDir = options.testDirectory ?? readConfiguredTestDirectory(projectPath) ?? "e2e";
     const outputPath = options.outputPath
         ? path.resolve(projectPath, options.outputPath)
         : path.resolve(projectPath, testDir, defaultFileName(kind, options.target));
@@ -320,7 +321,7 @@ function buildCoverPrompt(resolved: ResolvedTarget): string {
     const fileList =
         resolved.sourceFiles.length > 0
             ? resolved.sourceFiles.map((f) => `- ${f}`).join("\n")
-            : "(none provided — infer from the scenario)";
+            : "(none provided — do NOT guess the app's structure; mark unknowns as TODO)";
 
     return `[ROLE]
 Senior Playwright/TypeScript engineer. Draft ONE focused E2E test for the
@@ -338,13 +339,16 @@ ${fileList}
 - TypeScript types and async/await. No Jest/Vitest syntax.
 
 [RULES]
+- This draft has NO live DOM. Do not assume how the app is built — its routes,
+  auth method, field names, framework, or copy. Base the test only on the
+  scenario and any source files above.
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
 - Assertions must be specific and tied to the scenario.
 - NEVER emit page.waitForTimeout, setTimeout, or sleep — fixed sleeps are
   the largest single source of flakes (~45%, Luo et al., FSE 2014). Use
   expect.toBeVisible({ timeout }) / waitForURL / waitForResponse instead.
-- If you don't know a real selector or URL, leave a TODO comment with the
-  decision the reviewer must make. Do not invent.`;
+- Any selector, URL, or credential you cannot derive from the inputs MUST be a
+  \`// TODO:\` comment naming the decision the reviewer must make. Never invent.`;
 }
 
 function stripCodeFences(text: string): string {
@@ -402,18 +406,6 @@ test.describe("TODO: name this suite", () => {
 // ---------------------------------------------------------------------------
 // File path helpers
 // ---------------------------------------------------------------------------
-
-function loadTestDirectory(projectPath: string): string | undefined {
-    try {
-        const raw = JSON.parse(
-            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
-        );
-        if (typeof raw?.testDirectory === "string") return raw.testDirectory;
-    } catch {
-        // ignore
-    }
-    return undefined;
-}
 
 function defaultFileName(kind: CoverTargetKind, target: string): string {
     const slug = target

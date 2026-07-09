@@ -11,6 +11,7 @@
 
 import { type CiEvent, type CiResult, GitError, runCi } from "@raiken/core";
 import chalk from "chalk";
+import { cliExit } from "../repl/exit";
 
 interface CiCommandOptions {
     base?: string;
@@ -62,7 +63,7 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
     const jsonOutput = options.json === true;
 
     if (!jsonOutput) {
-        console.log(chalk.cyan("\n🔎 raiken ci\n"));
+        console.log(chalk.cyan("\nraiken ci\n"));
     }
 
     let result: CiResult;
@@ -82,14 +83,14 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
         });
     } catch (err) {
         if (err instanceof GitError) {
-            console.error(chalk.red(`\n❌ ${err.message}`));
-            process.exit(2);
+            console.error(chalk.red(`\n✗ ${err.message}`));
+            cliExit(2);
         }
         console.error(
-            chalk.red("\n❌ raiken ci failed:"),
+            chalk.red("\n✗ raiken ci failed:"),
             err instanceof Error ? err.message : err,
         );
-        process.exit(2);
+        cliExit(2);
     }
 
     if (jsonOutput) {
@@ -98,7 +99,7 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
         printHumanSummary(result);
     }
 
-    process.exit(result.exitCode);
+    cliExit(result.exitCode);
 }
 
 // =========================================================================
@@ -192,9 +193,9 @@ function printHumanSummary(result: CiResult): void {
 
     console.log();
     if (result.exitCode === 0) {
-        console.log(chalk.green("✅ raiken ci: clean"));
+        console.log(chalk.green("✓ raiken ci: clean"));
     } else {
-        console.log(chalk.red("❌ raiken ci: failures detected"));
+        console.log(chalk.red("✗ raiken ci: failures detected"));
     }
 }
 

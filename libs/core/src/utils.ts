@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { NodePath } from "@babel/traverse";
@@ -47,6 +48,109 @@ export function formatBytes(bytes: number): string {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
 
     return `${Math.round((bytes / k ** i) * 100) / 100} ${sizes[i]}`;
+}
+
+/**
+ * Read the `testDirectory` field from a project's `raiken.config.json`.
+ * Returns `undefined` when the config is missing, invalid, or the field
+ * is absent/empty so callers can apply their own default (usually `e2e`).
+ */
+export function readConfiguredTestDirectory(projectPath: string): string | undefined {
+    try {
+        const raw = JSON.parse(readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"));
+        if (typeof raw?.testDirectory === "string" && raw.testDirectory.trim()) {
+            return raw.testDirectory;
+        }
+    } catch {
+        // ignore — config missing or invalid; caller falls back to a default
+    }
+    return undefined;
+}
+
+/**
+ * Normalize LLM-produced test code into what should actually land on disk.
+ *
+ * Models often wrap output in a Markdown code fence (```ts … ```) and add
+ * trailing whitespace. Every save path must run this so the on-disk file is
+ * identical regardless of which surface saved it (chat auto-save, HITL
+ * approval, the agent's saveFile tool, or run-on-buffer). Without a single
+ * shared cleaner the same generated test could be written three slightly
+ * different ways, which is exactly the "formatting differs after save" bug.
+ */
+export function cleanGeneratedTestCode(raw: string): string {
+    let content = raw;
+
+    // Collect ALL fenced blocks, not just the first. Models sometimes precede
+    // the real test with a small illustrative snippet (or wrap prose in fences),
+    // and taking `[0]` would then truncate to the wrong block. Prefer the block
+    // that looks most like a test file (has import/test/expect), breaking ties
+    // by length; fall back to the first block, then to the dangling-fence path.
+    const fenceRe = /```(?:typescript|ts|javascript|js|tsx|jsx)?\s*\n([\s\S]*?)```/gi;
+    const blocks: string[] = [];
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard global-regex exec loop
+    while ((m = fenceRe.exec(content)) !== null) {
+        blocks.push(m[1]);
+    }
+
+    if (blocks.length > 0) {
+        const isTestish = (b: string) => /\b(import|test|expect|describe|test\.describe)\b/.test(b);
+        const candidates = blocks.filter(isTestish);
+        const pool = candidates.length > 0 ? candidates : blocks;
+        content = pool.reduce((best, b) => (b.length > best.length ? b : best), pool[0]);
+    } else {
+        // No matched pair — strip a dangling opening fence and any closing fence.
+        content = content.replace(/^```(?:typescript|ts|javascript|js|tsx|jsx)?\s*\n?/i, "");
+        const closingIdx = content.lastIndexOf("\n```");
+        if (closingIdx !== -1) {
+            content = content.substring(0, closingIdx);
+        }
+    }
+
+    content = hardenNavigationWaits(content);
+
+    // Normalize line endings and strip trailing whitespace per line so the
+    // saved file matches what a formatter-clean editor would show.
+    return `${content
+        .replace(/\r\n/g, "\n")
+        .replace(/[ \t]+$/gm, "")
+        .trim()}\n`;
+}
+
+/**
+ * Make generated navigation resilient on real-world apps.
+ *
+ * Two Playwright defaults sink tests against production-like SPAs:
+ *  - `page.goto(url)` waits for the `load` event, which never fires within the
+ *    timeout on apps that hold a resource open (analytics beacons, hanging
+ *    images, streamed responses).
+ *  - `waitForLoadState('networkidle')` never settles when the app keeps a
+ *    persistent connection open (websockets/Pusher, SSE, polling). Playwright
+ *    itself discourages `networkidle`.
+ *
+ * We rewrite both to `domcontentloaded`, which resolves as soon as the DOM is
+ * ready — tests then wait on concrete elements (already how the model asserts).
+ * Conservative by construction: only string-literal single-arg `goto()` calls
+ * gain options, and only explicit `networkidle` waits are downgraded.
+ */
+export function hardenNavigationWaits(code: string): string {
+    let out = code;
+
+    // 1. Add `{ waitUntil: "domcontentloaded" }` to bare string-literal gotos.
+    out = out.replace(
+        /\.goto\(\s*(['"`])((?:\\.|(?!\1).)*)\1\s*\)/g,
+        (_full, q: string, url: string) =>
+            `.goto(${q}${url}${q}, { waitUntil: "domcontentloaded" })`,
+    );
+
+    // 2. Downgrade explicit networkidle waits (both call styles).
+    out = out.replace(
+        /waitForLoadState\(\s*(['"`])networkidle\1\s*\)/g,
+        'waitForLoadState("domcontentloaded")',
+    );
+    out = out.replace(/waitUntil:\s*(['"`])networkidle\1/g, 'waitUntil: "domcontentloaded"');
+
+    return out;
 }
 
 export function isTestDirectory(dirName: string): boolean {

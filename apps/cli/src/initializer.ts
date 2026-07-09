@@ -24,7 +24,7 @@ async function promptUserPreferences(
     projectInfo: ProjectInfo,
     nonInteractive = false,
 ): Promise<UserPreferences> {
-    console.log(chalk.cyan("\n🔍 Detected project information:"));
+    console.log(chalk.cyan("\nDetected project information:"));
     console.log(chalk.gray(`   Project: ${projectInfo.name}`));
     console.log(chalk.gray(`   Type: ${projectInfo.type}`));
     console.log(chalk.gray(`   Test Framework: ${projectInfo.testFramework}`));
@@ -94,9 +94,9 @@ async function promptUserPreferences(
             };
         }
 
-        console.log(chalk.yellow("\n📋 Customizing configuration...\n"));
+        console.log(chalk.yellow("\nCustomizing configuration...\n"));
     } else {
-        console.log(chalk.yellow("\n⚠️  Some information could not be auto-detected.\n"));
+        console.log(chalk.yellow("\n⚠ Some information could not be auto-detected.\n"));
     }
 
     let projectType: ProjectType = projectInfo.type;
@@ -251,7 +251,7 @@ export async function initializeProject(
     }
 
     // Step 1: Detect project information
-    console.log(chalk.blue("🔎 Analyzing your project...\n"));
+    console.log(chalk.blue("Analyzing your project...\n"));
     const projectInfo = await detectProject(projectPath);
 
     // Step 2: Prompt user for preferences
@@ -265,23 +265,30 @@ export async function initializeProject(
         testDir: preferences.testDirectory,
     };
 
-    // Check if already initialized
-    const raikenDir = path.join(projectPath, ".raiken");
+    // Check if already initialized. Gate on `raiken.config.json` — the
+    // artifact `init` actually produces — not the `.raiken/` cache dir,
+    // which `raiken start`/`raiken chat` create automatically on first run
+    // (code graph DB, agent memory) even if the user never ran `init`. Using
+    // `.raiken/` here meant anyone who tried the agent before running `init`
+    // got permanently told "already initialized" and had to guess `--force`.
+    const configPath = path.join(projectPath, "raiken.config.json");
     let alreadyInitialized = false;
     try {
-        await fs.access(raikenDir);
+        await fs.access(configPath);
         alreadyInitialized = true;
     } catch {
         /* not initialized yet */
     }
 
     if (alreadyInitialized && !force) {
-        console.log(chalk.yellow("Project is already initialized. Use --force to re-initialize."));
+        console.log(
+            chalk.yellow("Project already has raiken.config.json. Use --force to re-initialize."),
+        );
         return;
     }
 
     console.log(
-        chalk.blue(`\n📁 Setting up ${finalProjectInfo.type} project: ${finalProjectInfo.name}\n`),
+        chalk.blue(`\nSetting up ${finalProjectInfo.type} project: ${finalProjectInfo.name}\n`),
     );
 
     try {
@@ -294,7 +301,7 @@ export async function initializeProject(
         if (preferences.testFramework === "playwright") {
             await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
         } else if (preferences.testFramework !== "none") {
-            console.log(chalk.yellow(`⚠️  Manual setup required for ${preferences.testFramework}`));
+            console.log(chalk.yellow(`⚠ Manual setup required for ${preferences.testFramework}`));
             console.log(
                 chalk.gray(`   Raiken works best with Playwright. Consider switching later.\n`),
             );
@@ -313,7 +320,7 @@ export async function initializeProject(
         }
 
         // Success message
-        console.log(chalk.green("\n✅ Project initialization complete!"));
+        console.log(chalk.green("\n✓ Project initialization complete!"));
         console.log(chalk.cyan("\nNext steps:"));
         console.log(chalk.gray('  1. Run "raiken start" to launch the dashboard'));
         console.log(chalk.gray("  2. Open http://localhost:7101 in your browser"));
@@ -321,13 +328,13 @@ export async function initializeProject(
 
         // Additional info based on choices
         if (!preferences.installPlaywright && preferences.testFramework === "playwright") {
-            console.log(chalk.yellow("⚠️  Remember to install Playwright browsers:"));
+            console.log(chalk.yellow("⚠ Remember to install Playwright browsers:"));
             console.log(chalk.gray("   npx playwright install\n"));
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
-        console.log(chalk.red(`\n❌ Setup failed: ${message}`));
-        console.log(chalk.yellow('\n💡 Tip: You can safely re-run "raiken init" to try again.'));
+        console.log(chalk.red(`\n✗ Setup failed: ${message}`));
+        console.log(chalk.yellow('\nTip: You can safely re-run "raiken init" to try again.'));
         throw error;
     }
 }
@@ -756,7 +763,7 @@ async function installPlaywrightBrowsers(
         return;
     }
 
-    console.log(chalk.blue("📦 Installing Playwright browsers..."));
+    console.log(chalk.blue("Installing Playwright browsers..."));
 
     try {
         // Use Promise.race to implement timeout

@@ -13,6 +13,57 @@ import { trpc } from "../utils/trpc";
 import { FilesPanel, type TestFileItem } from "./files-panel";
 import { Logo } from "./logo";
 
+// Matches the inline activity markers emitted by the agent
+// (buildAgentEventMarker). The payload is base64-encoded JSON.
+const AGENT_EVENT_MARKER = /<!--EVENT:([A-Za-z0-9+/=]+?)-->/g;
+
+/**
+ * Extract the agent's live activity trail from a streamed message and return the
+ * message with the markers removed. Deduplicates consecutive identical labels so
+ * repeated "Reading page" steps collapse into one line.
+ */
+function parseAgentActivity(raw: string): { clean: string; activity: string[] } {
+    const activity: string[] = [];
+    let match: RegExpExecArray | null;
+    AGENT_EVENT_MARKER.lastIndex = 0;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard regex exec loop
+    while ((match = AGENT_EVENT_MARKER.exec(raw)) !== null) {
+        try {
+            const decoded = JSON.parse(atob(match[1])) as {
+                label?: string;
+                detail?: string | null;
+            };
+            const label = decoded.detail ? `${decoded.label} ${decoded.detail}` : decoded.label;
+            if (label && activity[activity.length - 1] !== label) activity.push(label);
+        } catch {
+            // Ignore malformed markers
+        }
+    }
+    const clean = raw.replace(AGENT_EVENT_MARKER, "");
+    return { clean, activity };
+}
+
+/**
+ * Decode a captured `<!--HITL:…-->` payload. New markers are base64-encoded
+ * JSON (so a generated test containing `-->` can't truncate them); older
+ * persisted markers are raw JSON. Returns null on any parse failure.
+ */
+function decodeHitlPayload(payload: string): HITLConfirmation | null {
+    let json = payload;
+    if (/^[A-Za-z0-9+/=]+$/.test(payload)) {
+        try {
+            json = atob(payload);
+        } catch {
+            json = payload;
+        }
+    }
+    try {
+        return JSON.parse(json) as HITLConfirmation;
+    } catch {
+        return null;
+    }
+}
+
 interface Message {
     id: string;
     content: string;
@@ -21,6 +72,31 @@ interface Message {
     isLoading?: boolean;
     fileMentions?: string[];
     hitlData?: HITLConfirmation;
+    /** Live "what the agent is doing" trail parsed from EVENT markers. */
+    activity?: string[];
+}
+
+// How many recent messages to send as conversation context. Widened from 10 so
+// the agent doesn't "forget" earlier turns mid-session.
+const CONVERSATION_WINDOW = 30;
+
+/**
+ * Build the conversation history to send to the agent: the most recent
+ * CONVERSATION_WINDOW messages, plus the original request anchored at the front
+ * so long sessions don't lose the overall goal.
+ */
+function buildConversationWindow(messages: Message[]): Array<{ role: string; content: string }> {
+    const relevant = messages.filter((m) => m.id !== "welcome" && m.content.trim().length > 0);
+    const recent = relevant.slice(-CONVERSATION_WINDOW);
+    const out = recent.map((m) => ({
+        role: m.isUser ? "user" : "assistant",
+        content: m.content,
+    }));
+    const firstUser = relevant.find((m) => m.isUser);
+    if (firstUser && !recent.includes(firstUser)) {
+        out.unshift({ role: "user", content: `[Original request] ${firstUser.content}` });
+    }
+    return out;
 }
 
 // Human-in-the-loop confirmation data
@@ -51,6 +127,9 @@ interface HITLConfirmation {
     /** Display name (without extension) for the pending test. */
     testName?: string;
 }
+
+// localStorage key for persisting resolved save-approval cards across reloads.
+const SAVED_APPROVALS_KEY = "raiken:savedApprovals";
 
 const WELCOME_MESSAGE: Message = {
     id: "welcome",
@@ -104,8 +183,51 @@ export function Sidebar({
     const [showSlashAutocomplete, setShowSlashAutocomplete] = useState(false);
     const [slashPosition, setSlashPosition] = useState(0);
     const [slashMatches, setSlashMatches] = useState<SlashCommand[]>([]);
-    const inputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
     const formRef = useRef<HTMLFormElement>(null);
+    const messagesRef = useRef<HTMLDivElement>(null);
+    // Controls the in-flight /api/generate-test SSE fetch so the user can
+    // interrupt a running agent (Stop button, Esc, or /stop).
+    const abortControllerRef = useRef<AbortController | null>(null);
+
+    // Whether the message list is scrolled (roughly) to the bottom. When the
+    // user scrolls up to read history we stop auto-pinning to the bottom and
+    // reveal a "scroll to bottom" button instead.
+    const [isNearBottom, setIsNearBottom] = useState(true);
+    const NEAR_BOTTOM_THRESHOLD = 80;
+
+    const handleMessagesScroll = () => {
+        const el = messagesRef.current;
+        if (!el) return;
+        const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        setIsNearBottom(distanceFromBottom < NEAR_BOTTOM_THRESHOLD);
+    };
+
+    const scrollMessagesToBottom = () => {
+        const el = messagesRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+        setIsNearBottom(true);
+    };
+
+    // Keep the newest message in view as content streams in, but only while the
+    // user is already near the bottom — otherwise we'd yank them away from
+    // history they scrolled up to read.
+    useEffect(() => {
+        if (!isNearBottom) return;
+        const el = messagesRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, [messages, isNearBottom]);
+
+    // Grow the input vertically as the user types a long message instead of
+    // scrolling it sideways. Runs on every value change (typed, slash/file
+    // autocomplete insertions, prompt seeding, and reset after submit).
+    useEffect(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+    }, [inputValue]);
 
     useEffect(() => {
         if (initialPrompt) {
@@ -140,6 +262,16 @@ export function Sidebar({
     // and risk losing the test draft entirely).
     const saveTestMutation = trpc.saveGeneratedTest.useMutation();
     const updateConfigMutation = trpc.updateConfig.useMutation();
+    const runTestMutation = trpc.runTests.useMutation();
+    // Read once so the auto-open heuristic below can tell whether the AGENT
+    // already persisted the spec (autoSaveTests). Without this, an auto-saved
+    // spec that is also streamed back would get saved a SECOND time here,
+    // producing a duplicate file when our derived name differs from the
+    // agent's chosen path.
+    const { data: raikenConfig } = trpc.getConfig.useQuery();
+
+    // Which saved-approval card is currently running its test (keyed by msg id).
+    const [runningTestFor, setRunningTestFor] = useState<string | null>(null);
 
     /**
      * Track save-approval cards that have already resolved (either saved
@@ -148,10 +280,29 @@ export function Sidebar({
      */
     const [savedApprovals, setSavedApprovals] = useState<
         Record<string, { status: "saved" | "rejected"; filePath?: string; error?: string }>
-    >({});
+    >(() => {
+        // Hydrate from localStorage so a resolved save/reject stays resolved
+        // across reloads — otherwise the persisted HITL card would re-render
+        // with its buttons enabled and the user could save/reject twice.
+        try {
+            const raw = localStorage.getItem(SAVED_APPROVALS_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch {
+            return {};
+        }
+    });
 
     /** Per-card override of the suggested path while the user edits it. */
     const [pathEdits, setPathEdits] = useState<Record<string, string>>({});
+
+    // Persist resolved approvals so they survive reloads.
+    useEffect(() => {
+        try {
+            localStorage.setItem(SAVED_APPROVALS_KEY, JSON.stringify(savedApprovals));
+        } catch {
+            // localStorage unavailable — non-critical.
+        }
+    }, [savedApprovals]);
 
     // Load messages from server on mount
     useEffect(() => {
@@ -178,16 +329,13 @@ export function Sidebar({
                     if (!msg.content || msg.sender === "user") return baseMessage;
                     const hitlMatch = msg.content.match(/<!--HITL:([\s\S]+?)-->/);
                     if (!hitlMatch) return baseMessage;
-                    try {
-                        const hitlData = JSON.parse(hitlMatch[1]) as HITLConfirmation;
-                        return {
-                            ...baseMessage,
-                            content: msg.content.replace(/<!--HITL:[\s\S]+?-->/, "").trim(),
-                            hitlData,
-                        };
-                    } catch {
-                        return baseMessage;
-                    }
+                    const hitlData = decodeHitlPayload(hitlMatch[1]);
+                    if (!hitlData) return baseMessage;
+                    return {
+                        ...baseMessage,
+                        content: msg.content.replace(/<!--HITL:[\s\S]+?-->/, "").trim(),
+                        hitlData,
+                    };
                 });
                 setMessages([WELCOME_MESSAGE, ...loadedMessages]);
             }
@@ -211,6 +359,9 @@ export function Sidebar({
         clearMessagesMutation.mutate(undefined, {
             onSuccess: () => {
                 setMessages([WELCOME_MESSAGE]);
+                // Drop resolved-approval bookkeeping too so a fresh chat starts clean.
+                setSavedApprovals({});
+                setPathEdits({});
             },
         });
     };
@@ -253,20 +404,18 @@ export function Sidebar({
         };
         setMessages((prev) => [...prev, aiMessage]);
 
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+
         try {
             const response = await fetch("/api/generate-test", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
                     prompt: hitlMessage,
                     fileContext: context.files || [],
-                    conversationHistory: messages
-                        .filter((m) => m.id !== "welcome")
-                        .slice(-10)
-                        .map((m) => ({
-                            role: m.isUser ? "user" : "assistant",
-                            content: m.content,
-                        })),
+                    conversationHistory: buildConversationWindow(messages),
                 }),
             });
 
@@ -333,19 +482,23 @@ export function Sidebar({
                 isUser: false,
             });
         } catch (error) {
-            console.error("HITL action failed:", error);
+            const stopped = error instanceof DOMException && error.name === "AbortError";
+            if (!stopped) console.error("HITL action failed:", error);
             setMessages((prev) =>
                 prev.map((msg) =>
                     msg.id === aiMessageId
                         ? {
                               ...msg,
-                              content: `Error: ${error instanceof Error ? error.message : "Action failed"}`,
+                              content: stopped
+                                  ? "_Stopped._"
+                                  : `Error: ${error instanceof Error ? error.message : "Action failed"}`,
                               isLoading: false,
                           }
                         : msg,
                 ),
             );
         } finally {
+            abortControllerRef.current = null;
             setIsGenerating(false);
         }
     };
@@ -408,6 +561,9 @@ export function Sidebar({
                 fileName,
                 content: testCode,
                 testDir,
+                // The path is auto-suggested (or lightly edited) — never silently
+                // clobber a different existing spec; dedup to a unique name.
+                avoidOverwrite: true,
             });
 
             if (actionId === "save_approve_remember") {
@@ -442,6 +598,11 @@ export function Sidebar({
 
             // Refresh the file list so the new spec shows up in the Files panel.
             refetchTestFiles();
+
+            // Open the freshly saved test in the editor so the user lands on it.
+            if (result.filePath) {
+                onFileSelect?.(result.filePath);
+            }
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : "Save failed";
             console.error("Save approval failed:", err);
@@ -459,6 +620,64 @@ export function Sidebar({
                 isUser: false,
             };
             setMessages((prev) => [...prev, errMsg]);
+        }
+    };
+
+    /**
+     * Run a test that was just saved from a save-approval card. This closes the
+     * generate → save → run loop directly in chat (the graph itself ends at the
+     * save pause, so running is offered here deterministically via tRPC rather
+     * than resuming the LLM). Results are summarized inline; on failure we point
+     * the user to the editor where "Fix with AI" lives.
+     */
+    const handleRunSavedTest = async (messageId: string, filePath: string) => {
+        if (runningTestFor) return;
+        setRunningTestFor(messageId);
+        const runningMsg: Message = {
+            id: `sys-run-${Date.now()}`,
+            content: `▶️ Running \`${filePath}\`…`,
+            timestamp: new Date().toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+            }),
+            isUser: false,
+        };
+        setMessages((prev) => [...prev, runningMsg]);
+
+        try {
+            const result = (await runTestMutation.mutateAsync({ testFile: filePath })) as {
+                success?: boolean;
+            };
+            const passed = Boolean(result.success);
+            const summary = passed
+                ? `✅ \`${filePath}\` passed.`
+                : `❌ \`${filePath}\` failed. Open it in the editor and use **Fix with AI** to repair the spec.`;
+            const resultMsg: Message = {
+                id: `sys-run-done-${Date.now()}`,
+                content: summary,
+                timestamp: new Date().toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                isUser: false,
+            };
+            setMessages((prev) => [...prev, resultMsg]);
+            persistMessage(resultMsg);
+            if (!passed) onFileSelect?.(filePath);
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : "Test run failed";
+            const errMsg: Message = {
+                id: `sys-run-err-${Date.now()}`,
+                content: `⚠️ Could not run test: ${errorMessage}`,
+                timestamp: new Date().toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                isUser: false,
+            };
+            setMessages((prev) => [...prev, errMsg]);
+        } finally {
+            setRunningTestFor(null);
         }
     };
 
@@ -576,15 +795,15 @@ export function Sidebar({
         }
     };
 
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         const value = e.target.value;
         setInputValue(value);
         const cursorPos = e.target.selectionStart || 0;
         checkAndShowAutocomplete(value, cursorPos);
     };
 
-    const handleInputClick = (e: React.MouseEvent<HTMLInputElement>) => {
-        const cursorPos = (e.target as HTMLInputElement).selectionStart || 0;
+    const handleInputClick = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+        const cursorPos = (e.target as HTMLTextAreaElement).selectionStart || 0;
         checkAndShowAutocomplete(inputValue, cursorPos);
     };
 
@@ -616,6 +835,28 @@ export function Sidebar({
         // Store the code temporarily and open in editor
         sessionStorage.setItem(`scratch:${fileName}`, code);
         onFileSelect?.(`scratch:${fileName}`);
+    };
+
+    /**
+     * Open a pending save-approval draft in the editor for review before the
+     * user commits to saving it. We open it as a scratch buffer named after the
+     * suggested path so the tab reads sensibly (e.g. `login.spec.ts`) without
+     * writing anything to disk — Save / Reject still live on the card.
+     */
+    const openHitlTestInEditor = (hitl: HITLConfirmation) => {
+        const code = hitl.testCode ?? "";
+        if (!code) return;
+        const rawName =
+            hitl.testName ||
+            hitl.suggestedPath?.split("/").pop() ||
+            `raiken-test-${Date.now()}.spec.ts`;
+        let safeName = rawName.replace(/[^\w.-]/g, "-");
+        if (!/\.(ts|tsx|js|jsx)$/.test(safeName)) {
+            safeName = `${safeName}.spec.ts`;
+        }
+        const scratchName = `scratch:${safeName}`;
+        sessionStorage.setItem(scratchName, code);
+        onFileSelect?.(scratchName);
     };
 
     // Render message content with markdown support and @ mentions styled
@@ -827,7 +1068,7 @@ export function Sidebar({
         }, 10);
     };
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         // Slash autocomplete has priority when active.
         if (showSlashAutocomplete) {
             if (e.key === "ArrowDown") {
@@ -850,24 +1091,49 @@ export function Sidebar({
                 setShowSlashAutocomplete(false);
                 return;
             }
-            // Enter falls through — handleSubmit will parse the slash input.
+            // Enter falls through to the submit handler below, which parses the
+            // slash input.
+        } else if (showAutocomplete) {
+            if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setAutocompletePosition((prev) => Math.min(prev + 1, filteredFiles.length - 1));
+                return;
+            }
+            if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setAutocompletePosition((prev) => Math.max(prev - 1, 0));
+                return;
+            }
+            if (e.key === "Enter" && filteredFiles.length > 0) {
+                // When autocomplete is showing, Enter selects from autocomplete,
+                // NOT submit the form.
+                e.preventDefault();
+                e.stopPropagation();
+                selectFile(filteredFiles[autocompletePosition], e);
+                return;
+            }
+            if (e.key === "Escape") {
+                setShowAutocomplete(false);
+                return;
+            }
         }
 
-        if (!showAutocomplete) return;
+        // Esc interrupts a running agent (when no autocomplete popup is open,
+        // which is handled above).
+        if (e.key === "Escape" && isGenerating) {
+            e.preventDefault();
+            if (handleStop()) {
+                echoSystemMessage("_Stopping the agent…_");
+            }
+            return;
+        }
 
-        if (e.key === "ArrowDown") {
+        // A textarea inserts a newline on Enter instead of submitting like an
+        // <input> would, so submit explicitly. Shift+Enter keeps the newline so
+        // users can compose multi-line messages.
+        if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            setAutocompletePosition((prev) => Math.min(prev + 1, filteredFiles.length - 1));
-        } else if (e.key === "ArrowUp") {
-            e.preventDefault();
-            setAutocompletePosition((prev) => Math.max(prev - 1, 0));
-        } else if (e.key === "Enter" && showAutocomplete && filteredFiles.length > 0) {
-            // When autocomplete is showing, Enter selects from autocomplete, NOT submit form
-            e.preventDefault();
-            e.stopPropagation();
-            selectFile(filteredFiles[autocompletePosition], e);
-        } else if (e.key === "Escape") {
-            setShowAutocomplete(false);
+            formRef.current?.requestSubmit();
         }
     };
 
@@ -885,6 +1151,19 @@ export function Sidebar({
         };
         setMessages((prev) => [...prev, message]);
         persistMessage(message);
+    };
+
+    /**
+     * Interrupt the running agent by aborting the in-flight SSE fetch. Aborting
+     * the request closes the connection, which the server observes and uses to
+     * cancel the underlying LangGraph run. Returns whether anything was stopped.
+     */
+    const handleStop = (): boolean => {
+        const controller = abortControllerRef.current;
+        if (!controller) return false;
+        controller.abort();
+        abortControllerRef.current = null;
+        return true;
     };
 
     const executeSlashCommand = async (raw: string): Promise<boolean> => {
@@ -917,6 +1196,7 @@ export function Sidebar({
             setSidebarTab: (tab) => onTabChange?.(tab as SidebarTab),
             clearChat: () => handleClearChat(),
             echoSystem: (md) => echoSystemMessage(md),
+            stop: () => handleStop(),
             trpcUtils,
         };
 
@@ -933,10 +1213,16 @@ export function Sidebar({
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!inputValue.trim() || isGenerating) return;
+        if (!inputValue.trim()) return;
 
-        // Intercept slash commands before hitting the AI.
+        // Intercept slash commands before hitting the AI. Stop-family commands
+        // are allowed through even while generating so the user can interrupt a
+        // running agent by typing `/stop`; every other command is blocked while
+        // busy to avoid launching a second concurrent run.
         if (inputValue.trimStart().startsWith("/")) {
+            const parsed = parseSlashInput(inputValue);
+            const isStopCommand = !!parsed && ["stop", "abort", "cancel"].includes(parsed.name);
+            if (isGenerating && !isStopCommand) return;
             const raw = inputValue;
             setInputValue("");
             setShowSlashAutocomplete(false);
@@ -944,19 +1230,15 @@ export function Sidebar({
             return;
         }
 
+        if (isGenerating) return;
+
         // Extract mentioned files from current prompt
         const mentionRegex = /@([^\s]+)/g;
         const matches = [...inputValue.matchAll(mentionRegex)];
         const newFileContext = matches.map((match) => match[1]);
 
-        // Build conversation history (exclude welcome message, limit to last 10 messages for context)
-        const conversationHistory = messages
-            .filter((msg) => msg.id !== "welcome")
-            .slice(-10)
-            .map((msg) => ({
-                role: msg.isUser ? "user" : "assistant",
-                content: msg.content,
-            }));
+        // Build conversation history (recent window + anchored original request)
+        const conversationHistory = buildConversationWindow(messages);
 
         // Extract all files mentioned in conversation history
         const historicalFiles = new Set<string>();
@@ -1000,14 +1282,27 @@ export function Sidebar({
         };
         setMessages((prev) => [...prev, aiMessage]);
 
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+        // Hoisted so the catch block can append what streamed so far when the
+        // run is stopped mid-flight.
+        let accumulated = "";
+
         try {
             const response = await fetch("/api/generate-test", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
                 body: JSON.stringify({
                     prompt,
                     fileContext: allFileContext, // Send all mentioned files
                     conversationHistory, // Send conversation history for context
+                    // When a real (non-scratch) test file is highlighted, target
+                    // it so a newly generated test overwrites that file.
+                    targetTestFile:
+                        activeFilePath && !activeFilePath.startsWith("scratch:")
+                            ? activeFilePath
+                            : undefined,
                 }),
             });
 
@@ -1017,7 +1312,6 @@ export function Sidebar({
 
             const reader = response.body?.getReader();
             const decoder = new TextDecoder();
-            let accumulated = "";
 
             if (!reader) {
                 throw new Error("No response body");
@@ -1032,9 +1326,23 @@ export function Sidebar({
 
                 for (const line of lines) {
                     if (line.startsWith("data: ")) {
+                        // Parse the SSE JSON separately from handling it: a
+                        // JSON.parse failure means a partial chunk we can skip,
+                        // but a server-sent {error} must propagate to the outer
+                        // catch instead of being swallowed as "incomplete".
+                        let data: {
+                            error?: string;
+                            chunk?: string;
+                            done?: boolean;
+                        } | null = null;
                         try {
-                            const data = JSON.parse(line.slice(6));
+                            data = JSON.parse(line.slice(6));
+                        } catch {
+                            // Incomplete/partial SSE chunk — wait for more.
+                            continue;
+                        }
 
+                        if (data) {
                             if (data.error) {
                                 throw new Error(data.error);
                             }
@@ -1043,20 +1351,30 @@ export function Sidebar({
                                 accumulated += data.chunk;
                                 setStreamedContent(accumulated);
 
+                                // Strip the live activity trail out of the visible
+                                // content and surface it separately.
+                                const { clean: withoutEvents, activity } =
+                                    parseAgentActivity(accumulated);
+
                                 // Check for HITL marker
-                                const hitlMatch = accumulated.match(/<!--HITL:(.+?)-->/);
+                                const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
                                 let hitlData: HITLConfirmation | undefined;
-                                let displayContent = accumulated;
+                                let displayContent = withoutEvents;
 
                                 if (hitlMatch) {
-                                    try {
-                                        hitlData = JSON.parse(hitlMatch[1]);
+                                    const parsed = decodeHitlPayload(hitlMatch[1]);
+                                    if (parsed) {
+                                        hitlData = parsed;
                                         // Remove the HITL marker from display content
                                         displayContent = "";
-                                    } catch (e) {
-                                        console.warn("Failed to parse HITL data:", e);
+                                    } else {
+                                        console.warn("Failed to parse HITL data");
                                     }
                                 }
+
+                                // Still "loading" until real text arrives; the
+                                // activity trail shows progress in the meantime.
+                                const hasText = displayContent.trim().length > 0;
 
                                 // Update AI message with accumulated content and remove loading state
                                 setMessages((prev) =>
@@ -1065,8 +1383,9 @@ export function Sidebar({
                                             ? {
                                                   ...msg,
                                                   content: displayContent,
-                                                  isLoading: false,
+                                                  isLoading: !hasText && !hitlData,
                                                   hitlData,
+                                                  activity,
                                               }
                                             : msg,
                                     ),
@@ -1076,17 +1395,19 @@ export function Sidebar({
                             if (data.done) {
                                 // stream complete
                             }
-                        } catch (_parseError) {
-                            // Ignore JSON parse errors for incomplete chunks
                         }
                     }
                 }
             }
 
+            // Strip the live activity markers before persisting/analyzing — they
+            // are transient UI, not part of the assistant's message or the test.
+            const cleanedFinal = parseAgentActivity(accumulated).clean;
+
             // Persist the AI response
             const finalAiMessage: Message = {
                 id: aiMessageId,
-                content: accumulated,
+                content: cleanedFinal,
                 timestamp: new Date().toLocaleTimeString("en-US", {
                     hour: "2-digit",
                     minute: "2-digit",
@@ -1096,37 +1417,59 @@ export function Sidebar({
             persistMessage(finalAiMessage);
 
             // Only notify parent if this is a complete test file (not just a snippet or confirmation prompt)
-            // Must have BOTH import and test structure, and NOT be a HITL confirmation
+            // Must have BOTH import and test structure, and NOT be a HITL confirmation.
             const hasPlaywrightImport =
-                accumulated.includes("import { test") && accumulated.includes("@playwright/test");
+                cleanedFinal.includes("import { test") && cleanedFinal.includes("@playwright/test");
             const hasTestStructure =
-                accumulated.includes("test.describe(") ||
-                (accumulated.includes("describe(") && accumulated.includes("test("));
-            const hasMultipleTests = (accumulated.match(/\btest\s*\(/g) || []).length >= 2;
-            const isHITLConfirmation = accumulated.includes("<!--HITL:");
+                cleanedFinal.includes("test.describe(") ||
+                (cleanedFinal.includes("describe(") && cleanedFinal.includes("test("));
+            // A single well-formed test IS a complete file — requiring >= 2 meant
+            // single-test specs were never opened/saved. The import + describe
+            // structure already distinguishes a real file from a bare snippet.
+            const hasTest = (cleanedFinal.match(/\btest\s*\(/g) || []).length >= 1;
+            const isHITLConfirmation = cleanedFinal.includes("<!--HITL:");
 
             const isCompleteTestFile =
-                hasPlaywrightImport && hasTestStructure && hasMultipleTests && !isHITLConfirmation;
+                hasPlaywrightImport && hasTestStructure && hasTest && !isHITLConfirmation;
+
+            // When autoSaveTests is on, the agent's saveFile tool already wrote
+            // the spec to disk. Re-saving here would duplicate it (and possibly
+            // under a different derived name), so just refresh the file list and
+            // let the agent-saved file surface instead of saving again.
+            const agentAlreadySaved = Boolean(
+                (raikenConfig as { autonomy?: { autoSaveTests?: boolean } } | undefined)?.autonomy
+                    ?.autoSaveTests,
+            );
 
             if (isCompleteTestFile) {
-                onSendMessage?.(accumulated);
+                if (agentAlreadySaved) {
+                    void refetchTestFiles();
+                } else {
+                    onSendMessage?.(cleanedFinal);
+                }
             }
         } catch (error) {
-            console.error("Test generation failed:", error);
+            const stopped = error instanceof DOMException && error.name === "AbortError";
+            if (!stopped) console.error("Test generation failed:", error);
 
-            // Update AI message with error and remove loading state
+            // Update AI message with a stopped notice or the error.
             setMessages((prev) =>
                 prev.map((msg) =>
                     msg.id === aiMessageId
                         ? {
                               ...msg,
-                              content: `Error: ${error instanceof Error ? error.message : "Failed to generate test"}`,
+                              content: stopped
+                                  ? accumulated
+                                      ? `${accumulated}\n\n_Stopped._`
+                                      : "_Stopped._"
+                                  : `Error: ${error instanceof Error ? error.message : "Failed to generate test"}`,
                               isLoading: false,
                           }
                         : msg,
                 ),
             );
         } finally {
+            abortControllerRef.current = null;
             setIsGenerating(false);
         }
     };
@@ -1170,7 +1513,11 @@ export function Sidebar({
                             </div>
 
                             {/* Messages */}
-                            <div className="messages">
+                            <div
+                                className="messages"
+                                ref={messagesRef}
+                                onScroll={handleMessagesScroll}
+                            >
                                 {messages.map((msg) => (
                                     <div
                                         key={msg.id}
@@ -1178,10 +1525,28 @@ export function Sidebar({
                                     >
                                         <div className="message-bubble">
                                             {msg.isLoading ? (
-                                                <div className="typing-indicator">
-                                                    <span></span>
-                                                    <span></span>
-                                                    <span></span>
+                                                <div className="agent-activity">
+                                                    {msg.activity && msg.activity.length > 0 ? (
+                                                        <ul className="activity-trail">
+                                                            {msg.activity.map((label, i, arr) => (
+                                                                <li
+                                                                    key={`${msg.id}-act-${i}`}
+                                                                    className={
+                                                                        i === arr.length - 1
+                                                                            ? "activity-current"
+                                                                            : "activity-done"
+                                                                    }
+                                                                >
+                                                                    {label}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    ) : null}
+                                                    <div className="typing-indicator">
+                                                        <span></span>
+                                                        <span></span>
+                                                        <span></span>
+                                                    </div>
                                                 </div>
                                             ) : msg.hitlData?.kind === "save_approval" ? (
                                                 // Save-approval card: shows the actual test
@@ -1264,17 +1629,34 @@ export function Sidebar({
                                                             </label>
 
                                                             <div className="hitl-actions">
+                                                                {hitl.testCode && (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="hitl-btn ghost"
+                                                                        onClick={() =>
+                                                                            openHitlTestInEditor(
+                                                                                hitl,
+                                                                            )
+                                                                        }
+                                                                        disabled={isSaving}
+                                                                        title="Open the generated test in the editor to review it"
+                                                                    >
+                                                                        <span>Open in editor</span>
+                                                                    </button>
+                                                                )}
                                                                 {hitl.options.map((option) => {
-                                                                    const isPrimary =
-                                                                        option.id ===
-                                                                            "save_approve" ||
-                                                                        option.id ===
-                                                                            "save_approve_remember";
+                                                                    const variant =
+                                                                        option.id === "save_approve"
+                                                                            ? "primary"
+                                                                            : option.id ===
+                                                                                "save_reject"
+                                                                              ? "danger"
+                                                                              : "secondary";
                                                                     return (
                                                                         <button
                                                                             key={option.id}
                                                                             type="button"
-                                                                            className={`hitl-btn ${isPrimary ? "primary" : "secondary"}`}
+                                                                            className={`hitl-btn ${variant}`}
                                                                             onClick={() =>
                                                                                 handleSaveApproval(
                                                                                     msg.id,
@@ -1302,11 +1684,57 @@ export function Sidebar({
                                                             </div>
 
                                                             {decision?.status === "saved" && (
-                                                                <p className="hitl-resolved hitl-resolved-ok">
-                                                                    ✅ Saved to{" "}
-                                                                    <code>{decision.filePath}</code>
-                                                                    .
-                                                                </p>
+                                                                <div className="hitl-resolved hitl-resolved-ok">
+                                                                    <p>
+                                                                        ✅ Saved to{" "}
+                                                                        <code>
+                                                                            {decision.filePath}
+                                                                        </code>
+                                                                        .
+                                                                    </p>
+                                                                    {decision.filePath && (
+                                                                        <div className="hitl-actions">
+                                                                            <button
+                                                                                type="button"
+                                                                                className="hitl-btn secondary"
+                                                                                onClick={() =>
+                                                                                    onFileSelect?.(
+                                                                                        decision.filePath as string,
+                                                                                    )
+                                                                                }
+                                                                                disabled={Boolean(
+                                                                                    runningTestFor,
+                                                                                )}
+                                                                                title="Open the saved test in the editor"
+                                                                            >
+                                                                                <span>
+                                                                                    Open in editor
+                                                                                </span>
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="hitl-btn primary"
+                                                                                onClick={() =>
+                                                                                    handleRunSavedTest(
+                                                                                        msg.id,
+                                                                                        decision.filePath as string,
+                                                                                    )
+                                                                                }
+                                                                                disabled={Boolean(
+                                                                                    runningTestFor,
+                                                                                )}
+                                                                                title="Run this test now"
+                                                                            >
+                                                                                <span>
+                                                                                    {runningTestFor ===
+                                                                                    msg.id
+                                                                                        ? "Running…"
+                                                                                        : "Run test"}
+                                                                                </span>
+                                                                            </button>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
                                                             )}
                                                             {decision?.status === "rejected" && (
                                                                 <p className="hitl-resolved hitl-resolved-warn">
@@ -1397,6 +1825,29 @@ export function Sidebar({
                                 ))}
                             </div>
 
+                            {/* Scroll-to-bottom button — only shown when the
+                                user has scrolled up away from the latest message. */}
+                            {!isNearBottom && (
+                                <button
+                                    type="button"
+                                    className="scroll-to-bottom"
+                                    onClick={scrollMessagesToBottom}
+                                    aria-label="Scroll to latest message"
+                                    title="Scroll to latest message"
+                                >
+                                    <svg
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                        aria-hidden="true"
+                                        focusable="false"
+                                    >
+                                        <path d="M12 5v14M19 12l-7 7-7-7" />
+                                    </svg>
+                                </button>
+                            )}
+
                             {/* Input */}
                             <form
                                 ref={formRef}
@@ -1463,31 +1914,48 @@ export function Sidebar({
                                     </div>
                                 )}
 
-                                <input
+                                <textarea
                                     ref={inputRef}
-                                    type="text"
+                                    rows={1}
                                     className="chat-input"
                                     placeholder={
                                         isGenerating
-                                            ? "generating…"
+                                            ? "running… press Esc or Stop to interrupt"
                                             : "write a test, or / for commands"
                                     }
                                     value={inputValue}
                                     onChange={handleInputChange}
                                     onClick={handleInputClick}
                                     onKeyDown={handleKeyDown}
-                                    disabled={isGenerating}
                                 />
-                                <button type="submit" className="send-btn" disabled={isGenerating}>
-                                    <svg
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
+                                {isGenerating ? (
+                                    <button
+                                        type="button"
+                                        className="send-btn stop-btn"
+                                        onClick={() => {
+                                            if (handleStop()) {
+                                                echoSystemMessage("_Stopping the agent…_");
+                                            }
+                                        }}
+                                        title="Stop the running agent (Esc)"
+                                        aria-label="Stop the running agent"
                                     >
-                                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-                                    </svg>
-                                </button>
+                                        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                                            <rect x="6" y="6" width="12" height="12" rx="2" />
+                                        </svg>
+                                    </button>
+                                ) : (
+                                    <button type="submit" className="send-btn">
+                                        <svg
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                        >
+                                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                                        </svg>
+                                    </button>
+                                )}
                             </form>
                         </div>
                     )}
@@ -1532,12 +2000,42 @@ export function Sidebar({
         }
 
         .chat-panel {
+          position: relative;
           flex: 1;
           display: flex;
           flex-direction: column;
           min-width: 0;
           overflow: hidden;
           background: var(--bg);
+        }
+
+        .scroll-to-bottom {
+          position: absolute;
+          right: 0.875rem;
+          bottom: 4.75rem;
+          z-index: 5;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          padding: 0;
+          border-radius: 50%;
+          border: 1px solid var(--hair-strong);
+          background: var(--bg-elev);
+          color: var(--ink-dim);
+          cursor: pointer;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+          transition: background 0.12s, color 0.12s, border-color 0.12s;
+        }
+        .scroll-to-bottom:hover {
+          background: var(--bg-hover);
+          color: var(--ink);
+          border-color: var(--ink-mute);
+        }
+        .scroll-to-bottom svg {
+          width: 15px;
+          height: 15px;
         }
 
         .agent-header {
@@ -1626,7 +2124,7 @@ export function Sidebar({
         }
 
         .messages {
-          flex: 1;
+          flex: 1 1 0;
           display: flex;
           flex-direction: column;
           gap: 0.875rem;
@@ -1634,6 +2132,7 @@ export function Sidebar({
           overflow-x: hidden;
           padding: 0.875rem 0.875rem;
           min-width: 0;
+          min-height: 0;
         }
 
         .message {
@@ -1641,6 +2140,7 @@ export function Sidebar({
           flex-direction: column;
           align-items: flex-end;
           gap: 0.25rem;
+          width: 100%;
           min-width: 0;
           max-width: 100%;
         }
@@ -1660,7 +2160,8 @@ export function Sidebar({
           line-height: 1.55;
           color: var(--ink);
           word-wrap: break-word;
-          overflow-wrap: break-word;
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .message.assistant .message-bubble {
           background: var(--bg-bar);
@@ -1845,7 +2346,7 @@ export function Sidebar({
         .chat-input-container {
           position: relative;
           display: flex;
-          align-items: stretch;
+          align-items: flex-end;
           gap: 0;
           padding: 0;
           margin: 0 0.625rem 0.625rem;
@@ -1967,9 +2468,16 @@ export function Sidebar({
           color: var(--ink);
           font-family: var(--mono);
           font-size: 12.5px;
+          line-height: 1.5;
           min-width: 0;
           padding: 0.5rem 0.625rem;
           z-index: 1;
+          resize: none;
+          max-height: 160px;
+          overflow-y: auto;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .chat-input::placeholder {
           color: var(--ink-faint);
@@ -1984,6 +2492,7 @@ export function Sidebar({
           align-items: center;
           justify-content: center;
           width: 32px;
+          min-height: 35px;
           background: transparent;
           border: 0;
           border-left: 1px solid var(--hair);
@@ -2001,6 +2510,16 @@ export function Sidebar({
         .send-btn svg {
           width: 13px;
           height: 13px;
+        }
+        .stop-btn {
+          color: var(--danger, #e5484d);
+        }
+        .stop-btn:hover:not(:disabled) {
+          background: var(--danger-dim, rgba(229, 72, 77, 0.12));
+        }
+        .stop-btn svg {
+          width: 11px;
+          height: 11px;
         }
 
         .typing-indicator {
@@ -2087,11 +2606,13 @@ export function Sidebar({
         }
         .hitl-actions {
           display: flex;
+          flex-wrap: wrap;
           gap: 0.4375rem;
           margin-bottom: 0.4375rem;
         }
         .hitl-btn {
-          flex: 1;
+          flex: 1 1 6.5rem;
+          min-width: 6.5rem;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -2126,6 +2647,26 @@ export function Sidebar({
           background: var(--bg-hover);
           color: var(--ink);
           border-color: var(--ink-mute);
+        }
+        .hitl-btn.ghost {
+          background: transparent;
+          color: var(--ink-dim);
+          border-color: var(--line);
+        }
+        .hitl-btn.ghost:hover:not(:disabled) {
+          background: var(--bg-hover);
+          color: var(--ink);
+          border-color: var(--ink-mute);
+        }
+        .hitl-btn.danger {
+          background: transparent;
+          color: var(--danger, #e5484d);
+          border-color: var(--hair-strong);
+        }
+        .hitl-btn.danger:hover:not(:disabled) {
+          background: var(--danger, #e5484d);
+          color: var(--bg);
+          border-color: var(--danger, #e5484d);
         }
         .hitl-btn:disabled {
           opacity: 0.4;

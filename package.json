@@ -6,7 +6,10 @@
         "dev": "nx run-many -t serve -p cli dashboard",
         "lint": "biome lint .",
         "format": "biome format .",
-        "check": "biome check ."
+        "check": "biome check .",
+        "cli:build": "nx build cli --skip-nx-cache",
+        "cli:install": "npm install -g ./dist/apps/cli",
+        "cli:deploy": "npm run cli:build && npm run cli:install && raiken --version"
     },
     "private": true,
     "devDependencies": {

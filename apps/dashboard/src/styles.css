@@ -28,3 +28,37 @@ kbd,
 samp {
     font-family: var(--mono);
 }
+
+/* Live agent activity trail (what the agent is doing during a run) */
+.agent-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.activity-trail {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+}
+.activity-trail li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    opacity: 0.55;
+}
+.activity-trail li::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+}
+.activity-trail li.activity-current {
+    opacity: 1;
+    font-weight: 500;
+}

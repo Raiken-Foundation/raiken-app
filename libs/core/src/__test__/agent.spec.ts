@@ -133,8 +133,11 @@ export class Calculator {
             };
             const prompt = buildSystemPrompt(ctxWithBase, "Write a test");
             expect(prompt).toContain("use.baseURL` is configured: `http://localhost:3000`");
-            expect(prompt).toContain("page.goto('/login')");
             expect(prompt).toContain("URLs MUST be relative paths");
+            // The prompt must NOT hardcode an example route (e.g. /login) — it
+            // should instruct the model to use observed paths, never guess.
+            expect(prompt).not.toContain("/login");
+            expect(prompt).toContain("never guess or assume a route");
             expect(prompt).not.toContain("URLs MUST be absolute");
         });
 
@@ -155,8 +158,13 @@ export class Calculator {
                 totalTokens: 0,
             };
             const prompt = buildSystemPrompt(minimalContext, "Write a test");
-            // Rough char-based proxy: prompt scaffold should be < ~1.2k chars
-            expect(prompt.length).toBeLessThan(1200);
+            // Rough char-based proxy guarding against prompt bloat. The scaffold
+            // includes the grounding + behavior/timing + rules instruction
+            // blocks that steer the model to derive tests from the live DOM
+            // and observed page timing; current minimal-context prompt is
+            // ~2.76k chars. Budget set with headroom above that so the test
+            // fails only on genuine bloat, not incidental wording changes.
+            expect(prompt.length).toBeLessThan(3200);
         });
     });
 

@@ -13,6 +13,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { ChatAnthropic } from "@langchain/anthropic";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { ChatOpenAI } from "@langchain/openai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { LanguageModel } from "ai";
 import { AI_PROVIDER_IDS, type AIProviderId, raikenConfigSchema } from "../config/schema";
@@ -34,6 +40,8 @@ export interface ProviderDefinition {
     apiKeyUrl?: string;
     /** Format hint for the API key input field. */
     apiKeyPlaceholder?: string;
+    /** Curated models shown before/when live provider discovery is unavailable. */
+    recommendedModels: ModelInfo[];
 }
 
 export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
@@ -47,6 +55,28 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: true,
         apiKeyUrl: "https://openrouter.ai/keys",
         apiKeyPlaceholder: "sk-or-v1-…",
+        recommendedModels: [
+            {
+                id: "anthropic/claude-sonnet-4.5",
+                name: "Claude Sonnet 4.5",
+                description: "Default balanced coding model",
+                context: 200_000,
+                source: "recommended",
+            },
+            {
+                id: "openai/gpt-4o",
+                name: "GPT-4o",
+                description: "Fast general-purpose model",
+                context: 128_000,
+                source: "recommended",
+            },
+            {
+                id: "deepseek/deepseek-chat",
+                name: "DeepSeek Chat",
+                description: "Cost-efficient OpenAI-compatible chat model",
+                source: "recommended",
+            },
+        ],
     },
     openai: {
         id: "openai",
@@ -58,6 +88,28 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://platform.openai.com/api-keys",
         apiKeyPlaceholder: "sk-…",
+        recommendedModels: [
+            {
+                id: "gpt-4o",
+                name: "GPT-4o",
+                description: "Fast multimodal general-purpose model",
+                context: 128_000,
+                source: "recommended",
+            },
+            {
+                id: "gpt-4o-mini",
+                name: "GPT-4o mini",
+                description: "Lower-cost everyday model",
+                context: 128_000,
+                source: "recommended",
+            },
+            {
+                id: "o3-mini",
+                name: "o3 mini",
+                description: "Reasoning-oriented model",
+                source: "recommended",
+            },
+        ],
     },
     anthropic: {
         id: "anthropic",
@@ -69,6 +121,29 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://console.anthropic.com/settings/keys",
         apiKeyPlaceholder: "sk-ant-…",
+        recommendedModels: [
+            {
+                id: "claude-sonnet-4-5",
+                name: "Claude Sonnet 4.5",
+                description: "Balanced coding and reasoning",
+                context: 200_000,
+                source: "recommended",
+            },
+            {
+                id: "claude-opus-4-1",
+                name: "Claude Opus 4.1",
+                description: "Heavier reasoning model",
+                context: 200_000,
+                source: "recommended",
+            },
+            {
+                id: "claude-haiku-3-5",
+                name: "Claude Haiku 3.5",
+                description: "Fast lower-cost model",
+                context: 200_000,
+                source: "recommended",
+            },
+        ],
     },
     google: {
         id: "google",
@@ -80,6 +155,26 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://aistudio.google.com/app/apikey",
         apiKeyPlaceholder: "AIza…",
+        recommendedModels: [
+            {
+                id: "gemini-2.0-flash",
+                name: "Gemini 2.0 Flash",
+                description: "Fast Gemini model",
+                source: "recommended",
+            },
+            {
+                id: "gemini-2.5-pro",
+                name: "Gemini 2.5 Pro",
+                description: "Reasoning-oriented Gemini model",
+                source: "recommended",
+            },
+            {
+                id: "gemini-2.5-flash",
+                name: "Gemini 2.5 Flash",
+                description: "Fast 2.5-series Gemini model",
+                source: "recommended",
+            },
+        ],
     },
     groq: {
         id: "groq",
@@ -91,6 +186,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://console.groq.com/keys",
         apiKeyPlaceholder: "gsk_…",
+        recommendedModels: [
+            {
+                id: "llama-3.3-70b-versatile",
+                name: "Llama 3.3 70B Versatile",
+                description: "Default Groq model",
+                source: "recommended",
+            },
+            {
+                id: "llama-3.1-8b-instant",
+                name: "Llama 3.1 8B Instant",
+                description: "Very fast low-latency model",
+                source: "recommended",
+            },
+        ],
     },
     mistral: {
         id: "mistral",
@@ -102,17 +211,45 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://console.mistral.ai/api-keys",
         apiKeyPlaceholder: "…",
+        recommendedModels: [
+            {
+                id: "mistral-large-latest",
+                name: "Mistral Large",
+                description: "Default Mistral model",
+                source: "recommended",
+            },
+            {
+                id: "codestral-latest",
+                name: "Codestral",
+                description: "Code-focused Mistral model",
+                source: "recommended",
+            },
+        ],
     },
     deepseek: {
         id: "deepseek",
         label: "DeepSeek",
-        description: "DeepSeek V3, R1 reasoning models.",
+        description: "DeepSeek chat and reasoning models.",
         defaultBaseURL: "https://api.deepseek.com/v1",
         defaultModel: "deepseek-chat",
         envVars: ["DEEPSEEK_API_KEY"],
         publicCatalog: false,
         apiKeyUrl: "https://platform.deepseek.com/api_keys",
         apiKeyPlaceholder: "sk-…",
+        recommendedModels: [
+            {
+                id: "deepseek-chat",
+                name: "DeepSeek Chat",
+                description: "Default DeepSeek chat model",
+                source: "recommended",
+            },
+            {
+                id: "deepseek-reasoner",
+                name: "DeepSeek Reasoner",
+                description: "Reasoning model for harder planning/debugging",
+                source: "recommended",
+            },
+        ],
     },
     xai: {
         id: "xai",
@@ -124,6 +261,14 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://console.x.ai/",
         apiKeyPlaceholder: "xai-…",
+        recommendedModels: [
+            {
+                id: "grok-2-latest",
+                name: "Grok 2",
+                description: "Default xAI model",
+                source: "recommended",
+            },
+        ],
     },
     together: {
         id: "together",
@@ -135,6 +280,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://api.together.xyz/settings/api-keys",
         apiKeyPlaceholder: "…",
+        recommendedModels: [
+            {
+                id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                name: "Llama 3.3 70B Instruct Turbo",
+                description: "Default Together model",
+                source: "recommended",
+            },
+            {
+                id: "Qwen/Qwen2.5-Coder-32B-Instruct",
+                name: "Qwen 2.5 Coder 32B",
+                description: "Code-focused open model",
+                source: "recommended",
+            },
+        ],
     },
     perplexity: {
         id: "perplexity",
@@ -146,6 +305,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         publicCatalog: false,
         apiKeyUrl: "https://www.perplexity.ai/settings/api",
         apiKeyPlaceholder: "pplx-…",
+        recommendedModels: [
+            {
+                id: "sonar",
+                name: "Sonar",
+                description: "Default Perplexity model",
+                source: "recommended",
+            },
+            {
+                id: "sonar-pro",
+                name: "Sonar Pro",
+                description: "Higher-capability Perplexity model",
+                source: "recommended",
+            },
+        ],
     },
     ollama: {
         id: "ollama",
@@ -156,6 +329,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         envVars: [],
         publicCatalog: true,
         apiKeyPlaceholder: "(usually empty)",
+        recommendedModels: [
+            {
+                id: "llama3.2",
+                name: "Llama 3.2",
+                description: "Common local Ollama model",
+                source: "recommended",
+            },
+            {
+                id: "qwen2.5-coder",
+                name: "Qwen 2.5 Coder",
+                description: "Common local code model",
+                source: "recommended",
+            },
+        ],
     },
     custom: {
         id: "custom",
@@ -166,6 +353,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         envVars: ["AI_API_KEY"],
         publicCatalog: false,
         apiKeyPlaceholder: "…",
+        recommendedModels: [],
     },
 };
 
@@ -188,10 +376,10 @@ export function readApiKeyFromEnv(provider: AIProviderId): string | undefined {
     const def = AI_PROVIDERS[provider];
     for (const name of def.envVars) {
         const value = process.env[name];
-        if (value && value.trim()) return value;
+        if (value?.trim()) return value;
     }
-    const generic = process.env["AI_API_KEY"];
-    return generic && generic.trim() ? generic : undefined;
+    const { AI_API_KEY: generic } = process.env;
+    return generic?.trim() ? generic : undefined;
 }
 
 export interface ResolvedAIConfig {
@@ -220,8 +408,9 @@ export interface AIConfigOverride {
  * Resolve the AI configuration for `projectPath` by merging:
  *   1. Provider defaults (model, base URL, env-var lookup)
  *   2. raiken.config.json (if present)
- *   3. Environment variables (override config keys; never overrides model)
- *   4. Programmatic `override`
+ *   3. Environment variables — API KEY ONLY (via readApiKeyFromEnv); env does
+ *      not override provider, model, baseURL, temperature, or maxTokens
+ *   4. Programmatic `override` (wins over everything, including model)
  */
 export function resolveAIConfig(
     projectPath: string,
@@ -296,6 +485,8 @@ export interface ModelInfo {
     description?: string;
     /** Whether the provider tags this model as deprecated. */
     deprecated?: boolean;
+    /** Where this option came from. */
+    source?: "live" | "recommended";
 }
 
 interface ListModelsArgs {
@@ -318,24 +509,48 @@ export async function listProviderModels(
     const apiKey = args.apiKey?.trim() || readApiKeyFromEnv(provider.id);
 
     try {
+        let result: { models: ModelInfo[]; error?: string };
         switch (provider.id) {
             case "openrouter":
-                return await fetchOpenRouterModels(baseURL);
+                result = await fetchOpenRouterModels(baseURL);
+                break;
             case "anthropic":
-                return await fetchAnthropicModels(baseURL, apiKey);
+                result = await fetchAnthropicModels(baseURL, apiKey);
+                break;
             case "google":
-                return await fetchGoogleModels(baseURL, apiKey);
+                result = await fetchGoogleModels(baseURL, apiKey);
+                break;
             case "ollama":
-                return await fetchOllamaModels(baseURL);
+                result = await fetchOllamaModels(baseURL);
+                break;
             default:
-                return await fetchOpenAICompatibleModels(baseURL, apiKey);
+                result = await fetchOpenAICompatibleModels(baseURL, apiKey);
         }
+        return mergeRecommendedModels(provider, result);
     } catch (err) {
         return {
-            models: [],
+            models: provider.recommendedModels,
             error: err instanceof Error ? err.message : String(err),
         };
     }
+}
+
+function mergeRecommendedModels(
+    provider: ProviderDefinition,
+    result: { models: ModelInfo[]; error?: string },
+): { models: ModelInfo[]; error?: string } {
+    const seen = new Set<string>();
+    const models = [...result.models, ...provider.recommendedModels]
+        .filter((model) => {
+            if (seen.has(model.id)) return false;
+            seen.add(model.id);
+            return true;
+        })
+        .map((model) => ({
+            ...model,
+            source: model.source ?? "live",
+        }));
+    return { ...result, models };
 }
 
 async function fetchOpenRouterModels(baseURL: string) {
@@ -354,6 +569,7 @@ async function fetchOpenRouterModels(baseURL: string) {
         name: m.name || m.id,
         context: m.context_length,
         description: m.description,
+        source: "live",
     }));
     return { models };
 }
@@ -378,6 +594,7 @@ async function fetchOpenAICompatibleModels(baseURL: string, apiKey?: string) {
         id: m.id,
         name: m.id,
         description: m.owned_by ? `owned by ${m.owned_by}` : undefined,
+        source: "live",
     }));
     return { models };
 }
@@ -404,6 +621,7 @@ async function fetchAnthropicModels(baseURL: string, apiKey?: string) {
     const models: ModelInfo[] = (json.data ?? []).map((m) => ({
         id: m.id,
         name: m.display_name || m.id,
+        source: "live",
     }));
     return { models };
 }
@@ -438,6 +656,7 @@ async function fetchGoogleModels(baseURL: string, apiKey?: string) {
                 name: m.displayName || id,
                 context: m.inputTokenLimit,
                 description: m.description,
+                source: "live" as const,
             };
         });
     return { models };
@@ -457,6 +676,7 @@ async function fetchOllamaModels(baseURL: string) {
         id: m.name,
         name: m.name,
         description: m.size ? `${(m.size / 1e9).toFixed(1)} GB` : undefined,
+        source: "live",
     }));
     return { models };
 }
@@ -466,14 +686,43 @@ async function fetchOllamaModels(baseURL: string) {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns an AI SDK chat-capable model handle for the resolved config.
+ * Build an AI SDK `LanguageModel` for the given provider/model.
  *
- * For now we route every provider through the OpenRouter/OpenAI-compatible
- * client by pointing it at the provider's own base URL. This works because
- * every provider in {@link AI_PROVIDERS} (with the exception of Anthropic and
- * Google) speaks the OpenAI chat completions wire format. For Anthropic and
- * Google we still recommend OpenRouter; users wanting native SDK clients can
- * select "openrouter" and pick the same model.
+ * Anthropic and Google do not speak the OpenAI chat-completions wire format, so
+ * they get their native AI SDK providers. Everything else (OpenAI, OpenRouter,
+ * Ollama, custom, and any OpenAI-compatible endpoint) is routed through the
+ * OpenRouter client pointed at the provider's own base URL.
+ */
+export function buildAISdkModel(input: {
+    provider: AIProviderId;
+    apiKey?: string;
+    baseURL?: string;
+    model: string;
+}): LanguageModel {
+    const apiKey = input.apiKey ?? "";
+    switch (input.provider) {
+        case "anthropic": {
+            const client = createAnthropic({ apiKey });
+            return client(input.model) as unknown as LanguageModel;
+        }
+        case "google": {
+            const client = createGoogleGenerativeAI({ apiKey });
+            return client(input.model) as unknown as LanguageModel;
+        }
+        default: {
+            const client = createOpenRouter({
+                apiKey,
+                ...(input.baseURL ? { baseURL: input.baseURL } : {}),
+            });
+            return client.chat(input.model) as unknown as LanguageModel;
+        }
+    }
+}
+
+/**
+ * Returns an AI SDK chat-capable model handle for the resolved config.
+ * Native providers (Anthropic, Google) use their own SDK; OpenAI-compatible
+ * providers route through the OpenRouter client at the configured base URL.
  */
 export interface AIClient {
     provider: AIProviderId;
@@ -481,12 +730,78 @@ export interface AIClient {
 }
 
 export function createAIClient(resolved: ResolvedAIConfig): AIClient {
-    const client = createOpenRouter({
-        apiKey: resolved.apiKey ?? "",
-        baseURL: resolved.baseURL,
-    });
     return {
         provider: resolved.provider,
-        model: client.chat(resolved.model) as unknown as LanguageModel,
+        model: buildAISdkModel({
+            provider: resolved.provider,
+            apiKey: resolved.apiKey,
+            baseURL: resolved.baseURL,
+            model: resolved.model,
+        }),
     };
+}
+
+/**
+ * Per-request timeout (ms) for every LLM call. Without this LangChain has no
+ * request timeout, so a provider that accepts the connection but never responds
+ * hangs the whole agent run forever (the dashboard just "loads infinitely").
+ */
+const LLM_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Bounded retries. LangChain's default is 6 with exponential backoff, which on a
+ * rate-limited/5xx provider can stall a single call for minutes. Two keeps us
+ * resilient to transient blips without looking hung.
+ */
+const LLM_MAX_RETRIES = 2;
+
+/**
+ * Build a LangChain chat model for the resolved config. The LangGraph agent
+ * calls `.invoke()` / `.withStructuredOutput()` on this, so native Anthropic
+ * and Google models work end-to-end (not only the OpenAI-compatible ones).
+ *
+ * Every model is given a hard request timeout and a bounded retry count so a
+ * slow/unresponsive provider fails fast (surfaced as an error/pause) instead of
+ * hanging the run indefinitely.
+ */
+export function createLangChainModel(resolved: ResolvedAIConfig): BaseChatModel {
+    switch (resolved.provider) {
+        case "anthropic":
+            return new ChatAnthropic({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                temperature: resolved.temperature,
+                maxTokens: resolved.maxTokens,
+                maxRetries: LLM_MAX_RETRIES,
+                clientOptions: { timeout: LLM_REQUEST_TIMEOUT_MS },
+            });
+        case "google":
+            return new ChatGoogleGenerativeAI({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                temperature: resolved.temperature,
+                maxOutputTokens: resolved.maxTokens,
+                maxRetries: LLM_MAX_RETRIES,
+            });
+        case "openai":
+            return new ChatOpenAI({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                temperature: resolved.temperature,
+                maxTokens: resolved.maxTokens,
+                timeout: LLM_REQUEST_TIMEOUT_MS,
+                maxRetries: LLM_MAX_RETRIES,
+            });
+        default:
+            // openrouter, ollama, custom, and any OpenAI-compatible endpoint.
+            return new ChatOpenAI({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                temperature: resolved.temperature,
+                maxTokens: resolved.maxTokens,
+                timeout: LLM_REQUEST_TIMEOUT_MS,
+                maxRetries: LLM_MAX_RETRIES,
+                configuration: { baseURL: resolved.baseURL },
+            });
+    }
 }

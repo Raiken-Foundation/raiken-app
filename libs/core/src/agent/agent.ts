@@ -1,16 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ChatOpenAI } from "@langchain/openai";
-import { streamText } from "ai";
 import { fullAstToSearchableText } from "../analysis/ast-parser";
 import { EntryPointDetector } from "../analysis/entry-points";
 import { ProjectContext } from "../analysis/project-context";
-import { type DOMContext, formatDOMContext } from "../browser/dom-capture";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
 import type { ParsedFile } from "../types";
-import { createAIClient, getProvider, resolveAIConfig } from "./ai-providers";
+import { createLangChainModel, getProvider, resolveAIConfig } from "./ai-providers";
 import { createAgentGraph } from "./graph/graph";
 import type { AgentIntent } from "./graph/utils";
 import { buildSummary } from "./graph/utils";
@@ -20,8 +17,6 @@ import {
     buildExplorationPrompt,
     buildSystemPrompt,
     type ContextData,
-    type MemoryContext,
-    NO_CONTEXT_HELP_MESSAGE,
 } from "./prompts";
 
 /**
@@ -34,18 +29,6 @@ export interface AgentConfig {
     baseURL?: string;
     maxTokens?: number;
     temperature?: number;
-}
-
-/**
- * Options for test generation
- */
-export interface GenerateTestOptions {
-    userPrompt: string;
-    projectPath: string;
-    fileContext?: string[]; // Optional specific files to focus on
-    conversationHistory?: Array<{ role: string; content: string }>; // Conversation context
-    domContext?: DOMContext; // Live DOM context for accurate selectors
-    config?: AgentConfig;
 }
 
 /**
@@ -112,18 +95,10 @@ export async function gatherContext(
         const projectContext = ProjectContext.getInstance(projectPath);
 
         // Validate cache and refresh if needed
-        const validation = await projectContext.ensureFreshContext(prompt, changedFiles);
-        if (!validation.isValid) {
-            console.log(`🔄 Cache refreshed: ${validation.reason}`);
-        }
+        await projectContext.ensureFreshContext(prompt, changedFiles);
 
         // Use cached context for file discovery
         intelligentFiles = projectContext.findRelevantFiles(prompt, 10);
-        if (intelligentFiles.length > 0) {
-            console.log(
-                `⚡ ProjectContext suggests: ${intelligentFiles.slice(0, 3).join(", ")}${intelligentFiles.length > 3 ? "..." : ""}`,
-            );
-        }
     } catch (err) {
         console.warn("ProjectContext search failed:", err);
     }
@@ -196,7 +171,6 @@ export async function gatherContext(
 
                         if (totalTokens + estimatedTokens > TOKEN_LIMIT) break;
 
-                        console.log(`📄 Using raw file content (no AST): ${filePath}`);
                         files.push({
                             path: filePath,
                             functions: [],
@@ -208,15 +182,13 @@ export async function gatherContext(
 
                         totalTokens += estimatedTokens;
                     } catch (err) {
-                        console.warn(`⚠️  Failed to read file: ${filePath}`, err);
+                        console.warn(`Failed to read file: ${filePath}`, err);
                     }
                 } else {
-                    console.warn(`⚠️  File not found: ${filePath}`);
+                    console.warn(`File not found: ${filePath}`);
                 }
             }
         }
-    } else {
-        console.log(`📁 No fileContext provided, will use semantic search only`);
     }
 
     // Use semantic search to find relevant files
@@ -267,9 +239,6 @@ export async function gatherContext(
 
                         if (totalTokens + estimatedTokens > TOKEN_LIMIT) break;
 
-                        console.log(
-                            `📄 Using raw file content from search (no AST): ${result.filePath}`,
-                        );
                         files.push({
                             path: result.filePath,
                             functions: [],
@@ -305,12 +274,6 @@ export async function gatherContext(
     try {
         const { loadSiteKnowledge } = await import("../site-discovery");
         siteKnowledge = await loadSiteKnowledge(projectPath);
-
-        if (siteKnowledge) {
-            console.log(
-                `🗺️  Site knowledge loaded: ${siteKnowledge.pagesDiscovered} pages discovered`,
-            );
-        }
     } catch (error) {
         // Site discovery not available or failed - continue without it
         console.debug("Site knowledge not available:", error);
@@ -324,9 +287,6 @@ export async function gatherContext(
     try {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
         baseURL = await readPlaywrightBaseURL(projectPath);
-        if (baseURL) {
-            console.log(`🌐 Playwright baseURL detected: ${baseURL}`);
-        }
     } catch (error) {
         console.debug("readPlaywrightBaseURL failed:", error);
     }
@@ -339,171 +299,6 @@ export async function gatherContext(
         siteKnowledge,
         baseURL,
     };
-}
-
-/**
- * Generate test using AI streaming
- * Note: This should be called via the orchestrator for proper routing
- */
-export async function* generateTest(
-    options: GenerateTestOptions,
-): AsyncGenerator<string, void, unknown> {
-    try {
-        const {
-            userPrompt,
-            projectPath,
-            fileContext,
-            conversationHistory,
-            domContext,
-            config: configOverride,
-        } = options;
-
-        // Load configuration
-        const config = loadAgentConfig(projectPath, configOverride);
-
-        // Validate API key
-        if (!config.apiKey) {
-            const provider = getProvider(config.provider);
-            const envHint = provider.envVars[0] ?? "AI_API_KEY";
-            console.error(`❌ ${envHint} not found`);
-            yield "⚠️ **API Key Required**\n\n";
-            yield `The ${envHint} environment variable is not configured for **${provider.label}**.\n\n`;
-            yield "To fix this:\n";
-            if (provider.apiKeyUrl) {
-                yield `1. Get an API key from [${provider.label}](${provider.apiKeyUrl})\n`;
-            } else {
-                yield `1. Get an API key from your ${provider.label} dashboard\n`;
-            }
-            yield "2. Add it via Settings → AI Provider, or create a `.env` file with:\n";
-            yield `   \`\`\`\n   ${envHint}=...\n   \`\`\`\n`;
-            yield "3. Restart Raiken\n";
-            return;
-        }
-
-        console.log("✅ API Key found, length:", config.apiKey.length);
-
-        // Gather context for test generation
-        console.log("🔍 Gathering context from code graph...");
-        const context = await gatherContext(userPrompt, projectPath, fileContext);
-
-        // If we have no files AND no DOM context, provide helpful guidance
-        if (context.files.length === 0 && !domContext) {
-            console.log("💡 No file context or DOM context available");
-            yield NO_CONTEXT_HELP_MESSAGE;
-            return;
-        }
-
-        // Log what context we have
-        if (context.files.length > 0) {
-            console.log(
-                `✓ Found ${context.files.length} relevant files (${context.totalTokens} tokens)`,
-            );
-        } else {
-            console.log(
-                "📄 No file context, but DOM context available - proceeding with DOM-only test generation",
-            );
-        }
-
-        // Get memory context for prompt enrichment
-        let memoryContext: MemoryContext | undefined;
-        try {
-            const memory = AgentMemory.getInstance(projectPath);
-            if (memory.isInitialized()) {
-                memoryContext = memory.buildPromptContext();
-                if (
-                    memoryContext.successfulSelectors.length > 0 ||
-                    memoryContext.selectorStrategy
-                ) {
-                    console.log(
-                        `🧠 Memory context: ${memoryContext.successfulSelectors.length} known selectors, strategy=${memoryContext.selectorStrategy || "default"}`,
-                    );
-                }
-            }
-        } catch (err) {
-            console.warn("Failed to load memory context:", err);
-        }
-
-        // Build system prompt with memory context
-        let systemPrompt = buildSystemPrompt(context, userPrompt, "golden-v1", memoryContext);
-
-        // Add DOM context if available
-        if (domContext) {
-            console.log(
-                `🌐 Adding DOM context: ${domContext.interactiveElements.length} elements, ${domContext.formFields.length} form fields`,
-            );
-            const domContextStr = formatDOMContext(domContext);
-            systemPrompt = `${systemPrompt}
-
-${domContextStr}`;
-        }
-
-        // Add conversation history context if available
-        if (conversationHistory && conversationHistory.length > 0) {
-            const historyText = conversationHistory
-                .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
-                .join("\n\n");
-
-            systemPrompt = `[CONVERSATION HISTORY]
-${historyText}
-
----
-
-${systemPrompt}`;
-
-            console.log("💬 Added conversation history:", conversationHistory.length, "messages");
-        }
-
-        console.log("📝 System prompt length:", systemPrompt.length, "characters");
-
-        const resolved = resolveAIConfig(projectPath, config);
-        const aiClient = createAIClient(resolved);
-
-        console.log(`🌐 Using ${resolved.provider} → ${resolved.model}`);
-
-        // Stream the response
-        console.log("🤖 Generating test with AI...");
-
-        try {
-            const result = await streamText({
-                model: aiClient.model,
-                prompt: systemPrompt,
-                temperature: config.temperature,
-            });
-
-            console.log("📡 Streaming chunks to client...");
-            let chunkCount = 0;
-
-            // Stream chunks as they arrive
-            for await (const chunk of result.textStream) {
-                chunkCount++;
-                if (chunkCount <= 3 || chunkCount % 10 === 0) {
-                    console.log(`📦 Chunk ${chunkCount}: ${chunk.slice(0, 50)}...`);
-                }
-                yield chunk;
-            }
-
-            console.log(`✓ Test generation complete (${chunkCount} chunks)`);
-        } catch (error) {
-            const errorMsg = `Error: AI generation failed: ${error instanceof Error ? error.message : String(error)}`;
-            console.error("❌", errorMsg);
-            yield errorMsg;
-        }
-    } catch (error) {
-        const errorMsg = `Error: ${error instanceof Error ? error.message : String(error)}`;
-        console.error("❌ Unexpected error in generateTest:", errorMsg);
-        yield errorMsg;
-    }
-}
-
-/**
- * Generate test and return complete result (non-streaming)
- */
-export async function generateTestComplete(options: GenerateTestOptions): Promise<string> {
-    let fullText = "";
-    for await (const chunk of generateTest(options)) {
-        fullText += chunk;
-    }
-    return fullText;
 }
 
 // ============================================================================
@@ -539,15 +334,112 @@ function loadAutonomySettings(projectPath: string): AutonomySettings {
 }
 
 /**
+ * A tiny push-based async channel that bridges synchronous node callbacks
+ * (onToolCall / onProgress / streamed tokens) into the async generator that
+ * `runToolAgent` yields. Without this, everything the graph produces would only
+ * surface *after* `graph.invoke` resolved, so the dashboard sat frozen through
+ * the entire navigate -> explore -> generate cycle. Items pushed here are
+ * yielded live while the graph is still running.
+ */
+class StreamChannel<T> {
+    private queue: T[] = [];
+    private resolvers: Array<(r: IteratorResult<T>) => void> = [];
+    private closed = false;
+
+    push(value: T): void {
+        if (this.closed) return;
+        const resolve = this.resolvers.shift();
+        if (resolve) resolve({ value, done: false });
+        else this.queue.push(value);
+    }
+
+    close(): void {
+        if (this.closed) return;
+        this.closed = true;
+        for (const resolve of this.resolvers.splice(0))
+            resolve({ value: undefined as never, done: true });
+    }
+
+    next(): Promise<IteratorResult<T>> {
+        const queued = this.queue.shift();
+        if (queued !== undefined) return Promise.resolve({ value: queued, done: false });
+        if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
+        return new Promise((resolve) => this.resolvers.push(resolve));
+    }
+}
+
+/** Distinct kinds of item flowing through the stream channel. */
+type StreamItem = { kind: "text"; text: string } | { kind: "event"; text: string };
+
+/**
+ * Build the inline activity marker the dashboard/CLI strip out of the visible
+ * message and render as a live "what the agent is doing" trail. Mirrors the
+ * existing `<!--HITL:...-->` convention. The payload is base64-encoded so test
+ * code or labels containing `-->` can never truncate the marker.
+ */
+export function buildAgentEventMarker(
+    kind: "tool" | "progress",
+    label: string,
+    detail?: string,
+): string {
+    const json = JSON.stringify({ kind, label, detail: detail ?? null });
+    const encoded = Buffer.from(json, "utf-8").toString("base64");
+    return `<!--EVENT:${encoded}-->`;
+}
+
+/**
+ * Build the `<!--HITL:...-->` marker. The JSON payload is base64-encoded so a
+ * generated test's own content (which can legitimately contain `-->`, e.g. in
+ * an HTML fixture or comment) can never truncate the marker and lose the
+ * save-approval card. Consumers decode base64 first and fall back to raw JSON
+ * for markers persisted before this change.
+ */
+export function buildHITLMarker(payload: unknown): string {
+    const encoded = Buffer.from(JSON.stringify(payload), "utf-8").toString("base64");
+    return `<!--HITL:${encoded}-->`;
+}
+
+/** Human-readable label for a tool call, for the activity trail. */
+function humanizeToolCall(toolName: string): string | null {
+    const labels: Record<string, string> = {
+        startBrowser: "Starting browser",
+        navigateTo: "Navigating",
+        captureDOM: "Reading page",
+        captureCurrentPage: "Reading page",
+        clickElement: "Clicking",
+        fillInput: "Filling input",
+        pressKey: "Pressing key",
+        selectOption: "Selecting option",
+        toggleCheckbox: "Toggling checkbox",
+        discoverLinks: "Discovering links",
+        saveAuthState: "Saving login state",
+        saveFile: "Saving test",
+        runTest: "Running test",
+    };
+    return labels[toolName] ?? null;
+}
+
+/**
  * Options for the tool-based agent
  */
 export interface ToolAgentOptions {
     userPrompt: string;
     projectPath: string;
     conversationHistory?: Array<{ role: string; content: string }>;
+    /**
+     * Path of the test file the user currently has open/highlighted. When set,
+     * a newly generated test is written to this file (overwriting it) instead
+     * of creating a brand-new file.
+     */
+    targetTestFile?: string;
+    /** Files the user referenced (e.g. @mentions) to focus context gathering on. */
+    fileContext?: string[];
     config?: AgentConfig;
-    /** Callback when a tool requires HITL confirmation */
-    onHITL?: (action: HITLAction) => Promise<boolean>;
+    /**
+     * Abort signal to cancel the run (e.g. the SSE client disconnected).
+     * LangGraph checks it at step boundaries and stops the graph.
+     */
+    signal?: AbortSignal;
     /** Callback for tool call events (for UI feedback) */
     onToolCall?: (toolName: string, args: unknown) => void;
     /** Callback for tool result events */
@@ -573,7 +465,10 @@ export async function* runToolAgent(
         userPrompt,
         projectPath,
         conversationHistory,
+        targetTestFile,
+        fileContext,
         config: configOverride,
+        signal,
         onToolCall,
         onToolResult,
     } = options;
@@ -585,7 +480,7 @@ export async function* runToolAgent(
     if (!config.apiKey) {
         const provider = getProvider(config.provider);
         const envHint = provider.envVars[0] ?? "AI_API_KEY";
-        yield "⚠️ **API Key Required**\n\n";
+        yield "**API Key Required**\n\n";
         yield `Set ${envHint} in your environment, or configure **${provider.label}** in Settings → AI Provider.\n\n`;
         return {
             text: "",
@@ -594,16 +489,17 @@ export async function* runToolAgent(
         };
     }
 
-    console.log("🤖 Running LangGraph agent...");
-    console.log(
-        "📝 User prompt:",
-        userPrompt.slice(0, 100) + (userPrompt.length > 100 ? "..." : ""),
-    );
-
     const toolCallsLog: Array<{ name: string; args: unknown; result: unknown }> = [];
     const hitlActions: HITLAction[] = [];
     const respondMessages: string[] = [];
     let fullText = "";
+
+    // Bridges live node activity (tool calls, phase progress, streamed test
+    // tokens) into this generator so the UI updates *during* the run.
+    const channel = new StreamChannel<StreamItem>();
+    // Set to true once the generate step streams its tokens live, so we don't
+    // re-yield the whole draft afterward and duplicate it.
+    let draftStreamed = false;
 
     try {
         const autonomy = loadAutonomySettings(projectPath);
@@ -615,6 +511,10 @@ export async function* runToolAgent(
 
         const callTool = async (toolName: string, args: unknown): Promise<ToolResult> => {
             onToolCall?.(toolName, args);
+            const activityLabel = humanizeToolCall(toolName);
+            if (activityLabel) {
+                channel.push({ kind: "event", text: buildAgentEventMarker("tool", activityLabel) });
+            }
             let result: ToolResult;
             if (toolMap[toolName]?.execute) {
                 result = await toolMap[toolName]!.execute!(args);
@@ -633,22 +533,14 @@ export async function* runToolAgent(
         };
 
         const resolved = resolveAIConfig(projectPath, config);
-        const model = new ChatOpenAI({
-            apiKey: resolved.apiKey,
-            model: resolved.model,
-            temperature: resolved.temperature,
-            maxTokens: resolved.maxTokens,
-            configuration: {
-                baseURL: resolved.baseURL,
-            },
-        });
+        const model = createLangChainModel(resolved);
 
         const getMemoryContext = () => {
             try {
-                const memory = AgentMemory.getInstance(projectPath);
-                if (memory.isInitialized()) {
-                    return memory.buildPromptContext();
-                }
+                // buildPromptContext lazily initializes memory, so learned
+                // selectors/failures reach the prompt regardless of whether the
+                // CLI server called initialize() first.
+                return AgentMemory.getInstance(projectPath).buildPromptContext();
             } catch {
                 // Memory load failed
             }
@@ -709,9 +601,23 @@ export async function* runToolAgent(
             }
         };
 
+        // Emit a phase-progress marker (e.g. "Exploring 3/8 pages") live.
+        const onProgress = (label: string, detail?: string) => {
+            channel.push({ kind: "event", text: buildAgentEventMarker("progress", label, detail) });
+        };
+        // Stream a token of the test being generated live.
+        const onToken = (token: string) => {
+            if (!token) return;
+            draftStreamed = true;
+            channel.push({ kind: "text", text: token });
+        };
+
         const graph = createAgentGraph({
             callTool,
             projectPath,
+            onProgress,
+            onToken,
+            signal,
             model,
             gatherContext,
             buildSystemPrompt,
@@ -729,27 +635,73 @@ export async function* runToolAgent(
             conversationHistory: conversationHistory || [],
         };
 
-        // Load paused exploration state and pass it to the graph.
-        // The classifyGoal node (LLM) decides whether to restore or discard it.
+        if (fileContext && fileContext.length > 0) {
+            seedState["fileContext"] = fileContext;
+        }
+
+        // When the user has a test file open, target it so a newly generated
+        // test overwrites that file instead of creating a new one.
+        if (targetTestFile) {
+            seedState["targetTestFile"] = targetTestFile;
+        }
+
+        // Load remembered exploration state and pass it to the graph as
+        // "pending" fields. The classifyGoal node (LLM) decides whether to
+        // restore it into the active session. We always load the last
+        // exploration snapshot (not just on pause) so the agent remembers the
+        // pages it has seen across turns and avoids re-crawling them.
         try {
             const memory = AgentMemory.getInstance(projectPath);
             const pauseReason = memory.getPreference("paused_reason") || null;
 
             if (pauseReason) {
-                const explorationState = memory.consumeExplorationState();
                 memory.setPreference("paused_reason", "");
-
                 seedState["pauseReason"] = pauseReason;
-                if (explorationState) {
-                    seedState["pendingPagesVisited"] = explorationState.pagesVisited;
-                    seedState["pendingCurrentUrl"] = explorationState.currentUrl;
-                }
+            }
+
+            // Only carry forward a *recent* exploration. A crawl from an old,
+            // unrelated task shouldn't be dragged into a fresh session — that's
+            // what made the agent "remember" the wrong pages.
+            const EXPLORATION_MAX_AGE_MS = 30 * 60 * 1000;
+            const lastExploration = memory.getLastExploration();
+            if (lastExploration && memory.getLastExplorationAgeMs() < EXPLORATION_MAX_AGE_MS) {
+                seedState["pendingPagesVisited"] = lastExploration.pagesVisited;
+                seedState["pendingPageSummaries"] = lastExploration.pageSummaries;
+                seedState["pendingCurrentUrl"] = lastExploration.currentUrl;
             }
         } catch {
             // Non-critical
         }
 
-        const finalState = await graph.invoke(seedState);
+        // Kick off the graph but DON'T await it yet — drain the live channel
+        // (tool/progress events + streamed tokens) as the graph runs, then
+        // await the final state once the channel closes.
+        // Cap graph iterations so a pathological navigate↔interruption loop
+        // can't spin forever; LangGraph throws a GraphRecursionError when hit,
+        // which the catch below surfaces as a clear message instead of hanging.
+        const invokeConfig = {
+            recursionLimit: 60,
+            ...(signal ? { signal } : {}),
+        };
+        const invokePromise = graph.invoke(seedState, invokeConfig).then(
+            (result) => {
+                channel.close();
+                return result;
+            },
+            (error) => {
+                channel.close();
+                throw error;
+            },
+        );
+
+        while (true) {
+            const { value, done } = await channel.next();
+            if (done) break;
+            yield value.text;
+            if (value.kind === "text") fullText += value.text;
+        }
+
+        const finalState = await invokePromise;
 
         for (const msg of respondMessages) {
             yield msg + "\n";
@@ -802,7 +754,7 @@ export async function* runToolAgent(
                     ],
                     context: {},
                 };
-                const marker = `<!--HITL:${JSON.stringify(hitlPayload)}-->`;
+                const marker = buildHITLMarker(hitlPayload);
                 yield marker;
                 fullText += marker;
             }
@@ -816,11 +768,18 @@ export async function* runToolAgent(
                 const reason = finalState.interruption?.type || "user_input";
                 memory.setPreference("paused_reason", reason);
 
-                // Persist exploration progress so we can resume where we left off
-                memory.setExplorationState({
-                    pagesVisited: finalState.pagesVisited || [],
-                    currentUrl: finalState.currentUrl || null,
-                });
+                // Persist exploration progress so we can resume where we left off.
+                // Only overwrite when this pause actually has pages (e.g. an
+                // auth/consent blocker mid-crawl) — a save-approval or other
+                // non-exploration pause with an empty pagesVisited would
+                // otherwise wipe out a previously remembered crawl.
+                if (finalState.pagesVisited && finalState.pagesVisited.length > 0) {
+                    memory.setLastExploration({
+                        pagesVisited: finalState.pagesVisited,
+                        currentUrl: finalState.currentUrl || null,
+                        pageSummaries: finalState.pageSummaries || [],
+                    });
+                }
             } catch {
                 // Non-critical
             }
@@ -833,8 +792,10 @@ export async function* runToolAgent(
         }
 
         // If a test was generated and saved, stream the test content so the
-        // dashboard can detect it as a complete test file and open it in the editor.
-        if (finalState.testDraft && finalState.savedTestPath) {
+        // dashboard can detect it as a complete test file and open it in the
+        // editor. Skip when the draft was already streamed token-by-token during
+        // the generate step (otherwise it would appear twice).
+        if (finalState.testDraft && finalState.savedTestPath && !draftStreamed) {
             yield finalState.testDraft;
             fullText += finalState.testDraft;
         }
@@ -844,6 +805,25 @@ export async function* runToolAgent(
             summary,
             pagesVisited: finalState.pagesVisited || [],
         });
+
+        // Task completed (not paused). Persist exploration only when there is
+        // something to remember, and clear the goal + pause markers so the NEXT
+        // (potentially unrelated) task starts clean instead of inheriting this
+        // one's goal/URL.
+        try {
+            const memory = AgentMemory.getInstance(projectPath);
+            if (finalState.pagesVisited && finalState.pagesVisited.length > 0) {
+                memory.setLastExploration({
+                    pagesVisited: finalState.pagesVisited,
+                    currentUrl: finalState.currentUrl || null,
+                    pageSummaries: finalState.pageSummaries || [],
+                });
+            }
+            memory.clearGoalState();
+            memory.setPreference("paused_reason", "");
+        } catch {
+            // Non-critical
+        }
 
         if (!finalState.testDraft) {
             yield `\n\n**Summary:**\n${summary}`;
@@ -856,22 +836,26 @@ export async function* runToolAgent(
             }
         }
 
-        console.log(
-            `✅ Agent complete: ${toolCallsLog.length} tool calls, ${hitlActions.length} HITL actions`,
-        );
-
         return {
             text: fullText,
             toolCalls: toolCallsLog,
             hitlActions,
         };
     } catch (error) {
-        const errorMsg = `Error: ${error instanceof Error ? error.message : String(error)}`;
-        console.error("❌ Tool agent error:", errorMsg);
-        yield `\n\n⚠️ ${errorMsg}`;
+        const rawMsg = error instanceof Error ? error.message : String(error);
+        // LangGraph throws a GraphRecursionError when the recursion limit is
+        // hit — turn that into an actionable message rather than a stack trace.
+        const isRecursion =
+            (error instanceof Error && error.name === "GraphRecursionError") ||
+            /recursion limit/i.test(rawMsg);
+        const errorMsg = isRecursion
+            ? "The agent hit its step limit without finishing (likely a navigation/interruption loop). Try a more specific instruction, or a concrete URL to test."
+            : `Error: ${rawMsg}`;
+        console.error("Tool agent error:", rawMsg);
+        yield `\n\n${errorMsg}`;
 
         return {
-            text: fullText + `\n\n⚠️ ${errorMsg}`,
+            text: fullText + `\n\n${errorMsg}`,
             toolCalls: toolCallsLog,
             hitlActions,
         };

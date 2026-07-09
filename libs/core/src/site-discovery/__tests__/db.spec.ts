@@ -87,6 +87,7 @@ describe("SiteKnowledgeDB", () => {
                 normalizedUrl: "http://localhost:3000",
                 title: "Test Page",
                 snapshotJson: null,
+                formsJson: null,
                 parentUrl: null,
                 navigationAction: null,
                 depth: 0,
@@ -99,6 +100,59 @@ describe("SiteKnowledgeDB", () => {
             const retrieved = siteDb.getPage("http://localhost:3000");
             expect(retrieved?.title).toBe("Test Page");
             expect(retrieved?.depth).toBe(0);
+        });
+
+        it("updatePageContent refreshes title/snapshot/forms and bumps visit metadata", () => {
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000",
+                normalizedUrl: "http://localhost:3000",
+                title: "Pre-login",
+                snapshotJson: '{"pre":"login"}',
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+
+            siteDb.updatePageContent("http://localhost:3000", {
+                title: "Post-login dashboard",
+                snapshotJson: '{"post":"login"}',
+                formsJson: '{"fields":[]}',
+            });
+
+            const retrieved = siteDb.getPage("http://localhost:3000");
+            expect(retrieved?.title).toBe("Post-login dashboard");
+            expect(retrieved?.snapshotJson).toBe('{"post":"login"}');
+            expect(retrieved?.formsJson).toBe('{"fields":[]}');
+            expect(retrieved?.visitCount).toBe(2);
+        });
+
+        it("updatePageVisit only bumps metadata, leaving content untouched", () => {
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000",
+                normalizedUrl: "http://localhost:3000",
+                title: "Original",
+                snapshotJson: '{"original":true}',
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+
+            siteDb.updatePageVisit("http://localhost:3000");
+
+            const retrieved = siteDb.getPage("http://localhost:3000");
+            expect(retrieved?.title).toBe("Original");
+            expect(retrieved?.snapshotJson).toBe('{"original":true}');
+            expect(retrieved?.visitCount).toBe(2);
         });
     });
 
@@ -306,6 +360,7 @@ describe("SiteKnowledgeDB", () => {
                 normalizedUrl: "http://localhost:3000",
                 title: "Test Page",
                 snapshotJson: null,
+                formsJson: null,
                 parentUrl: null,
                 navigationAction: null,
                 depth: 0,

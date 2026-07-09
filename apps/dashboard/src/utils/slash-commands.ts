@@ -33,6 +33,8 @@ export interface SlashContext {
     clearChat: () => void;
     /** Append a synthetic message to the local chat transcript. */
     echoSystem: (markdown: string) => void;
+    /** Interrupt the running agent. Returns whether anything was stopped. */
+    stop: () => boolean;
     /** tRPC utilities for firing mutations from handlers. */
     trpcUtils: TRPCUtils;
 }
@@ -311,6 +313,19 @@ const COMMANDS: SlashCommand[] = [
         },
     },
     // ---- Utility ----------------------------------------------------------
+    {
+        name: "stop",
+        aliases: ["abort", "cancel"],
+        description: "Interrupt the agent that is currently running.",
+        group: "utility",
+        execute(_args, ctx) {
+            const stopped = ctx.stop();
+            return {
+                message: stopped ? "Stopped the running agent." : "Nothing is running.",
+                silent: true,
+            };
+        },
+    },
     {
         name: "clear",
         description: "Clear the chat transcript.",

@@ -6,7 +6,13 @@
  */
 
 import type { Browser, BrowserContext, Page } from "playwright";
-import type { AccessibilityNode, DOMContext, FormField, InteractiveElement } from "./dom-capture";
+import type {
+    AccessibilityNode,
+    DOMContext,
+    FormField,
+    InteractiveElement,
+    PagePerformance,
+} from "./dom-capture";
 
 export class BrowserActionError extends Error {
     readonly action: string;
@@ -66,6 +72,28 @@ export function classifySelector(selector: string): SelectorKind {
 }
 
 /**
+ * Produce a single stable selector for a form field from its observed
+ * attributes, in decreasing order of robustness. Every branch is grounded in
+ * an attribute that was actually read off the element — nothing is fabricated.
+ * Values are escaped so quotes/backslashes in attributes don't break the CSS.
+ */
+export function buildFieldSelector(attrs: {
+    testId?: string;
+    id?: string;
+    name?: string;
+    label?: string;
+    placeholder?: string;
+}): string {
+    const esc = (s: string) => s.replace(/(["\\])/g, "\\$1");
+    if (attrs.testId) return `getByTestId('${attrs.testId.replace(/'/g, "\\'")}')`;
+    if (attrs.id) return `#${attrs.id.replace(/(["\\#.:[\]])/g, "\\$1")}`;
+    if (attrs.name) return `[name="${esc(attrs.name)}"]`;
+    if (attrs.label) return `getByLabel('${attrs.label.replace(/'/g, "\\'")}')`;
+    if (attrs.placeholder) return `[placeholder="${esc(attrs.placeholder)}"]`;
+    return "input";
+}
+
+/**
  * Options for starting the browser session
  */
 export interface BrowserSessionOptions {
@@ -91,6 +119,30 @@ export interface PageCapture {
 }
 
 /**
+ * Raw element descriptor returned by the single in-page extraction pass.
+ * All attribute reads and the visibility/accessible-name computation happen
+ * inside one `frame.evaluate()` call (one round-trip per frame) instead of
+ * dozens of sequential Playwright calls per element. Selectors are built in
+ * Node from these fields by {@link BrowserSession.buildSelectors}.
+ */
+interface RawElement {
+    tag: string;
+    role: string;
+    name: string;
+    text: string;
+    type: string | null;
+    testId: string | null;
+    htmlId: string | null;
+    htmlName: string | null;
+    href: string | null;
+    placeholder: string | null;
+    ariaLabel: string | null;
+    required: boolean;
+    /** True for text-entry controls (input/textarea/select/contenteditable). */
+    isFormField: boolean;
+}
+
+/**
  * BrowserSession singleton - manages a persistent browser instance
  */
 export class BrowserSession {
@@ -102,6 +154,15 @@ export class BrowserSession {
     private projectPath: string;
     private options: BrowserSessionOptions;
     private selectorMemory: SelectorMemory | null = null;
+    // In-flight launch guard: two concurrent tool calls (e.g. capture + navigate)
+    // must not both call chromium.launch() and orphan a Chromium process.
+    private startPromise: Promise<void> | null = null;
+
+    // Behavior signals from the most recent navigation, folded into the next
+    // page capture so the test generator can calibrate waits to reality.
+    private lastNavigationMs?: number;
+    private lastNetworkIdle?: boolean;
+    private lastSlowResponses?: PagePerformance["slowResponses"];
 
     private constructor(projectPath: string, options: BrowserSessionOptions = {}) {
         this.projectPath = projectPath;
@@ -123,8 +184,23 @@ export class BrowserSession {
         if (!BrowserSession.instance) {
             BrowserSession.instance = new BrowserSession(projectPath);
         } else if (BrowserSession.instance.projectPath !== projectPath) {
-            BrowserSession.instance.projectPath = projectPath;
-            BrowserSession.instance.selectorMemory = null;
+            const prev = BrowserSession.instance;
+            prev.projectPath = projectPath;
+            prev.selectorMemory = null;
+            // A different project must not reuse the previous project's browser
+            // context (cookies, auth storage state, open tabs). Detach the old
+            // browser immediately so isActive() reports false right away, and
+            // close it in the background. The next start() launches fresh with
+            // the new project's auth-state path.
+            if (prev.browser) {
+                const toClose = prev.browser;
+                prev.browser = null;
+                prev.context = null;
+                prev.page = null;
+                void toClose.close().catch(() => {
+                    /* already gone */
+                });
+            }
         }
         return BrowserSession.instance;
     }
@@ -159,39 +235,75 @@ export class BrowserSession {
      */
     async start(options?: BrowserSessionOptions): Promise<void> {
         if (this.isActive()) {
-            console.log("🌐 Browser session already active");
             return;
         }
 
+        // Serialize concurrent starts: if a launch is already underway, await it
+        // instead of launching a second browser.
+        if (this.startPromise) {
+            return this.startPromise;
+        }
+
+        this.startPromise = this.doStart(options);
+        try {
+            await this.startPromise;
+        } finally {
+            this.startPromise = null;
+        }
+    }
+
+    private async doStart(options?: BrowserSessionOptions): Promise<void> {
+        // We're not active but a browser handle may still be around (e.g. the
+        // page crashed or was closed out from under us). Tear it down first so
+        // we don't leak an orphaned Chromium process on relaunch.
+        if (this.browser) {
+            await this.close();
+        }
+
         const opts = { ...this.options, ...options };
+
+        // Global override: the interactive CLI (`raiken chat`) sets
+        // RAIKEN_HEADLESS=0 so the tester can watch the agent drive the page,
+        // regardless of what individual tool calls request. "1"/"true" forces
+        // headless (e.g. CI). Unset → honor the per-call option.
+        const envHeadless = process.env["RAIKEN_HEADLESS"]?.trim().toLowerCase();
+        if (envHeadless === "0" || envHeadless === "false") {
+            opts.headless = false;
+        } else if (envHeadless === "1" || envHeadless === "true") {
+            opts.headless = true;
+        }
+
         this.options = opts;
-        console.log(`🌐 Starting browser session (headless: ${opts.headless})`);
 
         const { chromium } = await import("playwright");
         this.browser = await chromium.launch({ headless: opts.headless });
 
-        const contextOptions: Parameters<Browser["newContext"]>[0] = {
-            viewport: { width: opts.viewportWidth!, height: opts.viewportHeight! },
-        };
+        try {
+            const contextOptions: Parameters<Browser["newContext"]>[0] = {
+                viewport: { width: opts.viewportWidth!, height: opts.viewportHeight! },
+            };
 
-        // Load auth state if provided
-        if (opts.storageStatePath) {
-            try {
-                const fs = await import("node:fs");
-                if (fs.existsSync(opts.storageStatePath)) {
-                    contextOptions.storageState = opts.storageStatePath;
-                    console.log(`🔐 Loaded auth state from ${opts.storageStatePath}`);
+            // Load auth state if provided
+            if (opts.storageStatePath) {
+                try {
+                    const fs = await import("node:fs");
+                    if (fs.existsSync(opts.storageStatePath)) {
+                        contextOptions.storageState = opts.storageStatePath;
+                    }
+                } catch (error) {
+                    console.warn("Failed to load auth state:", error);
                 }
-            } catch (error) {
-                console.warn("⚠️ Failed to load auth state:", error);
             }
+
+            this.context = await this.browser.newContext(contextOptions);
+            this.page = await this.context.newPage();
+            this.page.setDefaultTimeout(opts.timeout!);
+        } catch (error) {
+            // Context/page creation failed — don't leave a launched-but-unusable
+            // Chromium process (and inconsistent handles) behind.
+            await this.close();
+            throw error;
         }
-
-        this.context = await this.browser.newContext(contextOptions);
-        this.page = await this.context.newPage();
-        this.page.setDefaultTimeout(opts.timeout!);
-
-        console.log("✅ Browser session started");
     }
 
     /**
@@ -199,11 +311,29 @@ export class BrowserSession {
      */
     async close(): Promise<void> {
         if (this.browser) {
-            await this.browser.close();
+            try {
+                await this.browser.close();
+            } catch (error) {
+                // Browser may already be gone; still clear our handles so the
+                // session can be cleanly restarted.
+                console.warn(
+                    "Error closing browser (continuing):",
+                    error instanceof Error ? error.message : error,
+                );
+            }
             this.browser = null;
             this.context = null;
             this.page = null;
-            console.log("🔒 Browser session closed");
+        }
+    }
+
+    /**
+     * Close the active singleton browser (if any) without discarding the
+     * instance. Intended for process shutdown so Chromium doesn't linger.
+     */
+    static async closeInstance(): Promise<void> {
+        if (BrowserSession.instance) {
+            await BrowserSession.instance.close();
         }
     }
 
@@ -231,34 +361,45 @@ export class BrowserSession {
      */
     async navigate(url: string): Promise<DOMContext> {
         if (!this.isActive()) {
-            console.log("🔄 Browser session lost, restarting...");
             await this.close();
             await this.start(this.options);
         }
 
-        console.log(`🔗 Navigating to: ${url}`);
+        const navStart = Date.now();
+        let stopCollecting = this.collectResponseTimings();
 
         try {
-            await this.page!.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout: this.options.timeout,
-            });
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            if (msg.includes("has been closed") || msg.includes("Target closed")) {
-                console.log("🔄 Page closed during navigation, restarting session...");
-                await this.close();
-                await this.start(this.options);
+            try {
                 await this.page!.goto(url, {
                     waitUntil: "domcontentloaded",
                     timeout: this.options.timeout,
                 });
-            } else {
-                throw new BrowserActionError("navigate", url, error);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                if (msg.includes("has been closed") || msg.includes("Target closed")) {
+                    stopCollecting();
+                    await this.close();
+                    await this.start(this.options);
+                    stopCollecting = this.collectResponseTimings();
+                    await this.page!.goto(url, {
+                        waitUntil: "domcontentloaded",
+                        timeout: this.options.timeout,
+                    });
+                } else {
+                    throw new BrowserActionError("navigate", url, error);
+                }
             }
-        }
 
-        await this.waitForIdle();
+            this.lastNetworkIdle = await this.waitForIdle();
+            // SPAs mount after domcontentloaded/networkidle; wait for real
+            // interactive content to exist so we don't capture a blank shell.
+            await this.waitForContent();
+            this.lastNavigationMs = Date.now() - navStart;
+        } finally {
+            // Always detach the response listener, even if waitForIdle/goto throws,
+            // otherwise every failed navigation leaks a "response" handler.
+            this.lastSlowResponses = stopCollecting();
+        }
 
         return this.captureCurrentPage();
     }
@@ -268,15 +409,19 @@ export class BrowserSession {
      */
     async reload(): Promise<DOMContext> {
         this.ensureActive();
-        console.log("🔄 Reloading page");
 
+        const navStart = Date.now();
+        const stopCollecting = this.collectResponseTimings();
         try {
             await this.page!.reload({ waitUntil: "domcontentloaded" });
+            this.lastNetworkIdle = await this.waitForIdle();
+            await this.waitForContent();
+            this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
             throw new BrowserActionError("reload", this.page!.url(), error);
+        } finally {
+            this.lastSlowResponses = stopCollecting();
         }
-
-        await this.waitForIdle();
 
         return this.captureCurrentPage();
     }
@@ -286,18 +431,24 @@ export class BrowserSession {
      */
     async goBack(): Promise<DOMContext | null> {
         this.ensureActive();
-        console.log("⬅️ Going back");
 
+        const navStart = Date.now();
+        const stopCollecting = this.collectResponseTimings();
         try {
             const response = await this.page!.goBack({ waitUntil: "domcontentloaded" });
             if (!response) {
                 return null;
             }
+            this.lastNetworkIdle = await this.waitForIdle();
+            // SPAs re-render client-side after a history nav — wait for real
+            // content so the capture isn't of a transient/empty frame.
+            await this.waitForContent();
+            this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
             throw new BrowserActionError("goBack", this.page!.url(), error);
+        } finally {
+            this.lastSlowResponses = stopCollecting();
         }
-
-        await this.waitForIdle();
         return this.captureCurrentPage();
     }
 
@@ -306,18 +457,22 @@ export class BrowserSession {
      */
     async goForward(): Promise<DOMContext | null> {
         this.ensureActive();
-        console.log("➡️ Going forward");
 
+        const navStart = Date.now();
+        const stopCollecting = this.collectResponseTimings();
         try {
             const response = await this.page!.goForward({ waitUntil: "domcontentloaded" });
             if (!response) {
                 return null;
             }
+            this.lastNetworkIdle = await this.waitForIdle();
+            await this.waitForContent();
+            this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
             throw new BrowserActionError("goForward", this.page!.url(), error);
+        } finally {
+            this.lastSlowResponses = stopCollecting();
         }
-
-        await this.waitForIdle();
         return this.captureCurrentPage();
     }
 
@@ -334,19 +489,51 @@ export class BrowserSession {
     // =========================================================================
 
     /**
+     * Timeout for a single interaction. Derived from the session timeout but
+     * capped so a slow SPA doesn't make every click/fill wait the full page
+     * timeout, while still being generous enough that actions don't fail on
+     * apps that legitimately take a few seconds to become interactive. (The old
+     * hardcoded 5s failed too eagerly on slower apps.)
+     */
+    private actionTimeoutMs(): number {
+        const base = this.options.timeout ?? 30000;
+        return Math.min(Math.max(base, 5000), 15000);
+    }
+
+    /**
      * Click an element using DOM-derived selectors.
      * Each selector was built from a real attribute observed on the page.
      */
     async click(selectors: string | string[]): Promise<void> {
-        await this.runWithSelectors("click", selectors, (loc) => loc.click({ timeout: 5000 }));
+        await this.runWithSelectors("click", selectors, (loc) =>
+            loc.click({ timeout: this.actionTimeoutMs() }),
+        );
     }
 
     /**
      * Fill an input using DOM-derived selectors.
      * Each selector was built from a real attribute observed on the page.
+     * Falls back to `selectOption` when the target is a native <select> (which
+     * cannot be `fill()`-ed) so combobox/dropdown auth fields don't silently
+     * fail.
      */
     async fill(selectors: string | string[], value: string): Promise<void> {
-        await this.runWithSelectors("fill", selectors, (loc) => loc.fill(value, { timeout: 5000 }));
+        await this.runWithSelectors("fill", selectors, async (loc) => {
+            try {
+                await loc.fill(value, { timeout: this.actionTimeoutMs() });
+            } catch (error) {
+                const tag = await loc
+                    .evaluate((el) => (el as HTMLElement).tagName?.toLowerCase())
+                    .catch(() => "");
+                if (tag === "select") {
+                    await loc
+                        .selectOption({ label: value })
+                        .catch(async () => await loc.selectOption(value));
+                    return;
+                }
+                throw error;
+            }
+        });
     }
 
     /**
@@ -354,8 +541,11 @@ export class BrowserSession {
      * Supports: role=button[name="X"], text=X, label=X, placeholder=X,
      * getByRole('...'), getByText('...'), and plain CSS.
      */
-    private resolveLocator(selector: string): import("playwright").Locator {
-        const page = this.page!;
+    private resolveLocator(
+        selector: string,
+        scope: import("playwright").Page | import("playwright").Frame = this.page!,
+    ): import("playwright").Locator {
+        const page = scope;
 
         // Extract the inner string from patterns like getByX('...' ) or getByX("...")
         // Handles escaped quotes inside the string (e.g. O\'Brien)
@@ -377,14 +567,16 @@ export class BrowserSession {
             return null;
         };
 
-        // getByRole('button', { name: 'Submit' })
+        // getByRole('button', { name: 'Submit' }) — handles single or double
+        // quotes for the role via the same quote-aware extractor used below.
         if (selector.startsWith("getByRole(")) {
-            const roleEnd = selector.indexOf("'", 11);
-            if (roleEnd === -1) return page.locator(selector);
-            const role = selector.slice(11, roleEnd);
+            const role = extractArg(selector, "getByRole(");
+            if (role === null) return page.locator(selector);
             const nameMatch = selector.match(/name:\s*['"](.+?)['"]\s*\}/);
             if (nameMatch) {
-                return page.getByRole(role as any, { name: nameMatch[1].replace(/\\'/g, "'") });
+                return page.getByRole(role as any, {
+                    name: nameMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"'),
+                });
             }
             return page.getByRole(role as any);
         }
@@ -421,8 +613,61 @@ export class BrowserSession {
     }
 
     /**
-     * Run an action against one or more selectors via resolveLocator,
-     * returning on the first success.
+     * All scopes an interaction may target: the main frame first, then every
+     * child frame. Capture is frame-aware, so interaction must be too —
+     * otherwise a field/button inside an iframe is shown to the agent but can
+     * never be filled or clicked (a silent "it didn't enter the input").
+     */
+    private interactionScopes(): Array<import("playwright").Page | import("playwright").Frame> {
+        const main = this.page!.mainFrame();
+        const children = this.page!.frames().filter((f) => f !== main);
+        return [this.page!, ...children];
+    }
+
+    /**
+     * Run an action against a locator, retrying with `.first()` when the
+     * selector matched multiple elements (Playwright strict-mode violation).
+     * Ambiguous accessible names (two "Email" textboxes, a shared
+     * `input[type=password]`) would otherwise abort the whole fill.
+     */
+    private async runActionWithStrictRetry(
+        locator: import("playwright").Locator,
+        fn: (locator: import("playwright").Locator) => Promise<void>,
+    ): Promise<void> {
+        try {
+            await fn(locator);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            if (/strict mode violation|resolved to \d+ element/i.test(msg)) {
+                // The selector matched multiple elements. Instead of blindly
+                // acting on `.first()` (which is often the wrong, hidden, or
+                // template element and produces a false "success"), act on the
+                // first *visible* match. Only if none are visible do we fall
+                // back to the first.
+                const count = await locator.count().catch(() => 0);
+                for (let i = 0; i < count; i++) {
+                    const candidate = locator.nth(i);
+                    const visible = await candidate.isVisible().catch(() => false);
+                    if (visible) {
+                        console.warn(
+                            `  ⚠ selector matched ${count} elements; acting on first visible (index ${i})`,
+                        );
+                        await fn(candidate);
+                        return;
+                    }
+                }
+                await fn(locator.first());
+                return;
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Run an action against one or more selectors, trying each selector across
+     * every frame and returning on the first success. A cheap `count()` guard
+     * skips scopes where the selector doesn't exist so we don't pay a full
+     * action timeout per empty frame.
      */
     private async runWithSelectors(
         action: string,
@@ -435,21 +680,54 @@ export class BrowserSession {
         console.log(
             `  ${action}: ${element}${list.length > 1 ? ` (+${list.length - 1} alternatives)` : ""}`,
         );
+        const scopes = this.interactionScopes();
         let lastError: unknown;
         const failed: string[] = [];
         for (const sel of list) {
-            try {
-                const locator = this.resolveLocator(sel);
-                await fn(locator);
-                for (const bad of failed) {
-                    this.reportSelectorFailure(element, bad);
+            let attemptedSomewhere = false;
+            for (const scope of scopes) {
+                let locator: import("playwright").Locator;
+                try {
+                    locator = this.resolveLocator(sel, scope);
+                } catch (error) {
+                    lastError = error;
+                    continue;
                 }
-                this.reportSelectorSuccess(element, sel);
-                return;
-            } catch (error) {
-                lastError = error;
-                failed.push(sel);
+                // Skip frames that don't contain this selector (fast, no wait).
+                let count = 0;
+                try {
+                    count = await locator.count();
+                } catch {
+                    count = 0;
+                }
+                if (count === 0) continue;
+                attemptedSomewhere = true;
+                try {
+                    await this.runActionWithStrictRetry(locator, fn);
+                    for (const bad of failed) {
+                        this.reportSelectorFailure(element, bad);
+                    }
+                    this.reportSelectorSuccess(element, sel);
+                    return;
+                } catch (error) {
+                    lastError = error;
+                }
             }
+            // If the selector matched nothing in any frame, still attempt it once
+            // on the main frame so its natural wait/error surfaces meaningfully.
+            if (!attemptedSomewhere) {
+                try {
+                    await this.runActionWithStrictRetry(this.resolveLocator(sel, this.page!), fn);
+                    for (const bad of failed) {
+                        this.reportSelectorFailure(element, bad);
+                    }
+                    this.reportSelectorSuccess(element, sel);
+                    return;
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+            failed.push(sel);
         }
         for (const bad of failed) {
             this.reportSelectorFailure(element, bad);
@@ -462,7 +740,7 @@ export class BrowserSession {
      */
     async type(selectors: string | string[], text: string): Promise<void> {
         await this.runWithSelectors("type", selectors, (loc) =>
-            loc.pressSequentially(text, { timeout: 5000 }),
+            loc.pressSequentially(text, { timeout: this.actionTimeoutMs() }),
         );
     }
 
@@ -471,7 +749,6 @@ export class BrowserSession {
      */
     async press(key: string): Promise<void> {
         this.ensureActive();
-        console.log(`⌨️ Pressing key: ${key}`);
         try {
             await this.page!.keyboard.press(key);
         } catch (error) {
@@ -484,7 +761,7 @@ export class BrowserSession {
      */
     async selectOption(selectors: string | string[], value: string): Promise<void> {
         await this.runWithSelectors("selectOption", selectors, async (loc) => {
-            await loc.selectOption(value, { timeout: 5000 });
+            await loc.selectOption(value, { timeout: this.actionTimeoutMs() });
         });
     }
 
@@ -492,28 +769,36 @@ export class BrowserSession {
      * Check a checkbox
      */
     async check(selectors: string | string[]): Promise<void> {
-        await this.runWithSelectors("check", selectors, (loc) => loc.check({ timeout: 5000 }));
+        await this.runWithSelectors("check", selectors, (loc) =>
+            loc.check({ timeout: this.actionTimeoutMs() }),
+        );
     }
 
     /**
      * Uncheck a checkbox
      */
     async uncheck(selectors: string | string[]): Promise<void> {
-        await this.runWithSelectors("uncheck", selectors, (loc) => loc.uncheck({ timeout: 5000 }));
+        await this.runWithSelectors("uncheck", selectors, (loc) =>
+            loc.uncheck({ timeout: this.actionTimeoutMs() }),
+        );
     }
 
     /**
      * Hover over an element
      */
     async hover(selectors: string | string[]): Promise<void> {
-        await this.runWithSelectors("hover", selectors, (loc) => loc.hover({ timeout: 5000 }));
+        await this.runWithSelectors("hover", selectors, (loc) =>
+            loc.hover({ timeout: this.actionTimeoutMs() }),
+        );
     }
 
     /**
      * Focus an element
      */
     async focus(selectors: string | string[]): Promise<void> {
-        await this.runWithSelectors("focus", selectors, (loc) => loc.focus({ timeout: 5000 }));
+        await this.runWithSelectors("focus", selectors, (loc) =>
+            loc.focus({ timeout: this.actionTimeoutMs() }),
+        );
     }
 
     // =========================================================================
@@ -527,24 +812,55 @@ export class BrowserSession {
         this.ensureActive();
         const list = Array.isArray(selectors) ? selectors : [selectors];
         const element = list[0] || "unknown";
-        console.log(`⏳ Waiting for: ${element}`);
         const effectiveTimeout = timeout || this.options.timeout;
+        const scopes = this.interactionScopes();
         let lastError: unknown;
         const failed: string[] = [];
+
+        // Fast path: if a selector is already present in some frame, wait on it there.
         for (const sel of list) {
-            try {
-                const locator = this.resolveLocator(sel);
-                await locator.waitFor({ state: "visible", timeout: effectiveTimeout });
-                for (const bad of failed) {
-                    this.reportSelectorFailure(element, bad);
+            for (const scope of scopes) {
+                let locator: import("playwright").Locator;
+                try {
+                    locator = this.resolveLocator(sel, scope);
+                } catch (error) {
+                    lastError = error;
+                    continue;
                 }
-                this.reportSelectorSuccess(element, sel);
-                return;
-            } catch (error) {
-                lastError = error;
-                failed.push(sel);
+                let count = 0;
+                try {
+                    count = await locator.count();
+                } catch {
+                    count = 0;
+                }
+                if (count === 0) continue;
+                try {
+                    await locator.first().waitFor({ state: "visible", timeout: effectiveTimeout });
+                    for (const bad of failed) {
+                        this.reportSelectorFailure(element, bad);
+                    }
+                    this.reportSelectorSuccess(element, sel);
+                    return;
+                } catch (error) {
+                    lastError = error;
+                }
             }
+            failed.push(sel);
         }
+
+        // Nothing present yet: fall back to waiting on the main frame for the
+        // first selector so "wait until it appears" still holds.
+        try {
+            await this.resolveLocator(list[0], this.page!).first().waitFor({
+                state: "visible",
+                timeout: effectiveTimeout,
+            });
+            this.reportSelectorSuccess(element, list[0]);
+            return;
+        } catch (error) {
+            lastError = error;
+        }
+
         for (const bad of failed) {
             this.reportSelectorFailure(element, bad);
         }
@@ -556,7 +872,6 @@ export class BrowserSession {
      */
     async waitForNavigation(timeout?: number): Promise<void> {
         this.ensureActive();
-        console.log("⏳ Waiting for navigation");
         try {
             await this.page!.waitForNavigation({ timeout: timeout || this.options.timeout });
         } catch (error) {
@@ -569,15 +884,28 @@ export class BrowserSession {
      */
     async waitForNetworkIdle(timeout?: number): Promise<void> {
         this.ensureActive();
-        console.log("⏳ Waiting for network idle");
         await this.page!.waitForLoadState("networkidle", { timeout: timeout || 5000 });
+    }
+
+    /**
+     * Best-effort settle after an interaction: wait for the network to go idle
+     * and for real interactive content to render before the caller captures the
+     * page. Both steps fail open (client frameworks mount asynchronously, so we
+     * must never block a capture on them). Use this before `captureCurrentPage`
+     * on the post-action path so the agent reasons against the settled DOM
+     * rather than a transient/empty shell.
+     */
+    async settle(): Promise<boolean> {
+        if (!this.isActive()) return false;
+        const idle = await this.waitForIdle();
+        await this.waitForContent();
+        return idle;
     }
 
     /**
      * Wait for a fixed amount of time
      */
     async wait(ms: number): Promise<void> {
-        console.log(`⏳ Waiting ${ms}ms`);
         await new Promise((resolve) => setTimeout(resolve, ms));
     }
 
@@ -603,7 +931,6 @@ export class BrowserSession {
                     const pages = this.context.pages();
                     if (pages.length > 0) {
                         this.page = pages[pages.length - 1];
-                        console.log("🔄 Recovered page reference from context");
                         return await this.capturePageInternal();
                     }
                 }
@@ -620,12 +947,13 @@ export class BrowserSession {
         const url = this.page!.url();
         const title = await this.page!.title();
 
-        console.log(`📸 Capturing page: ${title}`);
-
-        const interactiveElements = await this.collectInteractiveElements();
-        const formFields = await this.collectFormFields();
+        // One extraction pass across all frames, then derive both views in Node.
+        const raw = await this.collectRawElements();
+        const interactiveElements = this.toInteractiveElements(raw);
+        const formFields = this.toFormFields(raw);
 
         const accessibilityTree = this.buildSimpleTree(title, interactiveElements, formFields);
+        const performance = await this.capturePagePerformance();
 
         return {
             url,
@@ -634,6 +962,7 @@ export class BrowserSession {
             interactiveElements,
             formFields,
             timestamp: Date.now(),
+            performance,
         };
     }
 
@@ -642,7 +971,6 @@ export class BrowserSession {
      */
     async screenshot(): Promise<Buffer> {
         this.ensureActive();
-        console.log("📷 Taking screenshot");
         return this.page!.screenshot();
     }
 
@@ -662,7 +990,6 @@ export class BrowserSession {
         }>
     > {
         this.ensureActive();
-        console.log("🔍 Discovering links on page");
 
         const currentUrl = new URL(this.page!.url());
         const currentOrigin = currentUrl.origin;
@@ -772,7 +1099,6 @@ export class BrowserSession {
             }
         }
 
-        console.log(`✓ Found ${discovered.length} unique links`);
         return discovered;
     }
 
@@ -785,7 +1111,6 @@ export class BrowserSession {
      */
     async saveAuthState(path: string): Promise<void> {
         this.ensureActive();
-        console.log(`💾 Saving auth state to: ${path}`);
         await this.context!.storageState({ path });
     }
 
@@ -796,8 +1121,6 @@ export class BrowserSession {
         if (!this.browser) {
             throw new Error("Browser not started. Call start() first.");
         }
-
-        console.log(`📂 Loading auth state from: ${path}`);
 
         // Close existing context and create new one with auth state
         if (this.context) {
@@ -877,7 +1200,21 @@ export class BrowserSession {
         const seen = new Set<string>();
         const result: InteractiveElement[] = [];
         for (const el of elements) {
-            const key = `${el.role || ""}|${el.name || ""}|${el.testId || ""}|${el.tagName}|${el.type || ""}`;
+            // Include every distinguishing attribute so genuinely different
+            // controls (two "Submit" buttons, two "Settings" links pointing at
+            // different hrefs) survive. Only collapse elements that are truly
+            // indistinguishable — a selector could not tell those apart anyway.
+            const key = [
+                el.role || "",
+                el.name || "",
+                el.testId || "",
+                el.tagName,
+                el.type || "",
+                el.href || "",
+                el.htmlId || "",
+                el.htmlName || "",
+                el.placeholder || "",
+            ].join("|");
             if (seen.has(key)) continue;
             seen.add(key);
             result.push(el);
@@ -897,232 +1234,220 @@ export class BrowserSession {
         return result;
     }
 
-    private async collectInteractiveElements(): Promise<InteractiveElement[]> {
-        const collected: InteractiveElement[] = [];
+    /**
+     * Extract every interesting element across all frames in a single
+     * `evaluate` per frame. This replaces the old per-element Playwright calls
+     * (hundreds of round-trips → slow/flaky/truncated captures) with one DOM
+     * walk per frame that also computes proper accessible names (aria-label,
+     * aria-labelledby, associated/ wrapping <label>) and picks up non-semantic
+     * clickables (onclick / tabindex) that the old scan missed entirely.
+     */
+    private async collectRawElements(): Promise<RawElement[]> {
+        const collected: RawElement[] = [];
+        const MAX_TOTAL = 160;
 
         for (const frame of this.getAllFrames()) {
             try {
-                const elements = await this.extractElementsFromScope(frame);
-                collected.push(...elements);
+                const els = await this.extractRawFromFrame(frame, MAX_TOTAL - collected.length);
+                collected.push(...els);
             } catch {
                 continue;
             }
-            if (collected.length >= 60) break;
+            if (collected.length >= MAX_TOTAL) break;
         }
 
-        return this.dedupeElements(collected).slice(0, 60);
+        return collected;
     }
 
-    private async extractElementsFromScope(
+    private async extractRawFromFrame(
         scope: import("playwright").Frame,
-    ): Promise<InteractiveElement[]> {
-        const elements: InteractiveElement[] = [];
+        limit: number,
+    ): Promise<RawElement[]> {
+        if (limit <= 0) return [];
+        return scope.evaluate((maxCount: number): RawElement[] => {
+            const SELECTOR = [
+                "button",
+                '[role="button"]',
+                'input[type="submit"]',
+                'input[type="button"]',
+                "a[href]",
+                '[role="link"]',
+                'input:not([type="hidden"])',
+                "textarea",
+                "select",
+                '[contenteditable="true"]',
+                '[role="checkbox"]',
+                '[role="radio"]',
+                '[role="switch"]',
+                '[role="tab"]',
+                '[role="menuitem"]',
+                '[role="option"]',
+                '[role="combobox"]',
+                '[role="textbox"]',
+                "[onclick]",
+                '[tabindex]:not([tabindex="-1"])',
+            ].join(",");
 
-        const buttons = await scope
-            .locator('button, [role="button"], input[type="submit"], input[type="button"]')
-            .all();
-        for (const btn of buttons.slice(0, 30)) {
-            try {
-                if (!(await this.isUsableElement(btn))) continue;
-                const ariaLabel = (await btn.getAttribute("aria-label")) || "";
-                const text = (await btn.textContent()) || ariaLabel || "";
-                const testId = await btn.getAttribute("data-testid");
-                const btnType = await btn.getAttribute("type");
-                const btnId = await btn.getAttribute("id");
-                const displayName = text.trim();
-                elements.push({
-                    tagName: "button",
-                    role: "button",
-                    text: displayName,
-                    name: displayName,
-                    testId: testId || undefined,
-                    htmlId: btnId || undefined,
-                    ariaLabel: ariaLabel || undefined,
-                    suggestedSelectors: this.buildSelectors("button", displayName, testId, {
-                        htmlId: btnId || undefined,
-                        ariaLabel: ariaLabel || undefined,
-                        type: btnType || undefined,
-                    }),
-                });
-            } catch {
-                /* inaccessible */
-            }
-        }
+            const isVisible = (el: Element): boolean => {
+                const rects = el.getClientRects();
+                if (rects.length === 0) return false;
+                const style = window.getComputedStyle(el);
+                if (
+                    style.visibility === "hidden" ||
+                    style.display === "none" ||
+                    style.opacity === "0"
+                ) {
+                    return false;
+                }
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            };
 
-        const links = await scope.locator("a[href]").all();
-        for (const link of links.slice(0, 30)) {
-            try {
-                if (!(await this.isUsableElement(link))) continue;
-                const text = (await link.textContent()) || "";
-                const href = (await link.getAttribute("href")) || "";
-                elements.push({
-                    tagName: "a",
-                    role: "link",
-                    text: text.trim(),
-                    name: text.trim() || href,
-                    suggestedSelectors: this.buildSelectors("link", text.trim()),
-                });
-            } catch {
-                /* inaccessible */
-            }
-        }
+            const accessibleName = (el: Element): string => {
+                const aria = el.getAttribute("aria-label");
+                if (aria?.trim()) return aria.trim();
+                const labelledby = el.getAttribute("aria-labelledby");
+                if (labelledby) {
+                    const txt = labelledby
+                        .split(/\s+/)
+                        .map((id) => document.getElementById(id)?.textContent || "")
+                        .join(" ")
+                        .trim();
+                    if (txt) return txt;
+                }
+                const id = el.getAttribute("id");
+                if (id) {
+                    try {
+                        const lab = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+                        if (lab?.textContent?.trim()) return lab.textContent.trim();
+                    } catch {
+                        /* invalid id for selector */
+                    }
+                }
+                const wrap = el.closest("label");
+                if (wrap?.textContent?.trim()) return wrap.textContent.trim();
+                const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+                if (text) return text;
+                const ph = el.getAttribute("placeholder");
+                if (ph?.trim()) return ph.trim();
+                const title = el.getAttribute("title");
+                if (title?.trim()) return title.trim();
+                const val = (el as HTMLInputElement).value;
+                if (typeof val === "string" && val.trim()) return val.trim();
+                const alt = el.getAttribute("alt");
+                if (alt?.trim()) return alt.trim();
+                return "";
+            };
 
-        const inputs = await scope
-            .locator(
-                'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]), textarea, select',
-            )
-            .all();
-        for (const input of inputs.slice(0, 30)) {
-            try {
-                if (!(await this.isUsableElement(input))) continue;
-                const type = (await input.getAttribute("type")) || "text";
-                const htmlName = (await input.getAttribute("name")) || "";
-                const placeholder = (await input.getAttribute("placeholder")) || "";
-                const label = (await input.getAttribute("aria-label")) || "";
-                const testId = await input.getAttribute("data-testid");
-                const htmlId = (await input.getAttribute("id")) || "";
-                const tagName = await input.evaluate((el) => el.tagName.toLowerCase());
-                const role =
-                    type === "checkbox"
-                        ? "checkbox"
-                        : type === "radio"
-                          ? "radio"
-                          : type === "range"
-                            ? "slider"
-                            : tagName === "select"
-                              ? "combobox"
-                              : "textbox";
-                const displayName = label || placeholder || htmlName;
-                elements.push({
-                    tagName,
+            const computeRole = (el: Element, tag: string, type: string | null): string => {
+                const explicit = el.getAttribute("role");
+                if (explicit) return explicit;
+                if (tag === "a") return "link";
+                if (tag === "button") return "button";
+                if (tag === "textarea") return "textbox";
+                if (tag === "select") return "combobox";
+                if (tag === "input") {
+                    const t = (type || "text").toLowerCase();
+                    if (t === "checkbox") return "checkbox";
+                    if (t === "radio") return "radio";
+                    if (t === "range") return "slider";
+                    if (t === "submit" || t === "button" || t === "reset") return "button";
+                    return "textbox";
+                }
+                if (el.hasAttribute("contenteditable")) return "textbox";
+                return "button";
+            };
+
+            const out: RawElement[] = [];
+            const nodes = Array.from(document.querySelectorAll(SELECTOR));
+            for (const el of nodes) {
+                if (out.length >= maxCount) break;
+                if (!isVisible(el)) continue;
+                const tag = el.tagName.toLowerCase();
+                const type = el.getAttribute("type");
+                const role = computeRole(el, tag, type);
+                const name = accessibleName(el);
+                const isFormField =
+                    (tag === "input" &&
+                        !["submit", "button", "reset", "hidden"].includes(
+                            (type || "text").toLowerCase(),
+                        )) ||
+                    tag === "textarea" ||
+                    tag === "select" ||
+                    el.getAttribute("contenteditable") === "true";
+                out.push({
+                    tag,
                     role,
+                    name: name.slice(0, 200),
+                    text: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
                     type,
-                    name: displayName,
-                    text: placeholder,
-                    testId: testId || undefined,
-                    htmlName: htmlName || undefined,
-                    htmlId: htmlId || undefined,
-                    placeholder: placeholder || undefined,
-                    ariaLabel: label || undefined,
-                    suggestedSelectors: this.buildSelectors(role, displayName, testId, {
-                        htmlName: htmlName || undefined,
-                        htmlId: htmlId || undefined,
-                        placeholder: placeholder || undefined,
-                        ariaLabel: label || undefined,
-                        type,
-                    }),
+                    testId: el.getAttribute("data-testid"),
+                    htmlId: el.getAttribute("id"),
+                    htmlName: el.getAttribute("name"),
+                    href: el.getAttribute("href"),
+                    placeholder: el.getAttribute("placeholder"),
+                    ariaLabel: el.getAttribute("aria-label"),
+                    required: el.hasAttribute("required"),
+                    isFormField,
                 });
-            } catch {
-                /* inaccessible */
             }
-        }
-
-        // Contenteditable elements
-        const contentEditables = await scope.locator('[contenteditable="true"]').all();
-        for (const editable of contentEditables.slice(0, 10)) {
-            try {
-                if (!(await this.isUsableElement(editable))) continue;
-                const text = (await editable.textContent()) || "";
-                const label = (await editable.getAttribute("aria-label")) || "";
-                const testId = await editable.getAttribute("data-testid");
-                elements.push({
-                    tagName: "div",
-                    role: "textbox",
-                    text: text.trim(),
-                    name: label || text.trim(),
-                    testId: testId || undefined,
-                    suggestedSelectors: this.buildSelectors(
-                        "textbox",
-                        label || text.trim(),
-                        testId,
-                    ),
-                });
-            } catch {
-                /* inaccessible */
-            }
-        }
-
-        // ARIA role elements
-        const roleElements = await scope
-            .locator(
-                '[role="checkbox"],[role="radio"],[role="switch"],[role="tab"],[role="menuitem"],[role="option"],[role="combobox"]',
-            )
-            .all();
-        for (const el of roleElements.slice(0, 20)) {
-            try {
-                if (!(await this.isUsableElement(el))) continue;
-                const role = (await el.getAttribute("role")) || "";
-                const text =
-                    (await el.textContent()) || (await el.getAttribute("aria-label")) || "";
-                const testId = await el.getAttribute("data-testid");
-                elements.push({
-                    tagName: "div",
-                    role: role || undefined,
-                    text: text.trim(),
-                    name: text.trim(),
-                    testId: testId || undefined,
-                    suggestedSelectors: this.buildSelectors(role || "button", text.trim(), testId),
-                });
-            } catch {
-                /* inaccessible */
-            }
-        }
-
-        return elements;
+            return out;
+        }, limit);
     }
 
-    private async collectFormFields(): Promise<FormField[]> {
-        const collected: FormField[] = [];
-
-        for (const frame of this.getAllFrames()) {
-            try {
-                const fields = await this.extractFieldsFromScope(frame);
-                collected.push(...fields);
-            } catch {
-                continue;
-            }
-            if (collected.length >= 60) break;
-        }
-
-        return this.dedupeFields(collected).slice(0, 60);
+    /** Map raw descriptors → InteractiveElement[] with Node-built selectors. */
+    private toInteractiveElements(raw: RawElement[]): InteractiveElement[] {
+        const elements: InteractiveElement[] = raw.map((el) => {
+            const displayName = el.name || el.text || el.href || "";
+            return {
+                tagName: el.tag,
+                role: el.role,
+                text: el.text,
+                name: displayName,
+                type: el.type || undefined,
+                testId: el.testId || undefined,
+                htmlName: el.htmlName || undefined,
+                htmlId: el.htmlId || undefined,
+                href: el.href || undefined,
+                placeholder: el.placeholder || undefined,
+                ariaLabel: el.ariaLabel || undefined,
+                suggestedSelectors: this.buildSelectors(el.role, displayName, el.testId, {
+                    htmlName: el.htmlName || undefined,
+                    htmlId: el.htmlId || undefined,
+                    placeholder: el.placeholder || undefined,
+                    ariaLabel: el.ariaLabel || undefined,
+                    type: el.type || undefined,
+                }),
+            };
+        });
+        return this.dedupeElements(elements).slice(0, 80);
     }
 
-    private async extractFieldsFromScope(scope: import("playwright").Frame): Promise<FormField[]> {
-        const fields: FormField[] = [];
-
-        const inputs = await scope.locator('input:not([type="hidden"]), textarea, select').all();
-        for (const input of inputs.slice(0, 30)) {
-            try {
-                if (!(await this.isUsableElement(input))) continue;
-                const tagName = await input.evaluate((el) => el.tagName.toLowerCase());
+    /** Map raw descriptors → FormField[] for the text-entry controls. */
+    private toFormFields(raw: RawElement[]): FormField[] {
+        const fields: FormField[] = raw
+            .filter((el) => el.isFormField)
+            .map((el) => {
                 const type =
-                    (await input.getAttribute("type")) ||
-                    (tagName === "textarea" ? "textarea" : "text");
-                const name = (await input.getAttribute("name")) || "";
-                const id = (await input.getAttribute("id")) || "";
-                const placeholder = (await input.getAttribute("placeholder")) || "";
-                const label = (await input.getAttribute("aria-label")) || "";
-                const required = (await input.getAttribute("required")) !== null;
-
-                fields.push({
-                    name: label || placeholder || name || id,
+                    el.type ||
+                    (el.tag === "textarea" ? "textarea" : el.tag === "select" ? "select" : "text");
+                return {
+                    name: el.ariaLabel || el.placeholder || el.htmlName || el.htmlId || el.name,
                     type,
-                    label: label || undefined,
-                    placeholder: placeholder || undefined,
-                    required,
-                    id: id || undefined,
-                    suggestedSelector: id
-                        ? `#${id}`
-                        : name
-                          ? `[name="${name}"]`
-                          : `[placeholder="${placeholder}"]`,
-                });
-            } catch {
-                /* inaccessible */
-            }
-        }
-
-        return fields;
+                    label: el.ariaLabel || undefined,
+                    placeholder: el.placeholder || undefined,
+                    required: el.required,
+                    id: el.htmlId || undefined,
+                    suggestedSelector: buildFieldSelector({
+                        testId: el.testId || undefined,
+                        id: el.htmlId || undefined,
+                        name: el.htmlName || undefined,
+                        label: el.ariaLabel || undefined,
+                        placeholder: el.placeholder || undefined,
+                    }),
+                };
+            });
+        return this.dedupeFields(fields).slice(0, 60);
     }
 
     private async isUsableElement(locator: import("playwright").Locator): Promise<boolean> {
@@ -1136,8 +1461,116 @@ export class BrowserSession {
         }
     }
 
-    private async waitForIdle(): Promise<void> {
-        await this.page!.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    private async waitForIdle(): Promise<boolean> {
+        try {
+            await this.page!.waitForLoadState("networkidle", { timeout: 5000 });
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Wait until the page has rendered real, interactive content. Client-side
+     * frameworks (React/Vue/Angular) mount *after* `domcontentloaded` and often
+     * after `networkidle`, so capturing immediately yields an empty shell — the
+     * root cause of "some pages' DOMs are not discovered". We poll (bounded)
+     * until at least one interactive control exists or the body has meaningful
+     * text, and fail open so a genuinely empty page still proceeds.
+     */
+    private async waitForContent(): Promise<void> {
+        try {
+            await this.page!.waitForFunction(
+                () => {
+                    const sel =
+                        'button, a[href], input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], [contenteditable="true"]';
+                    if (document.querySelector(sel)) return true;
+                    return (document.body?.innerText || "").trim().length > 200;
+                },
+                { timeout: 4000 },
+            );
+        } catch {
+            // Fail open: capture whatever is there rather than blocking the run.
+        }
+    }
+
+    /**
+     * Start recording per-response timings on the current page. Returns a
+     * `stop()` function that detaches the listener and returns the slowest
+     * responses seen since it was started. Used to give the test generator a
+     * concrete picture of which requests are slow on the page under test.
+     */
+    private collectResponseTimings(): () => PagePerformance["slowResponses"] {
+        const page = this.page;
+        if (!page) return () => undefined;
+
+        const records: Array<{ url: string; status: number; durationMs: number }> = [];
+        const handler = (response: import("playwright").Response) => {
+            try {
+                // `responseEnd` is the resource duration in ms (or -1 when the
+                // browser didn't record it, e.g. served from cache).
+                const durationMs = response.request().timing().responseEnd;
+                if (Number.isFinite(durationMs) && durationMs > 0) {
+                    records.push({
+                        url: response.url(),
+                        status: response.status(),
+                        durationMs,
+                    });
+                }
+            } catch {
+                // Response/request may be gone; skip it.
+            }
+        };
+
+        page.on("response", handler);
+
+        return () => {
+            try {
+                page.off("response", handler);
+            } catch {
+                // page may be closed; nothing to detach
+            }
+            if (records.length === 0) return undefined;
+            return records.sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);
+        };
+    }
+
+    /**
+     * Read Navigation Timing from the live page and fold in the wall-clock
+     * measurements captured during the last navigation. Returns `undefined`
+     * when no useful signal is available (e.g. about:blank).
+     */
+    private async capturePagePerformance(): Promise<PagePerformance | undefined> {
+        const perf: PagePerformance = {};
+
+        try {
+            const nav = await this.page!.evaluate(() => {
+                const entry = performance.getEntriesByType("navigation")[0] as
+                    | PerformanceNavigationTiming
+                    | undefined;
+                if (!entry) return null;
+                return {
+                    domContentLoadedMs: entry.domContentLoadedEventEnd,
+                    loadEventMs: entry.loadEventEnd,
+                    ttfbMs: entry.responseStart - entry.requestStart,
+                };
+            });
+            if (nav) {
+                if (nav.domContentLoadedMs > 0) perf.domContentLoadedMs = nav.domContentLoadedMs;
+                if (nav.loadEventMs > 0) perf.loadEventMs = nav.loadEventMs;
+                if (nav.ttfbMs >= 0) perf.ttfbMs = nav.ttfbMs;
+            }
+        } catch {
+            // evaluate can fail on restricted pages; fall back to wall-clock only
+        }
+
+        if (this.lastNavigationMs !== undefined) perf.navigationMs = this.lastNavigationMs;
+        if (this.lastNetworkIdle !== undefined) perf.networkIdle = this.lastNetworkIdle;
+        if (this.lastSlowResponses && this.lastSlowResponses.length > 0) {
+            perf.slowResponses = this.lastSlowResponses;
+        }
+
+        return Object.keys(perf).length > 0 ? perf : undefined;
     }
 
     /**
@@ -1160,6 +1593,10 @@ export class BrowserSession {
     ): string[] {
         const selectors: string[] = [];
         const esc = (s: string) => s.replace(/'/g, "\\'");
+        // Escape CSS-special characters in an id so framework-generated ids
+        // (React ":r1:", Angular/Material "mat-input-0.5", Tailwind "input:focus")
+        // produce valid `#id` selectors instead of silently matching nothing.
+        const escId = (s: string) => s.replace(/([ "\\#.:>~+*[\](){}!,'^$|=@%&?/;])/g, "\\$1");
         const isInput =
             role === "textbox" ||
             role === "combobox" ||
@@ -1177,10 +1614,10 @@ export class BrowserSession {
                 selectors.push(`input[name="${htmlAttrs.htmlName}"]`);
             }
             if (isInput && htmlAttrs.htmlId) {
-                selectors.push(`#${htmlAttrs.htmlId}`);
+                selectors.push(`#${escId(htmlAttrs.htmlId)}`);
             }
-            if (isButton && htmlAttrs.htmlId) {
-                selectors.push(`#${htmlAttrs.htmlId}`);
+            if ((isButton || role === "link") && htmlAttrs.htmlId) {
+                selectors.push(`#${escId(htmlAttrs.htmlId)}`);
             }
             if (isButton && htmlAttrs.type === "submit") {
                 selectors.push(`button[type="submit"]`);

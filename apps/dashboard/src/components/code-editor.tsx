@@ -1,4 +1,4 @@
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor, type Monaco } from "@monaco-editor/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface TestFile {
@@ -12,6 +12,45 @@ export interface TestFile {
     language?: string;
 }
 
+/**
+ * A proposed AI edit awaiting review. Rendered as an original-vs-proposed
+ * Monaco diff with Apply / Reject, so the developer sees exactly which
+ * sections changed instead of a silent buffer swap.
+ */
+export interface DiffReview {
+    fileName: string;
+    /**
+     * Path of the file the fix targets. Used to tie the diff to a single tab so
+     * the rest of the editor (other tabs) stays navigable while it's pending.
+     */
+    targetPath: string;
+    /** Current on-disk / buffer content (left side). */
+    original: string;
+    /** AI-proposed content (right side, editable before applying). */
+    proposed: string;
+    /** Number of section edits applied (null / 0 for a full rewrite). */
+    editCount: number | null;
+    mode: "edits" | "full" | null;
+    /** True when section edits couldn't be matched and we fell back to a full rewrite. */
+    matchFailed: boolean;
+}
+
+function defineRaikenTheme(monaco: Monaco) {
+    monaco.editor.defineTheme("raiken-dark", {
+        base: "vs-dark",
+        inherit: true,
+        rules: [],
+        colors: {
+            "editor.background": "#0a0a0a",
+            "editor.lineHighlightBackground": "#141414",
+            "editorLineNumber.foreground": "#3a3a3a",
+            "editorLineNumber.activeForeground": "#9ca3af",
+            "editor.selectionBackground": "#2a2440",
+            "editorCursor.foreground": "#a78bfa",
+        },
+    });
+}
+
 interface CodeEditorProps {
     files: TestFile[];
     activeFileId: string;
@@ -21,10 +60,18 @@ interface CodeEditorProps {
     onRunTests?: (fileId: string) => void;
     onNewFile?: () => void;
     onSaveFile?: (fileId: string) => void;
+    /** Rename a file (double-click a tab name). Receives the raw typed name. */
+    onRenameFile?: (fileId: string, newName: string) => void;
     onDeleteFile?: (fileId: string) => void;
     isRunningTests?: boolean;
     isSaving?: boolean;
     savedFileId?: string | null;
+    /** When set, the editor shows an AI-fix diff for review instead of the file. */
+    diffReview?: DiffReview | null;
+    /** Apply the (possibly hand-tweaked) proposed content. */
+    onApplyDiff?: (finalContent: string) => void;
+    /** Discard the proposed fix. */
+    onRejectDiff?: () => void;
 }
 
 const isMac =
@@ -40,16 +87,52 @@ export function CodeEditor({
     onRunTests,
     onNewFile,
     onSaveFile,
+    onRenameFile,
     onDeleteFile,
     isRunningTests,
     isSaving,
     savedFileId,
+    diffReview,
+    onApplyDiff,
+    onRejectDiff,
 }: CodeEditorProps) {
     const activeFile = files.find((f) => f.id === activeFileId);
     const [isEditorReady, setIsEditorReady] = useState(false);
     const [showSavedFlash, setShowSavedFlash] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const confirmRef = useRef<HTMLDivElement | null>(null);
+
+    // Inline tab rename. Double-click a tab name to edit it; Enter/blur commits,
+    // Esc cancels. The ref guards against a double-commit (Enter then blur).
+    const [renamingId, setRenamingId] = useState<string | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    const renameActiveRef = useRef(false);
+    const startRename = (id: string, name: string) => {
+        renameActiveRef.current = true;
+        setRenamingId(id);
+        setRenameValue(name);
+    };
+    const commitRename = (id: string, currentName: string) => {
+        if (!renameActiveRef.current) return;
+        renameActiveRef.current = false;
+        setRenamingId(null);
+        const v = renameValue.trim();
+        if (v && v !== currentName) onRenameFile?.(id, v);
+    };
+    const cancelRename = () => {
+        renameActiveRef.current = false;
+        setRenamingId(null);
+    };
+
+    // Pending AI-fix diff state. The modified (right) side is editable before
+    // Apply; we read the latest value from this ref rather than re-rendering on
+    // every keystroke. Reset whenever a new proposal arrives.
+    const [isDiffReady, setIsDiffReady] = useState(false);
+    const diffModifiedRef = useRef("");
+    useEffect(() => {
+        diffModifiedRef.current = diffReview?.proposed ?? "";
+        setIsDiffReady(false);
+    }, [diffReview?.proposed, diffReview?.targetPath]);
 
     useEffect(() => {
         if (savedFileId === activeFileId && savedFileId) {
@@ -106,8 +189,22 @@ export function CodeEditor({
         }
     };
 
-    // Empty state ----------------------------------------------------------
-    if (!activeFile) {
+    // A pending AI-fix diff is shown ONLY while the user is on its target file's
+    // tab (or nothing is open). Navigating to any other tab reveals that file
+    // normally, so a pending fix no longer traps the whole editor. The target
+    // tab is badged so the review stays discoverable.
+    const diffTargetPath = diffReview?.targetPath;
+    const showDiff = !!diffReview && (!activeFile || activeFile.path === diffTargetPath);
+    const diffIsEdits = diffReview?.mode === "edits" && !!diffReview?.editCount;
+    const diffMetaLabel = diffReview
+        ? diffIsEdits
+            ? `${diffReview.editCount} section edit${diffReview.editCount === 1 ? "" : "s"}`
+            : "full rewrite"
+        : "";
+
+    // Empty state — only when there's genuinely nothing to show (no files AND
+    // no pending diff). With a pending diff we still render the shell below.
+    if (files.length === 0 && !diffReview) {
         return (
             <div className="ce-shell">
                 <div className="ce-empty">
@@ -133,10 +230,10 @@ export function CodeEditor({
         );
     }
 
-    const language = getLanguage(activeFile.name);
-    const passed = activeFile.passedCount;
-    const failed = activeFile.failedCount;
-    const isScratch = activeFile.path.startsWith("scratch:");
+    const language = activeFile ? getLanguage(activeFile.name) : "typescript";
+    const passed = activeFile?.passedCount;
+    const failed = activeFile?.failedCount;
+    const isScratch = activeFile?.path.startsWith("scratch:") ?? false;
 
     return (
         <div className="ce-shell">
@@ -145,17 +242,58 @@ export function CodeEditor({
                 <div className="ce-tabs">
                     {files.map((file) => {
                         const active = file.id === activeFileId;
+                        const hasPendingFix = !!diffTargetPath && file.path === diffTargetPath;
+                        const isRenaming = renamingId === file.id;
                         return (
                             <div key={file.id} className={`ce-tab ${active ? "is-active" : ""}`}>
-                                <button
-                                    type="button"
-                                    className="ce-tab-btn"
-                                    onClick={() => onFileSelect(file.id)}
-                                    title={file.path}
-                                >
-                                    <StatusDot status={file.status} />
-                                    <span className="ce-tab-name">{file.name}</span>
-                                </button>
+                                {isRenaming ? (
+                                    <input
+                                        className="ce-tab-rename"
+                                        value={renameValue}
+                                        // biome-ignore lint/a11y/noAutofocus: rename field must grab focus immediately
+                                        autoFocus
+                                        spellCheck={false}
+                                        onChange={(e) => setRenameValue(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                                e.preventDefault();
+                                                commitRename(file.id, file.name);
+                                            } else if (e.key === "Escape") {
+                                                e.preventDefault();
+                                                cancelRename();
+                                            }
+                                        }}
+                                        onBlur={() => commitRename(file.id, file.name)}
+                                        aria-label={`Rename ${file.name}`}
+                                    />
+                                ) : (
+                                    <button
+                                        type="button"
+                                        className="ce-tab-btn"
+                                        onClick={() => onFileSelect(file.id)}
+                                        onDoubleClick={() => {
+                                            if (onRenameFile) startRename(file.id, file.name);
+                                        }}
+                                        title={
+                                            hasPendingFix
+                                                ? `${file.path} — AI fix awaiting review`
+                                                : onRenameFile
+                                                  ? `${file.path} — double-click to rename`
+                                                  : file.path
+                                        }
+                                    >
+                                        <StatusDot status={file.status} />
+                                        <span className="ce-tab-name">{file.name}</span>
+                                        {hasPendingFix && (
+                                            <span
+                                                className="ce-tab-fix"
+                                                title="AI fix awaiting review"
+                                            >
+                                                fix
+                                            </span>
+                                        )}
+                                    </button>
+                                )}
                                 {onFileClose && (
                                     <button
                                         type="button"
@@ -178,176 +316,272 @@ export function CodeEditor({
                 <div className="ce-spacer" />
 
                 {/* Inline run summary — replaces the bottom results bar */}
-                {(passed !== undefined ||
-                    failed !== undefined ||
-                    activeFile.status === "running") && (
-                    <div className="ce-summary" aria-live="polite">
-                        {activeFile.status === "running" ? (
-                            <span className="ce-sum-running">
-                                <span className="ce-sum-spinner" aria-hidden="true" />
-                                running
-                            </span>
-                        ) : (
-                            <>
-                                {failed !== undefined && failed > 0 && (
-                                    <span className="ce-sum-failed">{failed}✗</span>
-                                )}
-                                {passed !== undefined && (
-                                    <span className="ce-sum-passed">{passed}✓</span>
-                                )}
-                            </>
-                        )}
-                    </div>
-                )}
-
-                <div className="ce-rule" aria-hidden="true" />
-
-                {/* Icon-only actions */}
-                <div className="ce-actions" role="toolbar" aria-label="File actions">
-                    {onNewFile && (
-                        <IconButton label={`New file (${MOD}N)`} onClick={onNewFile}>
-                            <IconPlus />
-                        </IconButton>
-                    )}
-                    {onSaveFile && (
-                        <IconButton
-                            label={
-                                isScratch
-                                    ? "Save (use Save As… for scratch files)"
-                                    : `Save (${MOD}S)`
-                            }
-                            onClick={() => onSaveFile(activeFileId)}
-                            disabled={isSaving}
-                            state={isSaving ? "loading" : showSavedFlash ? "success" : undefined}
-                        >
-                            {isSaving ? (
-                                <IconSpinner />
-                            ) : showSavedFlash ? (
-                                <IconCheck />
+                {!showDiff &&
+                    activeFile &&
+                    (passed !== undefined ||
+                        failed !== undefined ||
+                        activeFile.status === "running") && (
+                        <div className="ce-summary" aria-live="polite">
+                            {activeFile.status === "running" ? (
+                                <span className="ce-sum-running">
+                                    <span className="ce-sum-spinner" aria-hidden="true" />
+                                    running
+                                </span>
                             ) : (
-                                <IconSave />
-                            )}
-                        </IconButton>
-                    )}
-                    {onDeleteFile && (
-                        <div className="ce-confirm-anchor">
-                            <IconButton
-                                label="Delete file"
-                                onClick={() => setConfirmDelete((v) => !v)}
-                                tone={confirmDelete ? "danger-active" : undefined}
-                            >
-                                <IconTrash />
-                            </IconButton>
-                            {confirmDelete && (
-                                <div className="ce-confirm" role="dialog" ref={confirmRef}>
-                                    <p>
-                                        Delete <span className="ce-mono">{activeFile.name}</span>?
-                                    </p>
-                                    <span className="ce-confirm-hint">
-                                        {isScratch
-                                            ? "This scratch buffer will be discarded."
-                                            : "This will remove the file from disk."}
-                                    </span>
-                                    <div className="ce-confirm-row">
-                                        <button
-                                            type="button"
-                                            className="ce-confirm-btn"
-                                            onClick={() => setConfirmDelete(false)}
-                                        >
-                                            cancel
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="ce-confirm-btn ce-confirm-btn--danger"
-                                            onClick={() => {
-                                                setConfirmDelete(false);
-                                                onDeleteFile(activeFileId);
-                                            }}
-                                            ref={(el) => {
-                                                if (el && confirmDelete) el.focus();
-                                            }}
-                                        >
-                                            delete
-                                        </button>
-                                    </div>
-                                </div>
+                                <>
+                                    {failed !== undefined && failed > 0 && (
+                                        <span className="ce-sum-failed">{failed}✗</span>
+                                    )}
+                                    {passed !== undefined && (
+                                        <span className="ce-sum-passed">{passed}✓</span>
+                                    )}
+                                </>
                             )}
                         </div>
                     )}
-                    {onRunTests && (
-                        <IconButton
-                            label={isRunningTests ? "Running…" : `Run tests (${MOD}↵)`}
-                            onClick={() => onRunTests(activeFile.id)}
-                            disabled={isRunningTests}
-                            tone="run"
-                            state={isRunningTests ? "loading" : undefined}
+
+                {showDiff ? (
+                    /* Diff review actions replace the file actions while a fix is
+                       pending on THIS tab — other tabs keep their normal bar. */
+                    <div className="ce-actions ce-diff-actions">
+                        <span className="ce-diff-meta">{diffMetaLabel}</span>
+                        <button
+                            type="button"
+                            className="ce-diff-btn ce-diff-btn--reject"
+                            onClick={() => onRejectDiff?.()}
                         >
-                            {isRunningTests ? <IconSpinner /> : <IconPlay />}
-                        </IconButton>
-                    )}
-                </div>
+                            Reject
+                        </button>
+                        <button
+                            type="button"
+                            className="ce-diff-btn ce-diff-btn--apply"
+                            onClick={() => onApplyDiff?.(diffModifiedRef.current)}
+                        >
+                            Apply fix
+                        </button>
+                    </div>
+                ) : (
+                    activeFile && (
+                        <>
+                            <div className="ce-rule" aria-hidden="true" />
+
+                            {/* Icon-only actions */}
+                            <div
+                                className="ce-actions"
+                                role="toolbar"
+                                aria-label="File actions"
+                            >
+                                {onNewFile && (
+                                    <IconButton label={`New file (${MOD}N)`} onClick={onNewFile}>
+                                        <IconPlus />
+                                    </IconButton>
+                                )}
+                                {onSaveFile && (
+                                    <IconButton
+                                        label={
+                                            isScratch
+                                                ? "Save (use Save As… for scratch files)"
+                                                : `Save (${MOD}S)`
+                                        }
+                                        onClick={() => onSaveFile(activeFile.id)}
+                                        disabled={isSaving}
+                                        state={
+                                            isSaving
+                                                ? "loading"
+                                                : showSavedFlash
+                                                  ? "success"
+                                                  : undefined
+                                        }
+                                    >
+                                        {isSaving ? (
+                                            <IconSpinner />
+                                        ) : showSavedFlash ? (
+                                            <IconCheck />
+                                        ) : (
+                                            <IconSave />
+                                        )}
+                                    </IconButton>
+                                )}
+                                {onDeleteFile && (
+                                    <div className="ce-confirm-anchor">
+                                        <IconButton
+                                            label="Delete file"
+                                            onClick={() => setConfirmDelete((v) => !v)}
+                                            tone={confirmDelete ? "danger-active" : undefined}
+                                        >
+                                            <IconTrash />
+                                        </IconButton>
+                                        {confirmDelete && (
+                                            <div
+                                                className="ce-confirm"
+                                                role="dialog"
+                                                ref={confirmRef}
+                                            >
+                                                <p>
+                                                    Delete{" "}
+                                                    <span className="ce-mono">
+                                                        {activeFile.name}
+                                                    </span>
+                                                    ?
+                                                </p>
+                                                <span className="ce-confirm-hint">
+                                                    {isScratch
+                                                        ? "This scratch buffer will be discarded."
+                                                        : "This will remove the file from disk."}
+                                                </span>
+                                                <div className="ce-confirm-row">
+                                                    <button
+                                                        type="button"
+                                                        className="ce-confirm-btn"
+                                                        onClick={() => setConfirmDelete(false)}
+                                                    >
+                                                        cancel
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="ce-confirm-btn ce-confirm-btn--danger"
+                                                        onClick={() => {
+                                                            setConfirmDelete(false);
+                                                            onDeleteFile(activeFile.id);
+                                                        }}
+                                                        ref={(el) => {
+                                                            if (el && confirmDelete) el.focus();
+                                                        }}
+                                                    >
+                                                        delete
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {onRunTests && (
+                                    <IconButton
+                                        label={
+                                            isRunningTests ? "Running…" : `Run tests (${MOD}↵)`
+                                        }
+                                        onClick={() => onRunTests(activeFile.id)}
+                                        disabled={isRunningTests}
+                                        tone="run"
+                                        state={isRunningTests ? "loading" : undefined}
+                                    >
+                                        {isRunningTests ? <IconSpinner /> : <IconPlay />}
+                                    </IconButton>
+                                )}
+                            </div>
+                        </>
+                    )
+                )}
             </div>
 
-            {/* ---------- Editor ---------- */}
-            <div className="ce-editor">
-                {!isEditorReady && (
-                    <div className="ce-loading">
-                        <span className="ce-loading-spin" aria-hidden="true" />
-                        <span>loading editor</span>
-                    </div>
-                )}
-                <Editor
-                    height="100%"
-                    language={language}
-                    value={activeFile.content || ""}
-                    theme="vs-dark"
-                    beforeMount={(monaco) => {
-                        monaco.editor.defineTheme("raiken-dark", {
-                            base: "vs-dark",
-                            inherit: true,
-                            rules: [],
-                            colors: {
-                                "editor.background": "#0a0a0a",
-                                "editor.lineHighlightBackground": "#141414",
-                                "editorLineNumber.foreground": "#3a3a3a",
-                                "editorLineNumber.activeForeground": "#9ca3af",
-                                "editor.selectionBackground": "#2a2440",
-                                "editorCursor.foreground": "#a78bfa",
+            {showDiff && diffReview && diffReview.matchFailed && (
+                <div className="ce-diff-warn" role="alert">
+                    Some section edits couldn&apos;t be matched to the current file, so this is a
+                    full rewrite — review carefully before applying.
+                </div>
+            )}
+
+            {/* ---------- Editor / Diff ---------- */}
+            {showDiff && diffReview ? (
+                <div className="ce-editor">
+                    {!isDiffReady && (
+                        <div className="ce-loading">
+                            <span className="ce-loading-spin" aria-hidden="true" />
+                            <span>loading diff</span>
+                        </div>
+                    )}
+                    <DiffEditor
+                        height="100%"
+                        language={getLanguage(diffReview.fileName)}
+                        original={diffReview.original}
+                        modified={diffReview.proposed}
+                        theme="vs-dark"
+                        beforeMount={defineRaikenTheme}
+                        onMount={(editor, monaco) => {
+                            monaco.editor.setTheme("raiken-dark");
+                            const modified = editor.getModifiedEditor();
+                            diffModifiedRef.current = modified.getValue();
+                            modified.onDidChangeModelContent(() => {
+                                diffModifiedRef.current = modified.getValue();
+                            });
+                            setIsDiffReady(true);
+                        }}
+                        options={{
+                            renderSideBySide: true,
+                            readOnly: false,
+                            originalEditable: false,
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            lineHeight: 22,
+                            fontFamily:
+                                "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
+                            fontLigatures: true,
+                            scrollBeyondLastLine: false,
+                            automaticLayout: true,
+                            renderOverviewRuler: false,
+                            scrollbar: {
+                                vertical: "auto",
+                                horizontal: "auto",
+                                verticalScrollbarSize: 8,
+                                horizontalScrollbarSize: 8,
                             },
-                        });
-                    }}
-                    onMount={(_editor, monaco) => {
-                        monaco.editor.setTheme("raiken-dark");
-                        setIsEditorReady(true);
-                    }}
-                    onChange={handleEditorChange}
-                    options={{
-                        minimap: { enabled: false },
-                        fontSize: 13,
-                        lineHeight: 22,
-                        fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
-                        fontLigatures: true,
-                        padding: { top: 12, bottom: 12 },
-                        scrollBeyondLastLine: false,
-                        lineNumbers: "on",
-                        renderLineHighlight: "line",
-                        cursorStyle: "line",
-                        automaticLayout: true,
-                        scrollbar: {
-                            vertical: "auto",
-                            horizontal: "auto",
-                            verticalScrollbarSize: 8,
-                            horizontalScrollbarSize: 8,
-                        },
-                        overviewRulerBorder: false,
-                        hideCursorInOverviewRuler: true,
-                        glyphMargin: false,
-                        folding: true,
-                        lineDecorationsWidth: 10,
-                        lineNumbersMinChars: 4,
-                    }}
-                />
-            </div>
+                        }}
+                    />
+                </div>
+            ) : activeFile ? (
+                <div className="ce-editor">
+                    {!isEditorReady && (
+                        <div className="ce-loading">
+                            <span className="ce-loading-spin" aria-hidden="true" />
+                            <span>loading editor</span>
+                        </div>
+                    )}
+                    <Editor
+                        height="100%"
+                        language={language}
+                        value={activeFile.content || ""}
+                        theme="vs-dark"
+                        beforeMount={defineRaikenTheme}
+                        onMount={(_editor, monaco) => {
+                            monaco.editor.setTheme("raiken-dark");
+                            setIsEditorReady(true);
+                        }}
+                        onChange={handleEditorChange}
+                        options={{
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            lineHeight: 22,
+                            fontFamily:
+                                "'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace",
+                            fontLigatures: true,
+                            padding: { top: 12, bottom: 12 },
+                            scrollBeyondLastLine: false,
+                            lineNumbers: "on",
+                            renderLineHighlight: "line",
+                            cursorStyle: "line",
+                            automaticLayout: true,
+                            scrollbar: {
+                                vertical: "auto",
+                                horizontal: "auto",
+                                verticalScrollbarSize: 8,
+                                horizontalScrollbarSize: 8,
+                            },
+                            overviewRulerBorder: false,
+                            hideCursorInOverviewRuler: true,
+                            glyphMargin: false,
+                            folding: true,
+                            lineDecorationsWidth: 10,
+                            lineNumbersMinChars: 4,
+                        }}
+                    />
+                </div>
+            ) : (
+                <div className="ce-editor">
+                    <div className="ce-empty">
+                        <p className="ce-empty-hint">Select a file from the tabs above.</p>
+                    </div>
+                </div>
+            )}
 
             <CodeEditorStyles />
         </div>
@@ -623,6 +857,32 @@ function CodeEditorStyles() {
                 text-overflow: ellipsis;
                 font-variant-ligatures: none;
             }
+            .ce-tab-rename {
+                min-width: 120px;
+                max-width: 220px;
+                margin: 0 0.35rem;
+                padding: 0.15rem 0.35rem;
+                background: var(--bg);
+                border: 1px solid var(--accent);
+                border-radius: 3px;
+                color: var(--ink);
+                font-family: inherit;
+                font-size: 12px;
+                outline: none;
+            }
+            .ce-tab-fix {
+                margin-left: 0.4rem;
+                padding: 0.05rem 0.3rem;
+                font-size: 0.625rem;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+                color: #c4b5fd;
+                background: rgba(167, 139, 250, 0.14);
+                border: 1px solid var(--accent);
+                border-radius: 3px;
+                line-height: 1.3;
+            }
             .ce-tab-x {
                 display: flex;
                 align-items: center;
@@ -807,6 +1067,65 @@ function CodeEditorStyles() {
                 background: rgba(215, 92, 92, 0.12);
                 color: #ff8888;
                 border-color: var(--danger);
+            }
+
+            /* ---------- AI-fix diff review ---------- */
+            .ce-bar--diff {
+                align-items: center;
+                padding-left: 0.75rem;
+            }
+            .ce-diff-title {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                min-width: 0;
+                font-family: var(--mono);
+                font-size: 0.75rem;
+                color: var(--ink);
+            }
+            .ce-diff-badge {
+                font-size: 0.625rem;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                color: var(--accent);
+                border: 1px solid var(--accent-dim);
+                background: var(--accent-dim);
+                padding: 0.125rem 0.375rem;
+                border-radius: 2px;
+            }
+            .ce-diff-meta {
+                font-size: 0.6875rem;
+                color: var(--ink-faint);
+                font-variant-numeric: tabular-nums;
+            }
+            .ce-diff-actions { gap: 0.375rem; padding: 0 0.5rem; }
+            .ce-diff-btn {
+                font-family: var(--mono);
+                font-size: 0.6875rem;
+                letter-spacing: 0.03em;
+                padding: 0.3125rem 0.75rem;
+                border: 1px solid var(--hair);
+                background: transparent;
+                color: var(--ink-dim);
+                cursor: pointer;
+                transition: background 0.1s, color 0.1s, border-color 0.1s;
+            }
+            .ce-diff-btn--reject:hover { color: var(--ink); border-color: #2a2a2a; background: var(--bg-hover); }
+            .ce-diff-btn--apply {
+                color: var(--accent);
+                border-color: var(--accent-dim);
+                background: var(--accent-dim);
+            }
+            .ce-diff-btn--apply:hover { color: #c4b5fd; border-color: var(--accent); }
+            .ce-diff-warn {
+                flex-shrink: 0;
+                padding: 0.5rem 0.75rem;
+                background: rgba(215, 92, 92, 0.1);
+                border-bottom: 1px solid rgba(215, 92, 92, 0.3);
+                color: #e69a9a;
+                font-family: var(--mono);
+                font-size: 0.6875rem;
+                line-height: 1.5;
             }
 
             /* ---------- Editor area ---------- */

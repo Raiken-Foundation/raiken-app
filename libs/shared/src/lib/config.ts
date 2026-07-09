@@ -12,6 +12,7 @@ export interface ResolvedDiscoveryConfig {
     excludePatterns: string[];
     pauseOnAuth: boolean;
     maxRunTimeMs: number;
+    preserveQueryParams: boolean;
 }
 
 const DISCOVERY_DEFAULTS: ResolvedDiscoveryConfig =
@@ -64,6 +65,10 @@ export function loadDiscoveryConfig(projectPath: string): ResolvedDiscoveryConfi
                 typeof d.maxRunTimeMs === "number" && d.maxRunTimeMs >= 0
                     ? d.maxRunTimeMs
                     : DISCOVERY_DEFAULTS.maxRunTimeMs,
+            preserveQueryParams:
+                typeof d.preserveQueryParams === "boolean"
+                    ? d.preserveQueryParams
+                    : DISCOVERY_DEFAULTS.preserveQueryParams,
         };
     } catch {
         return { ...DISCOVERY_DEFAULTS };

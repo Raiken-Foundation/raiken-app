@@ -1,3 +1,4 @@
+import path from "node:path";
 import { CodeGraphDB } from "../database/db";
 import type { AgentIntent } from "./graph/utils";
 
@@ -65,13 +66,17 @@ export class AgentMemory {
      * Singleton pattern ensures one instance per project.
      */
     static getInstance(projectPath: string): AgentMemory {
-        const existing = AgentMemory.instances.get(projectPath);
+        // Key on the resolved absolute path so callers passing "." vs an
+        // absolute path (or a trailing slash) share one instance + DB handle
+        // instead of opening duplicate connections to the same project.
+        const key = path.resolve(projectPath);
+        const existing = AgentMemory.instances.get(key);
         if (existing) {
             return existing;
         }
 
-        const instance = new AgentMemory(projectPath);
-        AgentMemory.instances.set(projectPath, instance);
+        const instance = new AgentMemory(key);
+        AgentMemory.instances.set(key, instance);
         return instance;
     }
 
@@ -123,7 +128,8 @@ export class AgentMemory {
     private static readonly MAX_SELECTOR_ROWS = 500;
     private static readonly MAX_TEST_OUTCOME_ROWS = 200;
 
-    initialize(): void {
+    /** @param verbose Log the loaded-preferences summary (default `true`; the CLI REPL passes `false` and shows its own status UI instead). */
+    initialize(verbose = true): void {
         if (this.initialized) return;
 
         const allPrefs = this.db.getAllPreferences();
@@ -134,7 +140,11 @@ export class AgentMemory {
         this.prune();
 
         this.initialized = true;
-        console.log(`🧠 AgentMemory initialized: ${this.preferencesCache.size} preferences loaded`);
+        if (verbose) {
+            console.log(
+                `AgentMemory initialized: ${this.preferencesCache.size} preferences loaded`,
+            );
+        }
     }
 
     /**
@@ -291,50 +301,123 @@ export class AgentMemory {
     }
 
     /**
-     * Persist exploration state so it survives across graph invocations
-     * (e.g., when the graph pauses for user auth and resumes later).
+     * Persist the latest exploration snapshot (URLs, current URL, and per-page
+     * summaries) so the agent remembers where it has been and what it saw
+     * across *every* turn — not just when it pauses. This is read without
+     * clearing so context survives normal completions too.
      */
-    setExplorationState(state: { pagesVisited?: string[]; currentUrl?: string | null }): void {
+    private static readonly MAX_REMEMBERED_PAGES = 50;
+    private static readonly MAX_REMEMBERED_SUMMARIES = 20;
+
+    setLastExploration(state: {
+        pagesVisited?: string[];
+        currentUrl?: string | null;
+        pageSummaries?: string[];
+    }): void {
         if (state.pagesVisited !== undefined) {
-            this.setPreference("explore_pages_visited", JSON.stringify(state.pagesVisited));
+            const pages = state.pagesVisited.slice(-AgentMemory.MAX_REMEMBERED_PAGES);
+            this.setPreference("last_explore_pages", JSON.stringify(pages));
         }
         if (state.currentUrl !== undefined) {
-            this.setPreference("explore_current_url", state.currentUrl ?? "");
+            this.setPreference("last_explore_url", state.currentUrl ?? "");
         }
+        if (state.pageSummaries !== undefined) {
+            const summaries = state.pageSummaries.slice(-AgentMemory.MAX_REMEMBERED_SUMMARIES);
+            this.setPreference("last_explore_summaries", JSON.stringify(summaries));
+        }
+        // Stamp the write so stale crawls (from an old, unrelated task) aren't
+        // silently dragged into a new session — callers check the age.
+        this.setPreference("last_explore_at", String(Date.now()));
+    }
+
+    /** Age (ms) of the last remembered exploration, or Infinity if none. */
+    getLastExplorationAgeMs(): number {
+        const raw = this.getPreference("last_explore_at");
+        const ts = raw ? Number(raw) : NaN;
+        return Number.isFinite(ts) ? Date.now() - ts : Number.POSITIVE_INFINITY;
+    }
+
+    /** Clear the remembered exploration snapshot (used on new/unrelated tasks). */
+    clearLastExploration(): void {
+        this.setPreference("last_explore_pages", "");
+        this.setPreference("last_explore_url", "");
+        this.setPreference("last_explore_summaries", "");
+        this.setPreference("last_explore_at", "");
+    }
+
+    /** Clear persisted goal state (used after a task completes). */
+    clearGoalState(): void {
+        this.setGoalState({
+            activeGoal: null,
+            targetFeature: null,
+            targetUrl: null,
+            missingContext: [],
+            nextTool: null,
+        });
     }
 
     /**
-     * Retrieve persisted exploration state and clear it (one-shot restore).
+     * Return every persisted action path (e.g. "sign out", "add to cart") the
+     * agent has previously located, keyed by action name. Lets test generation
+     * reuse known routes/selectors for ALL actions, not just logout.
      */
-    consumeExplorationState(): {
-        pagesVisited: string[];
-        currentUrl: string | null;
-    } | null {
-        const pagesRaw = this.getPreference("explore_pages_visited");
-        const currentUrl = this.getPreference("explore_current_url");
-
-        if (!pagesRaw && !currentUrl) return null;
-
-        let pagesVisited: string[] = [];
-        if (pagesRaw) {
+    getActionPaths(): Array<{ action: string; page: string | null; selector: string | null }> {
+        const out: Array<{ action: string; page: string | null; selector: string | null }> = [];
+        for (const [key, value] of Object.entries(this.getAllPreferences())) {
+            if (!key.startsWith("action_path:") || !value) continue;
             try {
-                const parsed = JSON.parse(pagesRaw);
-                if (Array.isArray(parsed)) {
-                    pagesVisited = parsed.filter((p) => typeof p === "string");
-                }
+                const parsed = JSON.parse(value) as {
+                    page?: string | null;
+                    selector?: string | null;
+                };
+                out.push({
+                    action: key.slice("action_path:".length),
+                    page: parsed.page ?? null,
+                    selector: parsed.selector ?? null,
+                });
             } catch {
-                pagesVisited = [];
+                /* skip malformed entry */
             }
         }
+        return out;
+    }
 
-        this.setPreference("explore_pages_visited", "");
-        this.setPreference("explore_current_url", "");
+    /**
+     * Retrieve the latest exploration snapshot without clearing it.
+     * Returns null when nothing has been remembered yet.
+     */
+    getLastExploration(): {
+        pagesVisited: string[];
+        currentUrl: string | null;
+        pageSummaries: string[];
+    } | null {
+        const pagesRaw = this.getPreference("last_explore_pages");
+        const summariesRaw = this.getPreference("last_explore_summaries");
+        const currentUrl = this.getPreference("last_explore_url");
 
-        if (pagesVisited.length === 0 && !currentUrl) return null;
+        if (!pagesRaw && !summariesRaw && !currentUrl) return null;
+
+        const parseStringArray = (raw: string | null): string[] => {
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed.filter((p) => typeof p === "string") : [];
+            } catch {
+                return [];
+            }
+        };
+
+        const pagesVisited = parseStringArray(pagesRaw);
+        const pageSummaries = parseStringArray(summariesRaw);
+
+        if (pagesVisited.length === 0 && pageSummaries.length === 0 && !currentUrl) {
+            return null;
+        }
 
         return {
             pagesVisited,
             currentUrl: currentUrl || null,
+            pageSummaries,
         };
     }
 
@@ -460,6 +543,10 @@ export class AgentMemory {
         successfulSelectors: Array<{ element: string; selector: string; type: string }>;
         recentFailures: Array<{ testName: string; error: string }>;
     } {
+        // Lazily initialize so learned selectors/failures reach prompts even
+        // when the caller (tests, direct library use, non-server entry points)
+        // never called `initialize()`. `initialize()` is idempotent.
+        if (!this.initialized) this.initialize();
         const selectorStrategy = this.getSelectorStrategy();
         const successfulSelectors = this.getSuccessfulSelectors(10).map((s) => ({
             element: s.element,
@@ -489,6 +576,11 @@ export class AgentMemory {
         this.db.close();
         this.preferencesCache.clear();
         this.initialized = false;
+        // Drop ourselves from the singleton map so a later getInstance() builds
+        // a fresh, usable instance instead of handing back this closed one.
+        if (AgentMemory.instances.get(this.projectPath) === this) {
+            AgentMemory.instances.delete(this.projectPath);
+        }
     }
 
     /**

@@ -3,24 +3,33 @@
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { ReportFormat } from "@raiken/core";
 import {
+    AgentMemory,
     AI_PROVIDER_IDS,
     CodeGraph,
     CodeGraphDB,
+    cleanGeneratedTestCode,
     DiscoveryQueryService,
     EmbeddingsGenerator,
     EntryPointDetector,
+    extractReporterJson,
     formatBytes,
     fullAstToSearchableText,
     getCurrentBranch,
+    getProvider,
     getQuickInterpretation,
+    getTestRepair,
     listProviderModels,
     listProviders,
     ProjectContext,
+    parsePlaywrightReport,
     parseTicketFromBranch,
     playwrightConfigExists,
     queryTrace,
+    raikenConfigSchema,
     readApiKeyFromEnv,
+    readConfiguredTestDirectory,
     readPlaywrightBaseURL,
     resolveAIConfig,
     runCi,
@@ -32,6 +41,7 @@ import {
     syncCurrentTicket,
     writePlaywrightConfig,
     writeProjectContext,
+    writeTestRunReport,
 } from "@raiken/core";
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
@@ -68,7 +78,6 @@ export interface Context {
     projectPath: string;
 }
 
-// In-memory message store (persists until server stops)
 interface ChatMessage {
     id: string;
     content: string;
@@ -77,21 +86,153 @@ interface ChatMessage {
     fileMentions?: string[];
 }
 
-// Store messages per project path
+// Chat history is persisted to disk under the project's `.raiken/` directory so
+// it survives dashboard refreshes AND server restarts. The in-memory Map is a
+// write-through cache keyed by project path (one server usually serves a single
+// project, but keying by path keeps it correct if that ever changes).
 const messageStore: Map<string, ChatMessage[]> = new Map();
 
+// Bound the on-disk history so a long-lived project doesn't grow the file
+// without limit. Keeps the most recent messages.
+const MAX_PERSISTED_MESSAGES = 500;
+
+function getChatHistoryPath(projectPath: string): string {
+    return path.join(projectPath, ".raiken", "chat-history.json");
+}
+
+/**
+ * Write a file atomically: write to a sibling temp file, then rename over the
+ * target. rename() is atomic on the same filesystem, so a crash mid-write can
+ * never leave a truncated/corrupt destination — readers see either the old file
+ * or the fully-written new one.
+ */
+async function writeFileAtomic(filePath: string, data: string): Promise<void> {
+    const dir = path.dirname(filePath);
+    await fs.mkdir(dir, { recursive: true });
+    const tmp = path.join(dir, `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
+    await fs.writeFile(tmp, data, "utf-8");
+    await fs.rename(tmp, filePath);
+}
+
+/**
+ * Hard ceiling for a single `runTests` invocation. Playwright has its own
+ * per-test timeout, but a wedged driver/browser or an unreachable baseURL can
+ * hang the whole process indefinitely; this guarantees the request always
+ * settles so the dashboard's run spinner can't get stuck forever.
+ */
+const TEST_RUN_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Projects with a Playwright run in flight. A per-project lock so rapid Run
+ * clicks (or a run + an auto-repair run) can't spawn overlapping Playwright
+ * processes that race on the same temp specs / reporter output.
+ */
+const activeTestRuns = new Set<string>();
+
+/**
+ * Remove orphaned scratch-run spec files (`*.raiken-run-<ts>.spec.ts`) that a
+ * previous run failed to clean up — e.g. the server was SIGKILLed mid-run, so
+ * the on-close cleanup never fired. Only files older than `maxAgeMs` are removed
+ * so an in-flight concurrent run's temp file is never deleted out from under it.
+ */
+async function sweepStaleTempSpecs(dirAbs: string, maxAgeMs = 10 * 60 * 1000): Promise<void> {
+    try {
+        const entries = await fs.readdir(dirAbs);
+        const now = Date.now();
+        for (const name of entries) {
+            const match = name.match(/\.raiken-run-(\d+)\.spec\.ts$/);
+            if (!match) continue;
+            const ts = Number(match[1]);
+            if (Number.isFinite(ts) && now - ts > maxAgeMs) {
+                await fs.rm(path.join(dirAbs, name), { force: true });
+            }
+        }
+    } catch {
+        // Best-effort; directory may not exist yet.
+    }
+}
+
+function writeFileAtomicSync(filePath: string, data: string): void {
+    const dir = path.dirname(filePath);
+    fsSync.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
+    fsSync.writeFileSync(tmp, data, "utf-8");
+    fsSync.renameSync(tmp, filePath);
+}
+
+/**
+ * Throw if `candidate` resolves outside `projectPath`. Guards against absolute
+ * paths and `..` traversal in user-influenced values (testDir, filenames).
+ * Uses path.sep so a sibling dir with a shared prefix (…/foo-bar for root …/foo)
+ * can't slip through a bare startsWith check.
+ */
+function assertUnderProjectRoot(candidate: string, projectPath: string): string {
+    const root = path.resolve(projectPath);
+    const target = path.resolve(candidate);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+        throw new Error("Path escapes the project directory.");
+    }
+    return target;
+}
+
+function loadMessagesFromDisk(projectPath: string): ChatMessage[] {
+    try {
+        const raw = fsSync.readFileSync(getChatHistoryPath(projectPath), "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.messages)) {
+            return parsed.messages as ChatMessage[];
+        }
+        // Tolerate a bare array as well.
+        if (Array.isArray(parsed)) {
+            return parsed as ChatMessage[];
+        }
+    } catch {
+        // Missing/corrupt file — start empty.
+    }
+    return [];
+}
+
+function persistMessagesToDisk(projectPath: string, messages: ChatMessage[]): void {
+    try {
+        writeFileAtomicSync(getChatHistoryPath(projectPath), JSON.stringify({ messages }, null, 2));
+    } catch (error) {
+        console.warn(
+            "Failed to persist chat history:",
+            error instanceof Error ? error.message : error,
+        );
+    }
+}
+
 function getMessages(projectPath: string): ChatMessage[] {
+    // Lazily hydrate the cache from disk on first access so a fresh server
+    // process picks up the previous session's chat.
+    if (!messageStore.has(projectPath)) {
+        messageStore.set(projectPath, loadMessagesFromDisk(projectPath));
+    }
     return messageStore.get(projectPath) || [];
 }
 
 function addMessage(projectPath: string, message: ChatMessage): void {
     const messages = getMessages(projectPath);
-    messages.push(message);
+    // Idempotent on message id: the dashboard can re-send the same message
+    // (retries, React re-renders, reconnects). Update in place instead of
+    // appending a duplicate row so the persisted history stays clean.
+    const existingIndex = message.id ? messages.findIndex((m) => m.id === message.id) : -1;
+    if (existingIndex >= 0) {
+        messages[existingIndex] = message;
+    } else {
+        messages.push(message);
+    }
+    if (messages.length > MAX_PERSISTED_MESSAGES) {
+        messages.splice(0, messages.length - MAX_PERSISTED_MESSAGES);
+    }
     messageStore.set(projectPath, messages);
+    persistMessagesToDisk(projectPath, messages);
 }
 
 function clearMessages(projectPath: string): void {
     messageStore.set(projectPath, []);
+    persistMessagesToDisk(projectPath, []);
 }
 
 type DiscoveryPhase = "idle" | "running" | "paused" | "completed" | "error";
@@ -225,7 +366,7 @@ async function hydrateDiscoveryState(projectPath: string): Promise<DiscoveryRunt
             const recovered = queryService.recoverStaleSessions();
             if (recovered > 0) {
                 console.log(
-                    `⚠️  Recovered ${recovered} stale discovery session(s) for ${projectPath}`,
+                    `Recovered ${recovered} stale discovery session(s) for ${projectPath}`,
                 );
             }
         }
@@ -323,7 +464,7 @@ async function hydrateDiscoveryState(projectPath: string): Promise<DiscoveryRunt
                         : session.blockedAtUrl || session.startUrl;
                     if (!resumeUrl) return;
                     console.log(
-                        `🔁 Auto-resuming discovery for ${projectPath} after blockers cleared (purge=${purgeQueueOnResume}, url=${resumeUrl})`,
+                        `Auto-resuming discovery for ${projectPath} after blockers cleared (purge=${purgeQueueOnResume}, url=${resumeUrl})`,
                     );
                     pushDiscoveryEvent(projectPath, {
                         type: "continued",
@@ -644,6 +785,7 @@ function startDiscoveryJob(options: {
         purgeQueueOnResume: options.purgeQueueOnResume ?? false,
         storageStatePath,
         maxRunTimeMs: config.maxRunTimeMs,
+        preserveQueryParams: config.preserveQueryParams,
     });
 
     attachDiscoveryRuntimeListeners(options.projectPath, discovery);
@@ -760,7 +902,19 @@ export const appRouter = t.router({
         const configPath = path.join(ctx.projectPath, "raiken.config.json");
         try {
             const raw = await fs.readFile(configPath, "utf-8");
-            return JSON.parse(raw) as Record<string, unknown>;
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            // Surface (but don't hide) an on-disk config that no longer matches
+            // the schema — e.g. hand-edited to an out-of-range value. We still
+            // return it so the UI can show/fix the current values, but log so
+            // the mismatch isn't silent.
+            const result = raikenConfigSchema.safeParse(parsed);
+            if (!result.success) {
+                console.warn(
+                    "raiken.config.json failed schema validation:",
+                    result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+                );
+            }
+            return parsed;
         } catch {
             return {} as Record<string, unknown>;
         }
@@ -783,7 +937,25 @@ export const appRouter = t.router({
             }
 
             const merged = deepMerge(existing, input.config);
-            await fs.writeFile(configPath, JSON.stringify(merged, null, 4), "utf-8");
+
+            // Validate the merged result BEFORE writing so an invalid update
+            // (bad provider, out-of-range temperature, wrong type) is rejected
+            // instead of silently persisted and then diverging from what the
+            // rest of the app resolves. All fields are optional in the schema,
+            // so a well-formed partial config always passes.
+            const validation = raikenConfigSchema.safeParse(merged);
+            if (!validation.success) {
+                return {
+                    success: false,
+                    errors: validation.error.issues.map(
+                        (i) => `${i.path.join(".") || "config"}: ${i.message}`,
+                    ),
+                };
+            }
+
+            // Atomic write so a crash mid-save can't corrupt raiken.config.json
+            // (which would otherwise read back as {} and reset AI keys/testDir).
+            await writeFileAtomic(configPath, JSON.stringify(merged, null, 4));
             return { success: true };
         }),
 
@@ -804,8 +976,11 @@ export const appRouter = t.router({
                 publicCatalog: p.publicCatalog,
                 apiKeyUrl: p.apiKeyUrl,
                 apiKeyPlaceholder: p.apiKeyPlaceholder,
-                /** Whether this provider has a usable API key (env or config). */
-                hasKey: Boolean(readApiKeyFromEnv(p.id)),
+                recommendedModels: p.recommendedModels,
+                /** Whether this provider has a usable API key (env or saved config). */
+                hasKey:
+                    Boolean(readApiKeyFromEnv(p.id)) ||
+                    (resolved.provider === p.id && resolved.apiKeySource !== "none"),
             })),
             current: {
                 provider: resolved.provider,
@@ -864,6 +1039,18 @@ export const appRouter = t.router({
 
     clearChatMessages: t.procedure.mutation(({ ctx }) => {
         clearMessages(ctx.projectPath);
+        // Clearing the conversation should also reset the agent's working
+        // memory (goal, remembered crawl, pause + observed login), otherwise a
+        // "fresh" chat still drags in the previous task's state.
+        try {
+            const memory = AgentMemory.getInstance(ctx.projectPath);
+            memory.clearGoalState();
+            memory.clearLastExploration();
+            memory.setPreference("paused_reason", "");
+            memory.setPreference("auth_login", "");
+        } catch {
+            /* memory unavailable — chat still cleared */
+        }
         return { success: true };
     }),
 
@@ -877,8 +1064,8 @@ export const appRouter = t.router({
                 persist: z.boolean().default(true),
             }),
         )
-        .mutation(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .mutation(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             // Detect entry points
             const detector = new EntryPointDetector(projectPath);
             const entryPoints = await detector.detectEntryPoints();
@@ -951,8 +1138,8 @@ export const appRouter = t.router({
                 path: z.string().optional(),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
             const stats = db.getStats();
             db.close();
@@ -983,15 +1170,21 @@ export const appRouter = t.router({
         .input(
             z.object({
                 path: z.string().optional(),
-                limit: z.number().default(100),
+                limit: z.number().default(1000),
                 offset: z.number().default(0),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
-            const allFiles = db.getFiles();
+            const rawFiles = db.getFiles();
             db.close();
+
+            // Never surface scratch run specs (`*.raiken-run-<ts>.spec.ts`) —
+            // they spawn ghost editor tabs that vanish when the run cleans up.
+            const allFiles = rawFiles.filter(
+                (file) => !/\.raiken-run-\d+\.spec\.(ts|tsx|js|jsx)$/.test(file.relative_path),
+            );
 
             const paginated = allFiles.slice(input.offset, input.offset + input.limit);
 
@@ -1023,8 +1216,8 @@ export const appRouter = t.router({
                 filePath: z.string(),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
 
             const dependencies = db.getDependencies(path.join(projectPath, input.filePath));
@@ -1046,9 +1239,15 @@ export const appRouter = t.router({
                 filePath: z.string(),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = process.cwd();
-            const fullPath = path.join(projectPath, input.filePath);
+        .query(async ({ input, ctx }) => {
+            const projectPath = ctx.projectPath;
+            // Reject absolute paths and `..` traversal so a crafted filePath
+            // can't read arbitrary files outside the project (the save
+            // procedures already guard this; reads must match).
+            const fullPath = assertUnderProjectRoot(
+                path.join(projectPath, input.filePath),
+                projectPath,
+            );
 
             try {
                 const fs = await import("node:fs/promises");
@@ -1074,8 +1273,8 @@ export const appRouter = t.router({
                 forceRegenerate: z.boolean().default(false),
             }),
         )
-        .mutation(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .mutation(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
             const embGen = EmbeddingsGenerator.getInstance();
 
@@ -1088,7 +1287,7 @@ export const appRouter = t.router({
                 let totalChunks = 0;
                 let filesProcessed = 0;
 
-                console.log(`🔄 Generating embeddings for ${files.length} files...`);
+                console.log(`Generating embeddings for ${files.length} files...`);
 
                 for (const file of files) {
                     // Skip if embeddings already exist and not forcing regeneration
@@ -1098,7 +1297,7 @@ export const appRouter = t.router({
 
                     // Use full AST for richer embeddings (needed for test generation)
                     if (!file.ast) {
-                        console.warn(`⚠️  No AST data for ${file.relative_path}, skipping`);
+                        console.warn(`No AST data for ${file.relative_path}, skipping`);
                         continue;
                     }
 
@@ -1107,7 +1306,7 @@ export const appRouter = t.router({
                     try {
                         ast = JSON.parse(file.ast);
                     } catch {
-                        console.warn(`⚠️  Failed to parse AST for ${file.relative_path}, skipping`);
+                        console.warn(`Failed to parse AST for ${file.relative_path}, skipping`);
                         continue;
                     }
 
@@ -1181,8 +1380,8 @@ export const appRouter = t.router({
                 chunkTypes: z.array(z.enum(["function", "class", "file", "type"])).optional(),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
             const embGen = EmbeddingsGenerator.getInstance();
 
@@ -1238,8 +1437,8 @@ export const appRouter = t.router({
                 path: z.string().optional(),
             }),
         )
-        .query(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(async ({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
 
             const totalEmbeddings = db.getEmbeddingsCount();
@@ -1264,8 +1463,8 @@ export const appRouter = t.router({
                 path: z.string().optional(),
             }),
         )
-        .query(({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .query(({ input, ctx }) => {
+            const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
             const results = db.getAffectedTests(input.changedFiles);
             db.close();
@@ -1279,8 +1478,8 @@ export const appRouter = t.router({
                 path: z.string().optional(),
             }),
         )
-        .mutation(async ({ input }) => {
-            const projectPath = input.path || process.cwd();
+        .mutation(async ({ input, ctx: trpcCtx }) => {
+            const projectPath = input.path || trpcCtx.projectPath;
             const ctx = ProjectContext.getInstance(projectPath);
             if (!ctx.isInitialized()) {
                 await ctx.initialize();
@@ -1308,7 +1507,6 @@ export const appRouter = t.router({
             const projectPath = input.path || ctx.projectPath;
 
             let integrationConfig: Record<string, unknown> | undefined;
-            let aiConfig: { apiKey?: string; model?: string; baseURL?: string } | undefined;
 
             try {
                 const configContent = await fs.readFile(
@@ -1317,14 +1515,19 @@ export const appRouter = t.router({
                 );
                 const raw = JSON.parse(configContent);
                 integrationConfig = raw?.integrations;
-                aiConfig = {
-                    apiKey: raw?.ai?.apiKey || process.env["OPENROUTER_API_KEY"],
-                    model: raw?.ai?.model,
-                    baseURL: raw?.ai?.baseURL,
-                };
             } catch {
-                aiConfig = { apiKey: process.env["OPENROUTER_API_KEY"] };
+                // No config file — integrations stay undefined.
             }
+
+            // Resolve AI config through the multi-provider resolver so the
+            // configured provider + its env var (not just OPENROUTER_API_KEY)
+            // is honored.
+            const resolved = resolveAIConfig(projectPath);
+            const aiConfig: { apiKey?: string; model?: string; baseURL?: string } = {
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                baseURL: resolved.baseURL,
+            };
 
             const result = await syncCurrentTicket({
                 projectPath,
@@ -1378,40 +1581,27 @@ export const appRouter = t.router({
                 content: z.string(),
                 testDir: z.string().optional(),
                 sourceFiles: z.array(z.string()).optional(),
+                // When true, never overwrite an existing file with different
+                // content — pick a unique name (`name-2.spec.ts`, …) instead.
+                // Used for brand-new generations / scratch auto-save so two
+                // distinct tests can't silently clobber each other.
+                avoidOverwrite: z.boolean().optional(),
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const { fileName, testDir: customTestDir, sourceFiles } = input;
-            let { content } = input;
+            const { testDir: customTestDir, sourceFiles } = input;
+            let { fileName } = input;
+            // Single shared normalization so every save path writes identical bytes.
+            const content = cleanGeneratedTestCode(input.content);
 
-            // Extract code from markdown fences if present
-            const fenceMatch = content.match(
-                /```(?:typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/i,
-            );
-            if (fenceMatch) {
-                content = fenceMatch[1];
-            } else {
-                // Fallback: strip opening fence from start
-                content = content.replace(/^```(?:typescript|ts|javascript|js)?\s*\n?/i, "");
-                // Strip closing fence and anything after it
-                const closingIdx = content.lastIndexOf("\n```");
-                if (closingIdx !== -1) {
-                    content = content.substring(0, closingIdx);
-                }
-            }
-            content = content.trim();
-
-            // Load test directory from raiken.config.json if exists
-            let testDirectory = customTestDir || "e2e";
-            const configPath = path.join(ctx.projectPath, "raiken.config.json");
-
-            try {
-                const configContent = await fs.readFile(configPath, "utf-8");
-                const config = JSON.parse(configContent);
-                testDirectory = config.testDirectory || testDirectory;
-            } catch {
-                // Use default or provided testDir
-            }
+            // Resolve the target directory. An explicitly requested `testDir`
+            // (e.g. the directory of the file the user has open) MUST win — only
+            // fall back to the project's configured `testDirectory` when the
+            // caller did not pin a location. Previously config always won, which
+            // silently wrote `e2e/x.spec.ts` while the user's open file lived at
+            // `tests/e2e/x.spec.ts`, leaving two copies on disk.
+            const testDirectory =
+                customTestDir || readConfiguredTestDirectory(ctx.projectPath) || "e2e";
 
             // Validate filename
             if (!fileName.match(/^[a-zA-Z0-9_-]+\.(spec|test)\.(ts|tsx|js|jsx)$/)) {
@@ -1427,13 +1617,49 @@ export const appRouter = t.router({
                 );
             }
 
-            // Create test directory if it doesn't exist
-            const testDirPath = path.join(ctx.projectPath, testDirectory);
+            // Create test directory if it doesn't exist. Guard against a
+            // testDir (from the client or config) that is absolute or uses `..`
+            // to escape the project root — path.join lets an absolute segment
+            // win, so we must resolve-and-check, not trust the string.
+            const testDirPath = assertUnderProjectRoot(
+                path.join(ctx.projectPath, testDirectory),
+                ctx.projectPath,
+            );
             await fs.mkdir(testDirPath, { recursive: true });
 
-            // Write the test file
-            const filePath = path.join(testDirPath, fileName);
-            await fs.writeFile(filePath, content, "utf-8");
+            // Avoid clobbering a different existing test: if the target exists
+            // with different content, pick the next free `name-N.spec.ts`. If it
+            // exists with identical content, reuse it (re-saving is idempotent).
+            if (input.avoidOverwrite) {
+                const m = fileName.match(/^(.*)\.(spec|test)\.(ts|tsx|js|jsx)$/);
+                if (m) {
+                    const [, stem, kind, ext] = m;
+                    let candidate = fileName;
+                    let n = 1;
+                    while (true) {
+                        const abs = path.join(testDirPath, candidate);
+                        let existing: string | null = null;
+                        try {
+                            existing = await fs.readFile(abs, "utf-8");
+                        } catch {
+                            existing = null; // free slot
+                        }
+                        if (existing === null || existing === content) {
+                            fileName = candidate;
+                            break;
+                        }
+                        n += 1;
+                        candidate = `${stem}-${n}.${kind}.${ext}`;
+                    }
+                }
+            }
+
+            // Write the test file (atomically so a crash can't leave a truncated spec)
+            const filePath = assertUnderProjectRoot(
+                path.join(testDirPath, fileName),
+                ctx.projectPath,
+            );
+            await writeFileAtomic(filePath, content);
 
             console.log(`✓ Saved generated test: ${path.relative(ctx.projectPath, filePath)}`);
 
@@ -1451,6 +1677,9 @@ export const appRouter = t.router({
                 success: true,
                 filePath: path.relative(ctx.projectPath, filePath),
                 absolutePath: filePath,
+                // Return the exact bytes written so the editor can display disk
+                // truth instead of an un-cleaned client-side copy.
+                content,
             };
         }),
 
@@ -1462,17 +1691,15 @@ export const appRouter = t.router({
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const resolved = path.isAbsolute(input.filePath)
-                ? input.filePath
-                : path.join(ctx.projectPath, input.filePath);
-
-            // Prevent writes outside project
-            if (!resolved.startsWith(ctx.projectPath)) {
-                throw new Error("Cannot write files outside the project directory");
-            }
+            const resolved = assertUnderProjectRoot(
+                path.isAbsolute(input.filePath)
+                    ? input.filePath
+                    : path.join(ctx.projectPath, input.filePath),
+                ctx.projectPath,
+            );
 
             await fs.mkdir(path.dirname(resolved), { recursive: true });
-            await fs.writeFile(resolved, input.content, "utf-8");
+            await writeFileAtomic(resolved, input.content);
             console.log(`✓ Saved file: ${path.relative(ctx.projectPath, resolved)}`);
 
             return {
@@ -1488,13 +1715,12 @@ export const appRouter = t.router({
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const resolved = path.isAbsolute(input.filePath)
-                ? input.filePath
-                : path.join(ctx.projectPath, input.filePath);
-
-            if (!resolved.startsWith(ctx.projectPath)) {
-                throw new Error("Cannot delete files outside the project directory");
-            }
+            const resolved = assertUnderProjectRoot(
+                path.isAbsolute(input.filePath)
+                    ? input.filePath
+                    : path.join(ctx.projectPath, input.filePath),
+                ctx.projectPath,
+            );
 
             try {
                 await fs.access(resolved);
@@ -1503,12 +1729,89 @@ export const appRouter = t.router({
             }
 
             await fs.unlink(resolved);
-            console.log(`🗑️  Deleted file: ${path.relative(ctx.projectPath, resolved)}`);
+            const relPath = path.relative(ctx.projectPath, resolved);
+            console.log(`Deleted file: ${relPath}`);
+
+            // Drop DB records tied to this test so impact analysis and remembered
+            // failures don't reference a file that no longer exists.
+            try {
+                const db = new CodeGraphDB(ctx.projectPath);
+                db.deleteTestRecords(relPath);
+                db.close();
+            } catch (err) {
+                console.warn("Failed to clean test records for deleted file:", err);
+            }
 
             return {
                 success: true,
-                filePath: path.relative(ctx.projectPath, resolved),
+                filePath: relPath,
             };
+        }),
+
+    // Rename a test file on disk (within its current directory). Lets the user
+    // fix an auto-derived name without deleting + re-saving. Validates the new
+    // name with the same rules as saveGeneratedTest and refuses to clobber an
+    // existing file.
+    renameTestFile: t.procedure
+        .input(
+            z.object({
+                filePath: z.string(),
+                newFileName: z.string(),
+            }),
+        )
+        .mutation(async ({ input, ctx }) => {
+            const newName = input.newFileName.trim();
+            if (!newName.match(/^[a-zA-Z0-9_-]+\.(spec|test)\.(ts|tsx|js|jsx)$/)) {
+                throw new Error(
+                    "Invalid filename. Must be a test file (*.spec.ts, *.test.tsx, etc.) with no path separators.",
+                );
+            }
+
+            const source = assertUnderProjectRoot(
+                path.isAbsolute(input.filePath)
+                    ? input.filePath
+                    : path.join(ctx.projectPath, input.filePath),
+                ctx.projectPath,
+            );
+            try {
+                await fs.access(source);
+            } catch {
+                throw new Error(`File not found: ${input.filePath}`);
+            }
+
+            const target = assertUnderProjectRoot(
+                path.join(path.dirname(source), newName),
+                ctx.projectPath,
+            );
+            if (target === source) {
+                return { success: true, filePath: path.relative(ctx.projectPath, source) };
+            }
+            // Never silently overwrite a different file.
+            try {
+                await fs.access(target);
+                throw new Error(`A file named ${newName} already exists in that folder.`);
+            } catch (err) {
+                if (err instanceof Error && err.message.includes("already exists")) throw err;
+                // ENOENT → target is free, proceed.
+            }
+
+            await fs.rename(source, target);
+            const oldRel = path.relative(ctx.projectPath, source);
+            const newRel = path.relative(ctx.projectPath, target);
+            console.log(`✎ Renamed test: ${oldRel} → ${newRel}`);
+
+            // The DB keys test records by path; drop the stale ones so impact
+            // analysis / remembered failures don't point at the old name. The
+            // file-watcher will re-index the new path.
+            try {
+                const db = new CodeGraphDB(ctx.projectPath);
+                db.deleteTestRecords(oldRel);
+                db.close();
+            } catch (err) {
+                console.warn("Failed to clean test records after rename:", err);
+            }
+
+            return { success: true, filePath: newRel };
         }),
 
     // List test files from the filesystem (not from code graph)
@@ -1556,8 +1859,15 @@ export const appRouter = t.router({
                         if (entry.isDirectory()) {
                             await scanDir(entryPath, entryRelPath);
                         } else if (entry.isFile()) {
-                            // Check if it's a test file
-                            if (/\.(test|spec|e2e)\.(ts|tsx|js|jsx)$/.test(entry.name)) {
+                            // Check if it's a test file. Exclude scratch run
+                            // specs (`*.raiken-run-<ts>.spec.ts`) — same filter
+                            // as getGraphFiles above; a temp file that survives
+                            // cleanup (e.g. a crash mid-run) should not spawn a
+                            // ghost tab in the Files panel either.
+                            if (
+                                /\.(test|spec|e2e)\.(ts|tsx|js|jsx)$/.test(entry.name) &&
+                                !/\.raiken-run-\d+\.spec\.(ts|tsx|js|jsx)$/.test(entry.name)
+                            ) {
                                 testFiles.push({
                                     name: entry.name,
                                     path: `${testDirectory}/${entryRelPath}`,
@@ -1585,6 +1895,13 @@ export const appRouter = t.router({
                 testName: z.string().optional(), // Specific test name to run
                 parallel: z.boolean().default(true), // Run tests in parallel
                 workers: z.number().optional(), // Number of workers (auto if not specified)
+                // Live editor buffer to execute. When present we run exactly what
+                // the user sees (unsaved edits / scratch drafts) instead of stale
+                // on-disk content — so "open a test → Run" works without a manual
+                // save step, and editing then running runs the edits.
+                inlineContent: z.string().optional(),
+                // Suggested name used to derive a temp filename for scratch runs.
+                inlineFileName: z.string().optional(),
             }),
         )
         .mutation(async ({ input, ctx }) => {
@@ -1598,16 +1915,91 @@ export const appRouter = t.router({
                 });
                 if (result.success) {
                     configPath = result.path;
-                    console.log("🧪 Auto-created playwright.config.ts");
+                    console.log("Auto-created playwright.config.ts");
                 }
             }
 
-            return new Promise((resolve) => {
+            // Resolve what path Playwright should actually execute. If the caller
+            // sent the live buffer, materialize it: a real (non-scratch) file is
+            // updated in place (save-on-run); a scratch draft is written to a
+            // throwaway temp spec that we delete after the run.
+            let runTargetFile = input.testFile;
+            let tempFileToCleanup: string | null = null;
+
+            if (input.inlineContent !== undefined) {
+                const cleaned = cleanGeneratedTestCode(input.inlineContent);
+                const isScratch = !input.testFile || input.testFile.startsWith("scratch:");
+
+                if (!isScratch && input.testFile) {
+                    const resolved = path.isAbsolute(input.testFile)
+                        ? input.testFile
+                        : path.join(ctx.projectPath, input.testFile);
+                    if (
+                        resolved === ctx.projectPath ||
+                        resolved.startsWith(`${ctx.projectPath}${path.sep}`)
+                    ) {
+                        await writeFileAtomic(resolved, cleaned);
+                        runTargetFile = input.testFile;
+                    }
+                } else {
+                    const dir = readConfiguredTestDirectory(ctx.projectPath) || "e2e";
+                    const baseRaw = (
+                        input.inlineFileName ||
+                        input.testFile ||
+                        "raiken-scratch"
+                    ).replace(/^scratch:/, "");
+                    const baseName =
+                        path
+                            .basename(baseRaw)
+                            .replace(/\.(spec|test)\.(t|j)sx?$/i, "")
+                            .replace(/[^a-zA-Z0-9_-]+/g, "-")
+                            .replace(/(^-|-$)/g, "") || "raiken-scratch";
+                    const tempRel = path.join(dir, `${baseName}.raiken-run-${Date.now()}.spec.ts`);
+                    const tempAbs = path.join(ctx.projectPath, tempRel);
+                    // Clear out any orphaned temps from previously crashed runs.
+                    await sweepStaleTempSpecs(path.dirname(tempAbs));
+                    await writeFileAtomic(tempAbs, cleaned);
+                    runTargetFile = tempRel;
+                    tempFileToCleanup = tempAbs;
+                }
+            }
+
+            const cleanupTemp = () => {
+                if (!tempFileToCleanup) return;
+                try {
+                    fsSync.rmSync(tempFileToCleanup, { force: true });
+                } catch (err) {
+                    console.warn("Failed to remove temp test file:", err);
+                }
+            };
+
+            const runKey = path.resolve(ctx.projectPath);
+            if (activeTestRuns.has(runKey)) {
+                cleanupTemp();
+                return {
+                    success: false,
+                    exitCode: null,
+                    stdout: "",
+                    stderr: "A test run is already in progress for this project. Please wait for it to finish.",
+                    results: null,
+                    busy: true,
+                };
+            }
+            activeTestRuns.add(runKey);
+            const releaseLock = () => activeTestRuns.delete(runKey);
+
+            return new Promise((resolveRaw) => {
+                // Release the per-project run lock exactly once, whenever the run
+                // settles (close / error / timeout).
+                const resolve = (value: unknown) => {
+                    releaseLock();
+                    resolveRaw(value);
+                };
                 const args = ["test"];
 
                 // Add specific test file if provided
-                if (input.testFile) {
-                    args.push(input.testFile);
+                if (runTargetFile) {
+                    args.push(runTargetFile);
                 }
 
                 // Add test name filter if provided
@@ -1615,11 +2007,16 @@ export const appRouter = t.router({
                     args.push("-g", input.testName);
                 }
 
-                // Performance options - only add workers if explicitly set to a number
-                // Omitting --workers flag lets Playwright auto-detect
-                if (input.workers !== undefined && typeof input.workers === "number") {
-                    args.push(`--workers=${input.workers}`);
-                }
+                // Default to serial execution. Raiken drives a single live app
+                // instance backed by ONE authenticated account, so Playwright's
+                // auto-detected parallelism overwhelms dev servers (load-event
+                // timeouts) and races on shared account state — flaky failures
+                // unrelated to the code. Callers can still opt into parallelism.
+                const workers =
+                    input.workers !== undefined && typeof input.workers === "number"
+                        ? input.workers
+                        : 1;
+                args.push(`--workers=${workers}`);
 
                 // Add reporter for structured output
                 args.push("--reporter=json");
@@ -1627,9 +2024,6 @@ export const appRouter = t.router({
                 if (configPath) {
                     args.push("--config", configPath);
                 }
-
-                console.log(`🧪 Running tests: npx playwright ${args.join(" ")}`);
-                console.log(`🧪 Using config: ${configPath || "default"}`);
 
                 const testProcess = spawn("npx", ["playwright", ...args], {
                     cwd: ctx.projectPath,
@@ -1648,20 +2042,51 @@ export const appRouter = t.router({
                     stderr += data.toString();
                 });
 
-                testProcess.on("close", (code) => {
-                    console.log(`🧪 Tests completed with exit code: ${code}`);
+                // Guards so the timeout and close/error handlers can't both
+                // settle the promise. Without a timeout a hung Playwright run
+                // (stuck browser, unreachable baseURL) would leave the UI's
+                // `isRunningTests` spinner on forever with no way to recover.
+                let settled = false;
+                let killTimer: NodeJS.Timeout | null = null;
 
-                    // Try to parse JSON output
-                    let results = null;
-                    try {
-                        // Find the JSON part in the output
-                        const jsonMatch = stdout.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            results = JSON.parse(jsonMatch[0]);
+                const timeoutId = setTimeout(() => {
+                    console.warn(
+                        `Test run exceeded ${TEST_RUN_TIMEOUT_MS}ms — terminating process`,
+                    );
+                    testProcess.kill("SIGTERM");
+                    killTimer = setTimeout(() => {
+                        try {
+                            testProcess.kill("SIGKILL");
+                        } catch {
+                            // Already exited.
                         }
-                    } catch {
-                        // JSON parsing failed, use raw output
-                    }
+                    }, 5000);
+                    if (settled) return;
+                    settled = true;
+                    cleanupTemp();
+                    resolve({
+                        success: false,
+                        exitCode: null,
+                        stdout,
+                        stderr: `${stderr}\n[raiken] Test run timed out after ${Math.round(
+                            TEST_RUN_TIMEOUT_MS / 1000,
+                        )}s and was terminated.`,
+                        results: extractReporterJson(stdout),
+                    });
+                }, TEST_RUN_TIMEOUT_MS);
+
+                testProcess.on("close", (code) => {
+                    clearTimeout(timeoutId);
+                    if (killTimer) clearTimeout(killTimer);
+                    if (settled) return;
+                    settled = true;
+                    cleanupTemp();
+
+                    // Parse the Playwright JSON reporter object out of stdout.
+                    // Uses a balanced-brace scanner (shared with TestRunner) so
+                    // unrelated npm/npx output around the report doesn't corrupt
+                    // the match the way a greedy `{...}` regex would.
+                    const results = extractReporterJson(stdout);
 
                     resolve({
                         success: code === 0,
@@ -1673,7 +2098,12 @@ export const appRouter = t.router({
                 });
 
                 testProcess.on("error", (error) => {
-                    console.error("🧪 Test execution error:", error);
+                    clearTimeout(timeoutId);
+                    if (killTimer) clearTimeout(killTimer);
+                    if (settled) return;
+                    settled = true;
+                    console.error("Test execution error:", error);
+                    cleanupTemp();
                     resolve({
                         success: false,
                         exitCode: -1,
@@ -1683,6 +2113,70 @@ export const appRouter = t.router({
                     });
                 });
             });
+        }),
+
+    /**
+     * Write a detailed, shareable test-run report (HTML with embedded
+     * screenshots, plus optional Markdown/JSON) from a Playwright JSON report.
+     *
+     * `report` is the object returned by `runTests().results` (or read from a
+     * `results.json`); `rawReportJson` is a JSON string alternative. Files land
+     * under `<outputDir>` (default `test-reports/`) inside the project.
+     */
+    generateTestReport: t.procedure
+        .input(
+            z.object({
+                report: z.unknown().optional(),
+                rawReportJson: z.string().optional(),
+                rawOutput: z.string().optional(),
+                testFile: z.string().optional(),
+                title: z.string().optional(),
+                formats: z.array(z.enum(["html", "markdown", "json"])).optional(),
+                outputDir: z.string().optional(),
+            }),
+        )
+        .mutation(async ({ input, ctx }) => {
+            let reportJson: unknown = input.report;
+            if (reportJson === undefined && input.rawReportJson) {
+                reportJson = extractReporterJson(input.rawReportJson) ?? undefined;
+            }
+            if (reportJson === undefined) {
+                throw new Error(
+                    "No Playwright report provided. Pass `report` (parsed JSON) or `rawReportJson`.",
+                );
+            }
+
+            const run = parsePlaywrightReport(reportJson);
+
+            // Keep the output directory inside the project (path-traversal guard).
+            const outputDir = input.outputDir ?? "test-reports";
+            const resolvedOut = path.resolve(ctx.projectPath, outputDir);
+            if (
+                resolvedOut !== ctx.projectPath &&
+                !resolvedOut.startsWith(ctx.projectPath + path.sep)
+            ) {
+                throw new Error("Report output directory must be inside the project.");
+            }
+
+            const written = await writeTestRunReport({
+                projectPath: ctx.projectPath,
+                run,
+                rawOutput: input.rawOutput,
+                testFile: input.testFile,
+                title: input.title,
+                formats: input.formats as ReportFormat[] | undefined,
+                outputDir,
+            });
+
+            return {
+                outputDir: path.relative(ctx.projectPath, written.outputDir) || outputDir,
+                files: written.files.map((f) => path.relative(ctx.projectPath, f)),
+                htmlPath: written.htmlPath
+                    ? path.relative(ctx.projectPath, written.htmlPath)
+                    : undefined,
+                screenshotsEmbedded: written.screenshotsEmbedded,
+                summary: written.summary,
+            };
         }),
 
     // Generate optimized Playwright configuration
@@ -1817,10 +2311,16 @@ export const appRouter = t.router({
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const apiKey = process.env["OPENROUTER_API_KEY"];
-            if (!apiKey) {
+            // Use the project's configured AI provider (raiken.config.json +
+            // env), not a hardcoded OpenRouter key. This lets AI analysis work
+            // with whatever provider the user set up (OpenAI, Anthropic, etc.).
+            const resolved = resolveAIConfig(ctx.projectPath);
+            const provider = getProvider(resolved.provider);
+            const requiresKey = provider.envVars.length > 0;
+            if (requiresKey && !resolved.apiKey) {
+                const keyHint = provider.envVars[0] ?? "an API key";
                 return {
-                    interpretation: "Error: OPENROUTER_API_KEY not configured.",
+                    interpretation: `Error: No API key configured for ${provider.label}. Set ${keyHint} or add it in Settings.`,
                     error: true,
                     // Included so the response shape is uniform across all
                     // branches — keeps the dashboard's `data.testCodeSource`
@@ -1877,21 +2377,237 @@ export const appRouter = t.router({
                     testFilePath: input.testFilePath,
                     rawOutput: input.rawOutput,
                     sourceCode: input.sourceCode,
-                    domContext: input.domContext as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+                    domContext: input.domContext as Parameters<
+                        typeof getQuickInterpretation
+                    >[0]["domContext"],
                     projectPath: ctx.projectPath,
                 };
 
-                const interpretation = await getQuickInterpretation(context, { apiKey });
+                const interpretation = await getQuickInterpretation(context, {
+                    apiKey: resolved.apiKey ?? "",
+                    model: resolved.model,
+                    provider: resolved.provider,
+                    baseURL: resolved.baseURL,
+                });
                 return { interpretation, error: false, testCodeSource };
             } catch (error) {
                 console.error("Interpretation error:", error);
                 const raw = error instanceof Error ? error.message : String(error);
                 let interpretation = `Error interpreting results: ${raw}`;
                 if (raw.includes("402") || raw.includes("credits")) {
-                    interpretation =
-                        "Insufficient OpenRouter credits for AI analysis. Please add credits at https://openrouter.ai/settings/credits and try again.";
+                    interpretation = `Insufficient credits/quota for AI analysis with ${provider.label}. Check your account balance or switch providers in Settings, then try again.`;
                 }
                 return { interpretation, error: true, testCodeSource };
+            }
+        }),
+
+    // Repair a failing test — the closing half of the AI-analysis loop.
+    //
+    // `interpretTestResults` tells the developer WHAT broke; this produces the
+    // corrected spec so there is an actionable path from diagnosis to fix. The
+    // dashboard drops the returned code into the editor (unsaved) so the
+    // developer can review it, run the buffer, and save when happy. We
+    // deliberately do NOT auto-write to disk — the user asked for a clear path
+    // to fix, not a silent overwrite of their spec.
+    //
+    // Same evidence + disk-read semantics as `interpretTestResults`, plus the
+    // optional prior `interpretation` so the fix honours the diagnosis the user
+    // just read instead of re-deriving a (possibly different) root cause.
+    repairTestResults: t.procedure
+        .input(
+            z.object({
+                testResults: z.array(
+                    z.object({
+                        name: z.string(),
+                        suite: z.string(),
+                        status: z.enum(["passed", "failed", "skipped"]),
+                        duration: z.number().optional(),
+                        error: z
+                            .object({
+                                message: z.string().optional(),
+                                snippet: z.string().optional(),
+                                location: z
+                                    .object({
+                                        file: z.string(),
+                                        line: z.number(),
+                                        column: z.number(),
+                                    })
+                                    .optional(),
+                            })
+                            .optional(),
+                        // Per-test artifacts (failure screenshot, video, trace).
+                        // The server references them by name in the prompt AND
+                        // reads the screenshot bytes off disk to send to a
+                        // vision-capable model — so the fix is grounded in what
+                        // the page actually rendered, not just error text.
+                        attachments: z
+                            .array(
+                                z.object({
+                                    name: z.string(),
+                                    contentType: z.string().optional(),
+                                    path: z.string().optional(),
+                                }),
+                            )
+                            .optional(),
+                    }),
+                ),
+                testCode: z.string(),
+                testFilePath: z.string().optional(),
+                rawOutput: z.string().optional(),
+                sourceCode: z.string().optional(),
+                interpretation: z.string().optional(),
+                domContext: z
+                    .object({
+                        url: z.string(),
+                        title: z.string(),
+                        interactiveElements: z.array(
+                            z.object({
+                                tagName: z.string(),
+                                role: z.string().optional(),
+                                name: z.string().optional(),
+                                text: z.string().optional(),
+                                testId: z.string().optional(),
+                                suggestedSelectors: z.array(z.string()),
+                            }),
+                        ),
+                        formFields: z.array(
+                            z.object({
+                                name: z.string(),
+                                type: z.string(),
+                                label: z.string().optional(),
+                                placeholder: z.string().optional(),
+                                required: z.boolean(),
+                                suggestedSelector: z.string(),
+                            }),
+                        ),
+                    })
+                    .optional(),
+            }),
+        )
+        .mutation(async ({ input, ctx }) => {
+            const resolved = resolveAIConfig(ctx.projectPath);
+            const provider = getProvider(resolved.provider);
+            const requiresKey = provider.envVars.length > 0;
+            if (requiresKey && !resolved.apiKey) {
+                const keyHint = provider.envVars[0] ?? "an API key";
+                return {
+                    fixedCode: null as string | null,
+                    originalCode: input.testCode,
+                    mode: null as "edits" | "full" | null,
+                    editCount: null as number | null,
+                    matchFailed: false,
+                    filePath: input.testFilePath ?? null,
+                    error: `No API key configured for ${provider.label}. Set ${keyHint} or add it in Settings.`,
+                };
+            }
+
+            // Prefer the on-disk file (what Playwright actually ran) over the
+            // client snapshot — see `interpretTestResults` for the full
+            // rationale and the path-traversal guard.
+            const projectRoot = path.resolve(ctx.projectPath);
+            let testCode = input.testCode;
+            const rawPath = input.testFilePath;
+            if (rawPath && !rawPath.startsWith("scratch:")) {
+                const candidate = path.isAbsolute(rawPath)
+                    ? path.resolve(rawPath)
+                    : path.resolve(ctx.projectPath, rawPath);
+                const insideProject =
+                    candidate === projectRoot || candidate.startsWith(`${projectRoot}${path.sep}`);
+                if (insideProject) {
+                    try {
+                        testCode = await fs.readFile(candidate, "utf-8");
+                    } catch {
+                        // Keep the client snapshot.
+                    }
+                }
+            }
+
+            // Read failure-screenshot bytes so the repair model can SEE the page
+            // state, not just read error text. Guards: images only, prefer the
+            // `test-failed` capture, stay under the project root (path-traversal),
+            // and cap count + size so a huge artifact can't blow the request up.
+            const images: Array<{ name: string; data: Uint8Array; mediaType: string }> = [];
+            const MAX_REPAIR_IMAGES = 2;
+            const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+            for (const result of input.testResults) {
+                if (images.length >= MAX_REPAIR_IMAGES) break;
+                const atts = [...(result.attachments ?? [])].sort((a, b) => {
+                    // Prefer the failure screenshot captured at the timeout moment.
+                    const aFail = a.name?.toLowerCase().includes("test-failed") ? 0 : 1;
+                    const bFail = b.name?.toLowerCase().includes("test-failed") ? 0 : 1;
+                    return aFail - bFail;
+                });
+                for (const att of atts) {
+                    if (images.length >= MAX_REPAIR_IMAGES) break;
+                    const ct = (att.contentType ?? "").toLowerCase();
+                    if (!ct.startsWith("image/") || !att.path) continue;
+                    const candidate = path.isAbsolute(att.path)
+                        ? path.resolve(att.path)
+                        : path.resolve(ctx.projectPath, att.path);
+                    const insideProject =
+                        candidate === projectRoot ||
+                        candidate.startsWith(`${projectRoot}${path.sep}`);
+                    if (!insideProject) continue;
+                    try {
+                        const stat = await fs.stat(candidate);
+                        if (stat.size > MAX_IMAGE_BYTES) continue;
+                        const data = await fs.readFile(candidate);
+                        images.push({ name: att.name, data: new Uint8Array(data), mediaType: ct });
+                    } catch {
+                        // Unreadable / missing artifact — skip it.
+                    }
+                }
+            }
+
+            try {
+                const { fixedCode, originalCode, mode, editCount, matchFailed, error } =
+                    await getTestRepair(
+                        {
+                            testResults: input.testResults,
+                            testCode,
+                            testFilePath: input.testFilePath,
+                            rawOutput: input.rawOutput,
+                            sourceCode: input.sourceCode,
+                            interpretation: input.interpretation,
+                            domContext: input.domContext as Parameters<
+                                typeof getTestRepair
+                            >[0]["domContext"],
+                            images: images.length > 0 ? images : undefined,
+                            projectPath: ctx.projectPath,
+                        },
+                        {
+                            apiKey: resolved.apiKey ?? "",
+                            model: resolved.model,
+                            provider: resolved.provider,
+                            baseURL: resolved.baseURL,
+                        },
+                    );
+                return {
+                    fixedCode,
+                    // The exact content the fix was computed against (disk-preferred),
+                    // so the dashboard can render an accurate original-vs-proposed diff.
+                    originalCode: originalCode ?? testCode,
+                    mode: mode ?? null,
+                    editCount: editCount ?? null,
+                    matchFailed: matchFailed ?? false,
+                    filePath: input.testFilePath ?? null,
+                    error,
+                };
+            } catch (error) {
+                const raw = error instanceof Error ? error.message : String(error);
+                let msg = `Error repairing test: ${raw}`;
+                if (raw.includes("402") || raw.includes("credits")) {
+                    msg = `Insufficient credits/quota for AI repair with ${provider.label}. Check your account balance or switch providers in Settings, then try again.`;
+                }
+                return {
+                    fixedCode: null as string | null,
+                    originalCode: input.testCode,
+                    mode: null as "edits" | "full" | null,
+                    editCount: null as number | null,
+                    matchFailed: false,
+                    filePath: input.testFilePath ?? null,
+                    error: msg,
+                };
             }
         }),
 
@@ -1918,6 +2634,17 @@ export const appRouter = t.router({
                 return {
                     success: false,
                     message: "Discovery is already running",
+                    runtime,
+                };
+            }
+            // A paused session must be resumed via continueDiscovery, not
+            // restarted — a fresh Start here would drop the pending queue and
+            // the blocker the user is mid-way through resolving.
+            if (runtime.phase === "paused") {
+                return {
+                    success: false,
+                    message:
+                        "Discovery is paused. Resolve the blocker and Continue, or Clear before starting a new crawl.",
                     runtime,
                 };
             }
@@ -1998,7 +2725,11 @@ export const appRouter = t.router({
 
             const db = new CodeGraphDB(projectPath);
             try {
-                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                const siteDb = new SiteKnowledgeDB(
+                    db.getRawDatabase(),
+                    projectPath,
+                    loadDiscoveryConfig(projectPath).preserveQueryParams,
+                );
                 const activeSession = siteDb.getActiveSession();
 
                 if (!activeSession || activeSession.status !== "paused") {
@@ -2018,6 +2749,14 @@ export const appRouter = t.router({
                 // --------------------------------------------------------
                 const resolution = input.resolution;
                 const targetBlocker = input.blockerId ? siteDb.getBlocker(input.blockerId) : null;
+                const activeSessionId = activeSession.id;
+                if (!activeSessionId) {
+                    return {
+                        success: false,
+                        message: "Paused discovery session is missing an id",
+                        runtime: await hydrateDiscoveryState(projectPath),
+                    };
+                }
 
                 let skipUrl: string | null = null;
                 let resumeStartUrl = activeSession.blockedAtUrl || activeSession.startUrl;
@@ -2031,7 +2770,7 @@ export const appRouter = t.router({
                 if (resolution === "skip") {
                     skipUrl = targetBlocker?.url ?? activeSession.blockedAtUrl ?? null;
                     if (skipUrl) {
-                        siteDb.updateSession(activeSession.id!, {
+                        siteDb.updateSession(activeSessionId, {
                             skippedUrlsJson: JSON.stringify(
                                 Array.from(
                                     new Set([
@@ -2056,7 +2795,7 @@ export const appRouter = t.router({
                     resumeStartUrl = activeSession.startUrl;
                 } else if (resolution === "ignore_category") {
                     const category = input.category ?? targetBlocker?.category ?? "auth_required";
-                    siteDb.updateSession(activeSession.id!, {
+                    siteDb.updateSession(activeSessionId, {
                         ignoredCategoriesJson: JSON.stringify(
                             Array.from(
                                 new Set([
@@ -2358,7 +3097,11 @@ export const appRouter = t.router({
             const projectPath = input.path || ctx.projectPath;
             const db = new CodeGraphDB(projectPath);
             try {
-                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                const siteDb = new SiteKnowledgeDB(
+                    db.getRawDatabase(),
+                    projectPath,
+                    loadDiscoveryConfig(projectPath).preserveQueryParams,
+                );
                 const verified = siteDb.getVerifiedLinks();
                 const broken = siteDb.getBrokenLinks();
 
@@ -2476,7 +3219,11 @@ export const appRouter = t.router({
 
             const db = new CodeGraphDB(projectPath);
             try {
-                const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                const siteDb = new SiteKnowledgeDB(
+                    db.getRawDatabase(),
+                    projectPath,
+                    loadDiscoveryConfig(projectPath).preserveQueryParams,
+                );
                 siteDb.clearDiscoveryData();
             } catch (error) {
                 db.close();
@@ -2535,14 +3282,29 @@ export const appRouter = t.router({
             try {
                 const state = getDiscoveryState(projectPath);
                 const pauseUrl = state.currentUrl ?? null;
-                await job.discovery.pause();
+                // Pass blockedAtUrl so resume re-seeds the page the user was
+                // looking at (not just startUrl) and queue_json includes it.
+                await job.discovery.pause({ blockedAtUrl: pauseUrl });
                 // Stamp a manual blocker so the BlockerPanel renders this
                 // pause as a distinct, user-initiated stop the user can
                 // resolve with the same Continue/Skip/Ignore controls.
                 try {
                     const db = new CodeGraphDB(projectPath);
                     try {
-                        const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                        const siteDb = new SiteKnowledgeDB(
+                            db.getRawDatabase(),
+                            projectPath,
+                            loadDiscoveryConfig(projectPath).preserveQueryParams,
+                        );
+                        if (pauseUrl) {
+                            const session = siteDb.getActiveSession();
+                            if (session?.id) {
+                                siteDb.updateSession(session.id, {
+                                    status: "paused",
+                                    blockedAtUrl: pauseUrl,
+                                });
+                            }
+                        }
                         siteDb.saveBlocker({
                             projectPath,
                             url: pauseUrl ?? "manual_pause",
@@ -2649,7 +3411,11 @@ export const appRouter = t.router({
             try {
                 const db = new CodeGraphDB(projectPath);
                 try {
-                    const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+                    const siteDb = new SiteKnowledgeDB(
+                        db.getRawDatabase(),
+                        projectPath,
+                        loadDiscoveryConfig(projectPath).preserveQueryParams,
+                    );
                     if (blockerId) {
                         const blocker = siteDb.getBlocker(blockerId);
                         if (blocker) {
@@ -2760,6 +3526,10 @@ export const appRouter = t.router({
                     runtime: getDiscoveryState(projectPath),
                 };
             }
+            // Remove the job from the store up front so any concurrent
+            // auto-resume / continue poll can't grab this now-dying job during
+            // the async abort window and try to resume it.
+            discoveryJobStore.delete(projectPath);
             try {
                 await job.discovery.abort();
                 pushDiscoveryEvent(projectPath, {
@@ -2826,7 +3596,7 @@ export const appRouter = t.router({
         )
         .query(async ({ input, ctx }) => {
             const testDirectory =
-                input.testDirectory ?? (await loadConfiguredTestDirectory(ctx.projectPath));
+                input.testDirectory ?? readConfiguredTestDirectory(ctx.projectPath) ?? "e2e";
             return scanTests({
                 projectPath: ctx.projectPath,
                 testDirectory,
@@ -2937,42 +3707,28 @@ export const appRouter = t.router({
         }),
 });
 
-async function loadConfiguredTestDirectory(projectPath: string): Promise<string> {
-    try {
-        const raw = await fs.readFile(path.join(projectPath, "raiken.config.json"), "utf-8");
-        const parsed = JSON.parse(raw) as { testDirectory?: unknown };
-        if (typeof parsed.testDirectory === "string" && parsed.testDirectory.trim()) {
-            return parsed.testDirectory;
-        }
-    } catch {
-        // fall through to default
-    }
-    return "e2e";
-}
-
 async function loadAiAndIntegrations(projectPath: string): Promise<{
     integrationConfig?: Parameters<typeof runCover>[0]["integrations"];
     aiConfig: { apiKey?: string; model?: string; baseURL?: string };
 }> {
     let integrationConfig: Parameters<typeof runCover>[0]["integrations"] | undefined;
-    let aiConfig: { apiKey?: string; model?: string; baseURL?: string } = {
-        apiKey: process.env["OPENROUTER_API_KEY"],
-    };
     try {
         const raw = await fs.readFile(path.join(projectPath, "raiken.config.json"), "utf-8");
         const parsed = JSON.parse(raw) as {
             integrations?: unknown;
-            ai?: { apiKey?: string; model?: string; baseURL?: string };
         };
         integrationConfig = parsed.integrations as Parameters<typeof runCover>[0]["integrations"];
-        aiConfig = {
-            apiKey: parsed.ai?.apiKey || process.env["OPENROUTER_API_KEY"],
-            model: parsed.ai?.model,
-            baseURL: parsed.ai?.baseURL,
-        };
     } catch {
         // no config file — keep defaults
     }
+    // Resolve AI config through the multi-provider resolver so the configured
+    // provider + its env var (not just OPENROUTER_API_KEY) is honored.
+    const resolved = resolveAIConfig(projectPath);
+    const aiConfig: { apiKey?: string; model?: string; baseURL?: string } = {
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+        baseURL: resolved.baseURL,
+    };
     return { integrationConfig, aiConfig };
 }
 

@@ -10,8 +10,18 @@
  * - Tool calls logged for UI feedback
  */
 
+import path from "node:path";
 import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from "../agent/agent";
 import type { HITLAction } from "../agent/hitl-types";
+
+/**
+ * Projects with an agent run in flight. Concurrent runs for the same project
+ * share a single BrowserSession (keyed by projectPath), so two overlapping runs
+ * would drive the same browser tab into an inconsistent state (one navigating
+ * while the other clicks). We serialize per project and return a friendly
+ * "busy" message for the second caller, mirroring `runTests`' lock.
+ */
+const activeAgentRuns = new Set<string>();
 
 /**
  * Options for running the orchestrator
@@ -20,8 +30,15 @@ export interface RunOrchestratorOptions {
     userPrompt: string;
     projectPath: string;
     conversationHistory?: Array<{ role: string; content: string }>;
-    /** Callback when HITL confirmation is needed */
-    onHITL?: (action: HITLAction) => Promise<boolean>;
+    /**
+     * Path of the test file the user currently has open/highlighted. When set,
+     * a newly generated test overwrites this file instead of creating a new one.
+     */
+    targetTestFile?: string;
+    /** Files the user referenced (e.g. @mentions) to focus context gathering on. */
+    fileContext?: string[];
+    /** Abort signal to cancel the run when the client disconnects. */
+    signal?: AbortSignal;
     /** Callback for tool call events (for UI feedback) */
     onToolCall?: (toolName: string, args: unknown) => void;
 }
@@ -47,47 +64,53 @@ export interface OrchestratorResult {
 export async function* runOrchestrator(
     options: RunOrchestratorOptions,
 ): AsyncGenerator<string, OrchestratorResult, unknown> {
-    const { userPrompt, projectPath, conversationHistory, onHITL, onToolCall } = options;
+    const {
+        userPrompt,
+        projectPath,
+        conversationHistory,
+        targetTestFile,
+        fileContext,
+        signal,
+        onToolCall,
+    } = options;
 
-    console.log("🚀 Orchestrator: Starting...");
-    console.log(`📝 Prompt: "${userPrompt.slice(0, 50)}${userPrompt.length > 50 ? "..." : ""}"`);
+    const runKey = path.resolve(projectPath);
+    if (activeAgentRuns.has(runKey)) {
+        const busyMessage =
+            "\n\nAnother agent run is already in progress for this project. " +
+            "Please wait for it to finish (or stop it) before sending a new request.";
+        yield busyMessage;
+        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+    }
+    activeAgentRuns.add(runKey);
 
     const agentOptions: ToolAgentOptions = {
         userPrompt,
         projectPath,
         conversationHistory,
-        onHITL,
+        targetTestFile,
+        fileContext,
+        signal,
         onToolCall,
-        onToolResult: (toolName, result) => {
-            // Log tool results for debugging
-            console.log(`📦 ${toolName}: ${result.message}`);
-
-            // Special logging for control tools
-            if (toolName === "done") {
-                console.log("🏁 Agent signaled completion");
-            } else if (toolName === "respond") {
-                console.log("💬 Agent responding to user");
-            } else if (toolName === "awaitUser") {
-                console.log("⏸️ Agent awaiting user input");
-            }
-        },
     };
 
     let agentResult: ToolAgentResult | undefined;
 
-    // Run the ToolLoopAgent and stream results
-    const generator = runToolAgent(agentOptions);
+    try {
+        // Run the ToolLoopAgent and stream results
+        const generator = runToolAgent(agentOptions);
 
-    while (true) {
-        const { value, done } = await generator.next();
-        if (done) {
-            agentResult = value as ToolAgentResult;
-            break;
+        while (true) {
+            const { value, done } = await generator.next();
+            if (done) {
+                agentResult = value as ToolAgentResult;
+                break;
+            }
+            yield value as string;
         }
-        yield value as string;
+    } finally {
+        activeAgentRuns.delete(runKey);
     }
-
-    console.log("✅ Orchestrator complete");
 
     return (
         agentResult || {

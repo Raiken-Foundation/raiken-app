@@ -1,13 +1,14 @@
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import type { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
-import type {
-    Credentials,
-    InterruptionInfo,
-    InterruptionType,
-    StructuralSignals,
-    SummaryElement as SumEl,
-    SummaryElement,
+import {
+    getRequestedInputFields,
+    type InterruptionInfo,
+    type InterruptionType,
+    type RequestedField,
+    type StructuralSignals,
+    type SummaryElement as SumEl,
+    type SummaryElement,
 } from "../utils";
 
 /**
@@ -20,7 +21,7 @@ import type {
  * Prefers specific labels ("Sign in", "Log in") over generic ones.
  * Excludes OAuth/SSO buttons.
  */
-function findSubmitButtonSelectors(elements: SumEl[]): string[] {
+export function findSubmitButtonSelectors(elements: SumEl[]): string[] {
     const EXCLUDE_PATTERN = /\b(with|via|using)\s+\w+|passkey|biometric|fingerprint|face\s*id/i;
     const buttonEls = elements.filter(
         (el) => el.role === "button" && !EXCLUDE_PATTERN.test(el.name),
@@ -131,10 +132,16 @@ export async function classifyInterruption(
     pageTitle: string,
     elements: SummaryElement[],
     signals: StructuralSignals,
-    credentials: Credentials,
-    model: ChatOpenAI,
+    userPrompt: string,
+    conversationHistory: Array<{ role: string; content: string }>,
+    model: BaseChatModel,
+    // True when the current `userPrompt` is the user's reply to a prior
+    // credential/field request (i.e. we're resuming a blocker), so a bare value
+    // should be accepted for a single-field form. False during initial page
+    // detection, where `userPrompt` is the original goal.
+    isReply = false,
 ): Promise<InterruptionInfo | null> {
-    const userPrompt = buildUserPrompt(pageTitle, elements, signals);
+    const classificationPrompt = buildUserPrompt(pageTitle, elements, signals);
 
     let result: ClassificationResult;
     try {
@@ -143,13 +150,13 @@ export async function classifyInterruption(
         });
         result = await structured.invoke([
             new SystemMessage(SYSTEM_PROMPT),
-            new HumanMessage(userPrompt),
+            new HumanMessage(classificationPrompt),
         ]);
     } catch {
         try {
-            result = await fallbackClassify(model, userPrompt);
+            result = await fallbackClassify(model, classificationPrompt);
         } catch (fallbackError) {
-            console.warn("⚠️ Interruption classification failed:", fallbackError);
+            console.warn("Interruption classification failed:", fallbackError);
             return null;
         }
     }
@@ -162,30 +169,27 @@ export async function classifyInterruption(
         requiresUser: result.requiresUser,
     };
 
-    if (result.type === "auth") {
-        const needsIdentity =
-            !credentials.username && !credentials.email && !credentials.useDefaults;
-        const needsPassword =
-            signals.hasPasswordField && !credentials.password && !credentials.useDefaults;
-        info.requiresUser = needsIdentity || needsPassword;
-        info.message = info.requiresUser
-            ? "This page requires authentication. You can provide credentials in the chat, e.g.:\n" +
-              "  `email: you@example.com password: secret`\n" +
-              "Or say `use default credentials` to try test defaults."
-            : "Authentication detected. Attempting to log in automatically.";
+    if (result.type === "auth" || result.type === "otp") {
+        // Enumerate the actual fields the page is asking for and figure out
+        // whether the user has already supplied everything needed. The field
+        // names are unknown until we inspect the DOM, so we never assume
+        // email/password — we ask for (and fill) whatever the page presents.
+        const requestedFields = getRequestedInputFields(elements);
+        info.requestedFields = requestedFields;
+        info.submitSelectors = findSubmitButtonSelectors(elements);
 
-        info.fieldSelectors = {
-            username: signals.identitySelectors,
-            email: signals.identitySelectors,
-            password: signals.passwordSelectors,
-            submit: findSubmitButtonSelectors(elements),
-        };
-    } else if (result.type === "otp") {
-        info.requiresUser = !credentials.code;
-        info.fieldSelectors = {
-            code: signals.codeFieldSelectors,
-            submit: findSubmitButtonSelectors(elements),
-        };
+        const mapped = await mapValuesToFields(
+            requestedFields,
+            userPrompt,
+            conversationHistory,
+            model,
+            { isReply },
+        );
+        const unmet = requestedFields.filter((f) => !mapped.values[f.key]);
+        info.requiresUser = requestedFields.length === 0 || unmet.length > 0;
+        info.message = info.requiresUser
+            ? buildFieldRequestMessage(requestedFields)
+            : "Credentials detected. Attempting to continue automatically.";
     } else if (result.type === "consent" && result.actionElementName) {
         const match = elements.find(
             (el) => el.name.toLowerCase() === result.actionElementName!.toLowerCase(),
@@ -200,76 +204,151 @@ export async function classifyInterruption(
 }
 
 // =========================================================================
-// LLM-based credential extraction
+// DOM-driven credential/value mapping
 // =========================================================================
 
-const credentialsSchema = z.object({
-    username: z
-        .string()
-        .nullable()
-        .describe("Username or login name provided by the user, null if not provided"),
-    email: z
-        .string()
-        .nullable()
-        .describe("Email address provided by the user, null if not provided"),
-    password: z.string().nullable().describe("Password provided by the user, null if not provided"),
-    code: z
-        .string()
-        .nullable()
-        .describe("OTP, verification code, or security code (numeric), null if not provided"),
-    useDefaults: z.boolean().describe("True if the user asked to use default/test credentials"),
-});
+/**
+ * Build the user-facing prompt naming the exact fields the page is asking for,
+ * so the user knows what to send back — whether that's an email, a PIN, an
+ * employee number, a one-off code, or several fields at once.
+ */
+export function buildFieldRequestMessage(requestedFields: RequestedField[]): string {
+    if (requestedFields.length === 0) {
+        return (
+            "This page needs input to continue, but I couldn't detect the specific fields. " +
+            "Please complete it manually in the browser, then say 'continue'."
+        );
+    }
+    const labels = requestedFields.map((f) => f.label).join(", ");
+    const example = requestedFields.map((f) => `${f.label}: <value>`).join(", ");
+    return `This page is asking for: ${labels}. Provide the value(s) in the chat, e.g. \`${example}\`.`;
+}
 
 /**
- * Extract login credentials from user messages using the LLM.
- * Handles natural language like "my login is me@example.com and the pass is secret123"
- * that rigid regex patterns would miss.
+ * Use the LLM to map the user's free-text reply onto the specific fields the
+ * page is requesting. The schema is built dynamically from the DOM-derived
+ * fields, so this recognises arbitrary credentials (a code, a number, an
+ * employee id) — not just email/password. Fails open (empty map) on error.
  */
-export async function extractCredentialsWithLLM(
+export async function mapValuesToFields(
+    requestedFields: RequestedField[],
     userPrompt: string,
     conversationHistory: Array<{ role: string; content: string }>,
-    model: ChatOpenAI,
-): Promise<Credentials> {
+    model: BaseChatModel,
+    options: { isReply?: boolean } = {},
+): Promise<{ values: Record<string, string> }> {
     const recentMessages = conversationHistory
         .slice(-6)
         .map((m) => `${m.role}: ${m.content}`)
         .join("\n");
 
-    const prompt = `Extract login credentials the user explicitly provided. Do not invent values.
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const field of requestedFields) {
+        const typeHint = field.type ? ` (input type: ${field.type})` : "";
+        // Accept string OR number: models routinely return a bare number for a
+        // numeric-looking value (phone, PIN, code). If we constrained this to
+        // z.string() the structured-output parse would throw on the number and
+        // we'd drop the value entirely — the exact cause of the "I gave it my
+        // phone number but it keeps asking" loop.
+        shape[field.key] = z
+            .union([z.string(), z.number()])
+            .nullable()
+            .describe(
+                `The value the user provided for the field labelled "${field.label}"${typeHint}, or null if the user did not provide it`,
+            );
+    }
+    const schema = z.object(shape);
+
+    const fieldList =
+        requestedFields.length > 0
+            ? requestedFields
+                  .map(
+                      (f) =>
+                          `- key "${f.key}": labelled "${f.label}"${f.type ? ` (type ${f.type})` : ""}`,
+                  )
+                  .join("\n")
+            : "(no specific fields detected)";
+
+    const prompt = `A web page is blocking the user and asking for the following input fields:
+${fieldList}
+
+Match the value(s) the user provided to the correct field by its label, type, and context.
+Do not invent values — only fill a field if the user clearly supplied that value.
+A bare value on its own (e.g. just a phone number, code, or name) is a valid answer to
+the single field being asked for — return it as a string.
 
 Recent conversation:
 ${recentMessages}
 
-Current message: ${userPrompt}
+Current message: ${userPrompt}`;
 
-If the user said "use default/test credentials" or similar → useDefaults=true.
-If nothing was provided → all fields null, useDefaults=false.`;
-
+    const values: Record<string, string> = {};
     try {
-        const structured = model.withStructuredOutput(credentialsSchema, {
-            name: "extract_credentials",
-        });
-        const result = await structured.invoke([
+        const structured = model.withStructuredOutput(schema, { name: "map_values_to_fields" });
+        const result = (await structured.invoke([
             new SystemMessage(prompt),
             new HumanMessage(userPrompt),
-        ]);
+        ])) as Record<string, unknown>;
 
-        return {
-            username: result.username || undefined,
-            email: result.email || undefined,
-            password: result.password || undefined,
-            code: result.code || undefined,
-            useDefaults: result.useDefaults,
-        };
+        for (const field of requestedFields) {
+            const v = result[field.key];
+            // Coerce numbers to strings; a numeric answer is still a valid value.
+            if (v !== null && v !== undefined && String(v).trim().length > 0) {
+                values[field.key] = String(v).trim();
+            }
+        }
     } catch {
-        return {
-            username: undefined,
-            email: undefined,
-            password: undefined,
-            code: undefined,
-            useDefaults: false,
-        };
+        // Structured output failed entirely — fall through to the deterministic
+        // single-field fallback below rather than giving up.
     }
+
+    // Deterministic fallback for the overwhelmingly common case: the page asks
+    // for exactly ONE field and the user replies with exactly one value. This
+    // must not fire during initial page detection (where `userPrompt` is the
+    // original goal like "go through the app"), so it is gated on `isReply` —
+    // true only when the agent is resuming after asking the user for input.
+    if (options.isReply && requestedFields.length === 1) {
+        const only = requestedFields[0];
+        if (!values[only.key]) {
+            const direct = extractSingleReplyValue(userPrompt, only.type);
+            if (direct) values[only.key] = direct;
+        }
+    }
+
+    return { values };
+}
+
+/**
+ * Pull a single field value out of a user's reply. Handles a bare value
+ * ("679630188"), a "Label: value" form ("Phone: 679630188"), and strips
+ * formatting from numeric fields. Only used as a last-resort fallback when the
+ * user is clearly replying to a single-field request.
+ */
+function extractSingleReplyValue(userPrompt: string, fieldType?: string): string | null {
+    let candidate = userPrompt.trim();
+    if (!candidate) return null;
+
+    // "Label: value" → take what's after the first colon (if it's near the start).
+    const colonIdx = candidate.indexOf(":");
+    if (colonIdx !== -1 && colonIdx <= 40) {
+        const afterColon = candidate.slice(colonIdx + 1).trim();
+        if (afterColon) candidate = afterColon;
+    }
+
+    // Single line only — ignore any trailing prose.
+    candidate = candidate.split(/\r?\n/)[0]!.trim();
+    if (!candidate) return null;
+
+    // For numeric-style inputs, keep only digits (preserving a leading +) so
+    // stray words or spaces around the number don't get typed into the field.
+    if (fieldType === "tel" || fieldType === "number") {
+        const digits = candidate.replace(/[^\d]/g, "");
+        if (digits.length >= 3) {
+            return candidate.startsWith("+") ? `+${digits}` : digits;
+        }
+    }
+
+    return candidate;
 }
 
 // =========================================================================
@@ -277,7 +356,7 @@ If nothing was provided → all fields null, useDefaults=false.`;
 // =========================================================================
 
 async function fallbackClassify(
-    model: ChatOpenAI,
+    model: BaseChatModel,
     userPrompt: string,
 ): Promise<ClassificationResult> {
     const strictPrompt = `${SYSTEM_PROMPT}\n\nReturn JSON only, no fences:\n{"type":"auth|otp|captcha|consent|paywall|error|none","requiresUser":boolean,"message":string,"actionElementName":string|null}`;

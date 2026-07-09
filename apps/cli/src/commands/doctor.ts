@@ -5,15 +5,15 @@
  * or CI pipeline without slowing anyone down.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import {
     type DoctorFinding,
     type DoctorReport,
     type DoctorSeverity,
+    readConfiguredTestDirectory,
     scanTests,
 } from "@raiken/core";
 import chalk from "chalk";
+import { cliExit } from "../repl/exit";
 
 interface DoctorCommandOptions {
     dir?: string;
@@ -24,12 +24,12 @@ interface DoctorCommandOptions {
 
 export async function doctorCommand(options: DoctorCommandOptions): Promise<void> {
     const projectPath = process.cwd();
-    const testDir = options.dir ?? loadTestDirectory(projectPath) ?? "e2e";
+    const testDir = options.dir ?? readConfiguredTestDirectory(projectPath) ?? "e2e";
     const failOn = parseFailOn(options.failOn);
     const jsonOutput = options.json === true;
 
     if (!jsonOutput) {
-        console.log(chalk.cyan(`\n🩺 raiken doctor — scanning ${testDir}/\n`));
+        console.log(chalk.cyan(`\nraiken doctor — scanning ${testDir}/\n`));
     }
 
     const report = await scanTests({ projectPath, testDirectory: testDir });
@@ -40,19 +40,7 @@ export async function doctorCommand(options: DoctorCommandOptions): Promise<void
         printHumanReport(report, testDir);
     }
 
-    process.exit(shouldFail(report, failOn) ? 1 : 0);
-}
-
-function loadTestDirectory(projectPath: string): string | undefined {
-    try {
-        const raw = JSON.parse(
-            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
-        );
-        if (typeof raw?.testDirectory === "string") return raw.testDirectory;
-    } catch {
-        // ignore — fall back to default
-    }
-    return undefined;
+    cliExit(shouldFail(report, failOn) ? 1 : 0);
 }
 
 function parseFailOn(value: string | undefined): DoctorSeverity {
@@ -77,7 +65,7 @@ function printHumanReport(report: DoctorReport, testDir: string): void {
 
     if (report.findings.length === 0) {
         console.log(
-            chalk.green(`✅ Clean. Scanned ${report.scannedFiles} file(s) — no issues found.`),
+            chalk.green(`✓ Clean. Scanned ${report.scannedFiles} file(s) — no issues found.`),
         );
         return;
     }

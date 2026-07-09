@@ -27,9 +27,12 @@
  *     code.
  */
 
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { streamText } from "ai";
+import { generateText, streamText } from "ai";
+import { buildAISdkModel } from "../agent/ai-providers";
 import type { DOMContext } from "../browser/dom-capture";
+import type { AIProviderId } from "../config/schema";
+import { cleanGeneratedTestCode } from "../utils";
+import { applyEditBlocks, parseEditBlocks, stripEditMarkers } from "./edit-blocks";
 
 export interface InterpretationAttachment {
     name: string;
@@ -88,6 +91,18 @@ export interface InterpretationContext {
 export interface InterpretationConfig {
     apiKey: string;
     model?: string;
+    /**
+     * The configured provider. Native providers (Anthropic, Google) use their
+     * own SDK; everything else routes through the OpenAI-compatible client at
+     * `baseURL`. Defaults to OpenRouter routing when omitted.
+     */
+    provider?: AIProviderId;
+    /**
+     * Base URL of the configured provider's OpenAI-compatible endpoint.
+     * When omitted, defaults to OpenRouter. Passing this lets AI analysis
+     * use whatever provider the user configured (OpenAI, Anthropic, Ollama…).
+     */
+    baseURL?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,17 +360,24 @@ async function* streamInterpretation(
     context: InterpretationContext,
     config: InterpretationConfig,
 ): AsyncGenerator<string, void, unknown> {
-    if (!config.apiKey) {
+    // A key is required for hosted providers, but local ones (e.g. Ollama)
+    // work without one as long as a base URL is set.
+    if (!config.apiKey && !config.baseURL) {
         yield "Error: API key not configured for test interpretation.";
         return;
     }
 
-    const openrouter = createOpenRouter({ apiKey: config.apiKey });
+    const model = buildAISdkModel({
+        provider: config.provider ?? "openrouter",
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        model: config.model || "anthropic/claude-sonnet-4.5",
+    });
     const prompt = buildInterpretationPrompt(context);
 
     try {
         const result = await streamText({
-            model: openrouter.chat(config.model || "anthropic/claude-sonnet-4.5"),
+            model,
             prompt,
             temperature: 0.3,
             maxOutputTokens: 4096,
@@ -383,4 +405,378 @@ export async function getQuickInterpretation(
         result += chunk;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Test repair
+//
+// The interpretation above tells the developer WHAT went wrong; this closes
+// the loop by producing the corrected spec. It reuses the exact same evidence
+// (test code, failures, raw Call log, DOM, and — critically — the prior AI
+// analysis if the user already ran one) so the fix is grounded in the same
+// diagnosis the developer just read, rather than re-reasoning from scratch.
+// ---------------------------------------------------------------------------
+
+/**
+ * A raw image (typically the Playwright failure screenshot) forwarded to a
+ * vision-capable model so the repair can SEE the page state at the moment of
+ * failure, not just read text about it. Bytes are read server-side from the
+ * on-disk attachment path (see the `repairTestResults` router procedure).
+ */
+export interface RepairImage {
+    /** Attachment name, e.g. "test-failed-1.png". */
+    name: string;
+    /** Raw image bytes. */
+    data: Uint8Array;
+    /** MIME type, e.g. "image/png". */
+    mediaType: string;
+}
+
+export interface RepairContext extends InterpretationContext {
+    /**
+     * The prior AI analysis text (from {@link getQuickInterpretation}), if the
+     * user already ran "Analyze with AI". Passing it lets the repair honour the
+     * diagnosis the developer just read instead of re-deriving a (possibly
+     * different) root cause.
+     */
+    interpretation?: string;
+    /**
+     * Failure screenshots (bytes) to send to a vision-capable model. When
+     * present the repair call attaches them as image parts so the model can
+     * ground selector/assertion fixes in what the page actually rendered.
+     * Best-effort: if the configured model can't accept images the repair
+     * transparently falls back to a text-only prompt.
+     */
+    images?: RepairImage[];
+}
+
+export interface RepairResult {
+    /** Corrected, fence-stripped test file, or null if the model returned nothing usable. */
+    fixedCode: string | null;
+    /** The original file the fix was computed against — lets the UI show a diff. */
+    originalCode?: string;
+    /**
+     * How the fix was produced:
+     * - "edits": the model returned SEARCH/REPLACE blocks we applied in place.
+     * - "full": the model returned (or we fell back to) a complete file rewrite.
+     */
+    mode?: "edits" | "full";
+    /** Number of SEARCH/REPLACE blocks applied (0 for a full rewrite). */
+    editCount?: number;
+    /**
+     * True when the model asked for section edits but one or more blocks could
+     * not be matched, so we fell back to a full-file rewrite. Signals the UI to
+     * warn the developer to review carefully.
+     */
+    matchFailed?: boolean;
+    /** Populated when the fix could not be produced (missing key, model error, unparseable output). */
+    error?: string;
+}
+
+const INTERPRETATION_BUDGET_CHARS = 4000;
+
+export function buildRepairPrompt(
+    context: RepairContext,
+    mode: "edits" | "full" = "edits",
+): string {
+    const {
+        testResults,
+        testCode,
+        testFilePath,
+        sourceCode,
+        domContext,
+        rawOutput,
+        interpretation,
+        images,
+    } = context;
+
+    const failedTests = testResults.filter((t) => t.status === "failed");
+
+    const lines: string[] = [];
+
+    lines.push(
+        "You are fixing a failing Playwright E2E test so that it passes for the RIGHT reason.",
+        "",
+        "Return a CONCRETE, RUNNABLE fix — corrected test code that will actually execute and",
+        "pass. Do NOT return a skeleton of `// TODO:` placeholders, and do NOT replace real",
+        "steps, waits, or assertions with TODO comments. The developer wants working code they",
+        "can run immediately, not a checklist of things to do later.",
+        "",
+        "Ground every change in the evidence below. Use only the selectors, URLs, routes,",
+        "and behaviour that the test, the errors, the Call log, the DOM context, and the",
+        "failure screenshot (when present) actually show. Do NOT invent selectors, routes,",
+        "credentials, or app behaviour, and do NOT assume how this particular app is built —",
+        "each project is unique, so fix what the evidence supports and nothing more.",
+        "",
+        "Most failures are test-side: a stale or brittle selector, a missing wait, a wrong URL,",
+        "or an assertion that no longer matches what the page renders. Fix these directly using",
+        "the real selectors/URLs/state visible in the evidence and screenshot.",
+        "",
+        "Only when the evidence clearly shows a genuine APPLICATION regression (the app itself",
+        "is broken and the test correctly caught it) should you keep the meaningful assertion",
+        "intact instead of weakening it. In that single case you MAY add ONE short `// TODO:`",
+        "line naming the suspected app-side issue — but never scatter multiple TODOs, never stub",
+        "out logic with TODOs, and never delete a real assertion just to make the test pass.",
+        "",
+        "Preserve the original intent of the test. Change the minimum needed to make it",
+        "correct — do not rewrite unrelated parts or rename things gratuitously.",
+        "",
+    );
+
+    lines.push(`# Failing test file${testFilePath ? ` (\`${testFilePath}\`)` : ""}`);
+    lines.push("```typescript");
+    lines.push(truncateHead(testCode, TEST_CODE_BUDGET_CHARS));
+    lines.push("```");
+    lines.push("");
+
+    if (interpretation && interpretation.trim().length > 0) {
+        lines.push(
+            "# Prior AI analysis (the diagnosis the developer just read — honour it)",
+            truncateTail(interpretation, INTERPRETATION_BUDGET_CHARS),
+            "",
+        );
+    }
+
+    if (failedTests.length > 0) {
+        lines.push("# Failures (with evidence)");
+        for (const test of failedTests) {
+            lines.push(`## ${test.suite} > ${test.name}`);
+            if (test.error?.message) {
+                lines.push("Error:");
+                lines.push("```");
+                lines.push(truncateTail(stripAnsi(test.error.message), ERROR_MESSAGE_BUDGET_CHARS));
+                lines.push("```");
+            }
+            if (test.error?.snippet) {
+                lines.push("Code at failure:");
+                lines.push("```");
+                lines.push(stripAnsi(test.error.snippet));
+                lines.push("```");
+            }
+            if (test.attachments && test.attachments.length > 0) {
+                lines.push("Attachments captured at failure time:");
+                for (const att of test.attachments.slice(0, MAX_ATTACHMENTS_PER_TEST)) {
+                    lines.push(describeAttachment(att));
+                }
+            }
+            lines.push("");
+        }
+    }
+
+    if (images && images.length > 0) {
+        lines.push(
+            "# Failure screenshot",
+            "A screenshot of the page at the moment Playwright reported failure is attached to",
+            "this message. Treat it as ground truth for what the user actually saw — the visible",
+            "text, which elements are present or missing, any error banners, and the real page",
+            "state. Prefer it over assumptions when choosing selectors or deciding whether the",
+            "test or the application is at fault.",
+            "",
+        );
+    }
+
+    if (domContext) {
+        lines.push(`# DOM context (${domContext.url} — "${domContext.title}")`);
+        lines.push("Interactive elements:");
+        for (const el of domContext.interactiveElements.slice(0, 15)) {
+            const label = el.name || el.text || "unnamed";
+            const sel = el.suggestedSelectors[0] ?? "no selector";
+            lines.push(`- ${el.role || el.tagName}: "${label}" → ${sel}`);
+        }
+        lines.push("Form fields:");
+        for (const f of domContext.formFields.slice(0, 10)) {
+            lines.push(`- ${f.name} (${f.type}): ${f.suggestedSelector}`);
+        }
+        lines.push("");
+    }
+
+    if (sourceCode) {
+        lines.push("# Source under test (reference only)");
+        lines.push("```typescript");
+        lines.push(truncateHead(sourceCode, SOURCE_CODE_BUDGET_CHARS));
+        lines.push("```");
+        lines.push("");
+    }
+
+    if (rawOutput && rawOutput.trim().length > 0) {
+        lines.push(
+            "# Raw run output (tail — Call log & console)",
+            "```",
+            truncateTail(stripAnsi(rawOutput), RAW_OUTPUT_BUDGET_CHARS),
+            "```",
+            "",
+        );
+    }
+
+    lines.push("---");
+    lines.push("Rules for the corrected file:");
+    lines.push(
+        "- No fixed sleeps (`waitForTimeout`, `page.waitForTimeout`, arbitrary `sleep`). Use web-first assertions with timeouts, `waitForURL`, or `waitForResponse` to wait on real signals.",
+    );
+    lines.push(
+        "- Selector priority: `getByRole` > `getByLabel` > `getByPlaceholder` > `getByTestId` > `getByText`. Only fall back to CSS when nothing else fits the evidence.",
+    );
+    lines.push("- Keep imports and the overall structure of the original file.");
+    lines.push(
+        "- Output only runnable code — no explanatory prose or changelog inside the file. At most ONE `// TODO:` line is allowed, and only for a confirmed application-side regression (see above).",
+    );
+    lines.push("");
+
+    if (mode === "edits") {
+        lines.push(
+            "Return your fix as one or more SEARCH/REPLACE edit blocks that change only",
+            "the sections that need to change. This keeps the fix minimal and reviewable.",
+            "",
+            "Each block MUST use exactly this format:",
+            "",
+            "<<<<<<< SEARCH",
+            "<a short, exact, contiguous snippet copied verbatim from the file above>",
+            "=======",
+            "<the replacement for that snippet>",
+            ">>>>>>> REPLACE",
+            "",
+            "Rules for edit blocks:",
+            "- The SEARCH text must match the current file EXACTLY (same characters and",
+            "  indentation). Copy it directly from the file above — do not paraphrase.",
+            "- Keep each SEARCH snippet small (just the lines you are changing plus a line",
+            "  or two of context if needed to make it unique). Use multiple blocks rather",
+            "  than one giant block.",
+            "- To delete code, leave the REPLACE section empty.",
+            "- Output ONLY the edit blocks. No markdown fences, no prose before or after.",
+            "- If the change is so extensive that section edits don't make sense, instead",
+            "  output the COMPLETE corrected file (no fences, no prose) and no edit blocks.",
+        );
+    } else {
+        lines.push(
+            "Output ONLY the complete corrected test file. No markdown fences, no commentary before or after — just the file contents.",
+        );
+    }
+
+    return lines.join("\n");
+}
+
+/**
+ * Produce a corrected version of a failing test. Returns cleaned code ready to
+ * drop into the editor for the developer to review, run, and save. Mirrors the
+ * provider handling of {@link streamInterpretation} so the fix uses whatever
+ * AI provider the user configured (OpenAI, Anthropic, OpenRouter, Ollama…).
+ */
+export async function getTestRepair(
+    context: RepairContext,
+    config: InterpretationConfig,
+): Promise<RepairResult> {
+    if (!config.apiKey && !config.baseURL) {
+        return { fixedCode: null, error: "API key not configured for test repair." };
+    }
+
+    const model = buildAISdkModel({
+        provider: config.provider ?? "openrouter",
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        model: config.model || "anthropic/claude-sonnet-4.5",
+    });
+
+    const hasImages = !!context.images && context.images.length > 0;
+
+    // When failure screenshots are available AND the model is vision-capable,
+    // send them as image parts so the fix is grounded in what the page actually
+    // rendered. Not every configured provider/model accepts images, so this is
+    // best-effort: on any error we transparently retry the same call text-only.
+    const generate = async (mode: "edits" | "full") => {
+        const prompt = buildRepairPrompt(context, mode);
+        if (hasImages) {
+            try {
+                return await generateText({
+                    model,
+                    temperature: 0.2,
+                    maxOutputTokens: 8192,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: prompt },
+                                ...(context.images ?? []).map((img) => ({
+                                    type: "image" as const,
+                                    image: img.data,
+                                    mediaType: img.mediaType,
+                                })),
+                            ],
+                        },
+                    ],
+                });
+            } catch (err) {
+                console.warn(
+                    "Test repair with vision failed; retrying text-only:",
+                    err instanceof Error ? err.message : String(err),
+                );
+            }
+        }
+        return await generateText({
+            model,
+            prompt,
+            temperature: 0.2,
+            maxOutputTokens: 8192,
+        });
+    };
+
+    const fullRewrite = async (matchFailed: boolean): Promise<RepairResult> => {
+        const { text } = await generate("full");
+        const cleaned = cleanGeneratedTestCode(stripEditMarkers(text));
+        if (!cleaned.trim()) {
+            return { fixedCode: null, error: "The model returned no usable test code." };
+        }
+        return {
+            fixedCode: cleaned,
+            originalCode: context.testCode,
+            mode: "full",
+            editCount: 0,
+            matchFailed,
+        };
+    };
+
+    try {
+        // First pass: ask for minimal SEARCH/REPLACE edits so the model changes
+        // only the sections that are wrong instead of rewriting the whole file.
+        const { text } = await generate("edits");
+        const blocks = parseEditBlocks(text);
+
+        // No well-formed blocks → treat as a full file, but strip any stray
+        // markers left by a malformed/half-written block first.
+        if (blocks.length === 0) {
+            const cleaned = cleanGeneratedTestCode(stripEditMarkers(text));
+            if (!cleaned.trim()) {
+                return { fixedCode: null, error: "The model returned no usable test code." };
+            }
+            return {
+                fixedCode: cleaned,
+                originalCode: context.testCode,
+                mode: "full",
+                editCount: 0,
+            };
+        }
+
+        const applied = applyEditBlocks(context.testCode, blocks);
+
+        // If every block matched, we have a clean, minimal, in-place edit.
+        if (applied.failedBlocks.length === 0 && applied.appliedCount > 0) {
+            return {
+                fixedCode: ensureTrailingNewline(applied.content),
+                originalCode: context.testCode,
+                mode: "edits",
+                editCount: applied.appliedCount,
+            };
+        }
+
+        // Some (or all) blocks failed to match the file. Rather than apply a
+        // partial, possibly-broken edit, fall back to a full-file rewrite so the
+        // developer always gets a coherent proposal to review.
+        return await fullRewrite(true);
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return { fixedCode: null, error: `Repair failed: ${msg}` };
+    }
+}
+
+function ensureTrailingNewline(content: string): string {
+    return content.endsWith("\n") ? content : `${content}\n`;
 }

@@ -1,26 +1,25 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { getProvider, resolveAIConfig } from "@raiken/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import dotenv from "dotenv";
-import { startServer } from "./server";
 
-// Load .env from the current working directory (where the user runs raiken)
+// Load .env from the current working directory (where the user runs raiken).
+// Cheap (a local file read) so it stays eager, unlike the heavy imports below.
 const projectRoot = process.cwd();
 const envPath = path.join(projectRoot, ".env");
-
-// Load .env file
 const result = dotenv.config({ path: envPath });
 
 if (result.error) {
-    // Only warn if the file doesn't exist - other errors are more serious
+    // A missing .env is the common case (most projects don't have one) and
+    // isn't actionable on its own — `checkApiKey()` already warns explicitly
+    // when a command that needs AI actually runs without a key. Only surface
+    // a genuinely unexpected failure (malformed file, permissions, …) here,
+    // and keep it on stderr so `-p --json` one-shot mode leaves stdout clean.
     const errorCode = (result.error as NodeJS.ErrnoException).code;
-    if (errorCode === "ENOENT") {
-        console.log(chalk.dim("ℹ️  No .env file found in"), chalk.dim(projectRoot));
-    } else {
-        console.warn(chalk.yellow("⚠️  Failed to load .env:"), result.error.message);
+    if (errorCode !== "ENOENT") {
+        console.error(chalk.yellow("⚠ Failed to load .env:"), result.error.message);
     }
 }
 
@@ -53,30 +52,27 @@ function printBanner(version: string): void {
     console.log("");
 }
 
-function checkApiKey() {
+/**
+ * Dynamically imports `@raiken/core` — a multi-hundred-KB barrel pulling in
+ * Playwright, better-sqlite3, Transformers.js, and LangGraph — so commands
+ * that never touch AI/browser/DB (`--help`, `--version`, an unrecognized
+ * command, `init`, `hooks`, …) don't pay that load cost just to start up.
+ */
+async function checkApiKey(): Promise<void> {
+    const { getProvider, resolveAIConfig } = await import("@raiken/core");
     const resolved = resolveAIConfig(process.cwd());
     const provider = getProvider(resolved.provider);
 
-    if (resolved.apiKey) {
-        const where =
-            resolved.apiKeySource === "env"
-                ? `env (${resolved.apiKeyEnvVar})`
-                : "raiken.config.json";
-        console.log(
-            `🔐 ${provider.label} key configured (${resolved.apiKey.length} chars, from ${where})`,
-        );
-        console.log(chalk.dim(`   model: ${resolved.model}`));
-    } else {
-        const envHint = provider.envVars[0] ?? "AI_API_KEY";
-        console.warn(
-            chalk.yellow(`⚠️  No ${provider.label} API key found. AI features will not work.`),
-        );
-        console.log(
-            chalk.dim(`   Set ${envHint} in .env, or configure in Settings → AI Provider.`),
-        );
-        if (provider.apiKeyUrl) {
-            console.log(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
-        }
+    // Success is the common case and isn't worth a line every startup —
+    // `raiken status` / `/status` already show provider, model, and key
+    // state on demand. Only the actionable failure case prints here.
+    if (resolved.apiKey) return;
+
+    const envHint = provider.envVars[0] ?? "AI_API_KEY";
+    console.warn(chalk.yellow(`⚠ No ${provider.label} API key found. AI features will not work.`));
+    console.log(chalk.dim(`   Set ${envHint} in .env, or configure in Settings → AI Provider.`));
+    if (provider.apiKeyUrl) {
+        console.log(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
     }
 }
 
@@ -97,6 +93,23 @@ program
     .description("AI QA Agent for Developers")
     .version(resolveVersion(), "-v, --version");
 
+// Non-interactive one-shot mode (à la `claude -p`) is handled BEFORE commander
+// parses, so its flags (--json, --run, …) don't have to be declared globally —
+// declaring them globally collides with the identically-named options on
+// subcommands like `status`/`ci`/`discover`. See runOneShotFromArgv() below.
+program.addHelpText(
+    "after",
+    "\nOne-shot (non-interactive):\n" +
+        '  $ raiken -p "test the login flow"          run one request and stream the answer\n' +
+        '  $ raiken -p "cover checkout" --json         emit a machine-readable JSON result\n' +
+        '  $ raiken -p "..." --stream-json             emit NDJSON events (start/tool/text/done)\n' +
+        '  $ raiken -p "..." --run                     run the generated test (exit code = pass/fail)\n' +
+        "     flags: --json  --stream-json  --run  --no-save  --headed  --timeout <ms>\n" +
+        "\nSessions:\n" +
+        "  $ raiken resume                             reopen the latest saved session\n" +
+        '  $ raiken resume "login-flow"                reopen a named session\n',
+);
+
 program
     .command("start")
     .description("Start the Raiken Dashboard & Agent")
@@ -110,13 +123,49 @@ program
             process.exit(1);
         }
         printBanner(resolveVersion());
-        checkApiKey();
+        await checkApiKey();
         console.log(chalk.cyan("Initializing Raiken..."));
         try {
+            const { startServer } = await import("./server");
             await startServer(port);
         } catch (error) {
             console.error(
                 chalk.red("Failed to start Raiken:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(1);
+        }
+    });
+
+// Default action: bare `raiken` launches the interactive testing agent (live
+// browser). One-shot (`raiken -p`) is intercepted before commander parses.
+program.action(async () => {
+    printBanner(resolveVersion());
+    await checkApiKey();
+    try {
+        const { chatCommand } = await import("./commands/chat");
+        await chatCommand();
+    } catch (error) {
+        console.error(
+            chalk.red("Failed to start Raiken:"),
+            error instanceof Error ? error.message : error,
+        );
+        process.exit(1);
+    }
+});
+
+program
+    .command("resume [name]")
+    .description("Resume a saved interactive session (latest if name omitted)")
+    .action(async (name: string | undefined) => {
+        printBanner(resolveVersion());
+        await checkApiKey();
+        try {
+            const { chatCommand } = await import("./commands/chat");
+            await chatCommand({ resume: name?.trim() ? name.trim() : true });
+        } catch (error) {
+            console.error(
+                chalk.red("Failed to resume session:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(1);
@@ -136,7 +185,10 @@ program
                 nonInteractive: options.yes,
             });
         } catch (error) {
-            console.error(chalk.red("\n ❌ Failed to initialize project:"), error);
+            console.error(
+                chalk.red("\n ✗ Failed to initialize project:"),
+                error instanceof Error ? error.message : error,
+            );
             process.exit(1);
         }
     });
@@ -152,12 +204,15 @@ program
     .option("--continue", "Resume a paused discovery session")
     .option("--status", "Show discovery statistics")
     .action(async (url, options) => {
-        checkApiKey();
+        await checkApiKey();
         try {
             const { discoverCommand } = await import("./commands/discover");
             await discoverCommand(url, options);
         } catch (error) {
-            console.error(chalk.red("\n ❌ Discovery failed:"), error);
+            console.error(
+                chalk.red("\n ✗ Discovery failed:"),
+                error instanceof Error ? error.message : error,
+            );
             process.exit(1);
         }
     });
@@ -189,7 +244,10 @@ program
             const { authCommand } = await import("./commands/auth");
             await authCommand(options);
         } catch (error) {
-            console.error(chalk.red("\n ❌ Authentication failed:"), error);
+            console.error(
+                chalk.red("\n ✗ Authentication failed:"),
+                error instanceof Error ? error.message : error,
+            );
             process.exit(1);
         }
     });
@@ -213,7 +271,7 @@ program
             await ciCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken ci failed:"),
+                chalk.red("\n ✗ raiken ci failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -236,7 +294,7 @@ program
             await doctorCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken doctor failed:"),
+                chalk.red("\n ✗ raiken doctor failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -256,7 +314,7 @@ program
             await contextCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken context failed:"),
+                chalk.red("\n ✗ raiken context failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -279,7 +337,7 @@ program
             await coverCommand(target, options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken cover failed:"),
+                chalk.red("\n ✗ raiken cover failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -299,7 +357,7 @@ program
             await traceCommand(stackTrace, options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken trace failed:"),
+                chalk.red("\n ✗ raiken trace failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -322,7 +380,7 @@ hooks
             await hooksInstallCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken hooks install failed:"),
+                chalk.red("\n ✗ raiken hooks install failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -339,7 +397,7 @@ hooks
             await hooksUninstallCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken hooks uninstall failed:"),
+                chalk.red("\n ✗ raiken hooks uninstall failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -355,7 +413,139 @@ hooks
             await hooksStatusCommand();
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ raiken hooks status failed:"),
+                chalk.red("\n ✗ raiken hooks status failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("status")
+    .description(
+        "Show project setup at a glance: AI, code graph, search index, tests, site knowledge, memory",
+    )
+    .option("--json", "Emit the status as JSON", false)
+    .action(async (options) => {
+        try {
+            const { statusCommand } = await import("./commands/status");
+            await statusCommand(options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken status failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("index")
+    .description("Build the code graph (and, with --embeddings, the semantic search index)")
+    .option("--embeddings", "Also generate the vector index that powers `raiken search`", false)
+    .option("--force", "Regenerate embeddings even if they already exist", false)
+    .action(async (options) => {
+        try {
+            const { indexCommand } = await import("./commands/indexer");
+            await indexCommand(options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken index failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("search <query>")
+    .description("Semantic (embeddings) code search — find code by meaning")
+    .option("--limit <number>", "Maximum results", "10")
+    .option("--type <type>", "Restrict to a chunk type: function | class | file | type")
+    .option("--json", "Emit results as JSON", false)
+    .action(async (query, options) => {
+        try {
+            const { searchCommand } = await import("./commands/search");
+            await searchCommand(query, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken search failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("knowledge [section] [arg]")
+    .alias("kb")
+    .description(
+        "Inspect discovered site knowledge: [overview] | pages | links | blockers | page <url> | clear",
+    )
+    .option("--limit <number>", "Max rows for list sections", "50")
+    .option("--json", "Emit the section as JSON", false)
+    .action(async (section, arg, options) => {
+        try {
+            const { knowledgeCommand } = await import("./commands/knowledge");
+            await knowledgeCommand(section, arg, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken knowledge failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("memory [action]")
+    .description("Inspect what the agent has learned about this project ([show] | clear)")
+    .option("--json", "Emit memory as JSON", false)
+    .action(async (action, options) => {
+        try {
+            const { memoryCommand } = await import("./commands/memory");
+            await memoryCommand(action, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken memory failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("test [file]")
+    .description("Run the Playwright suite (or a single spec) and report pass/fail")
+    .option("--json", "Emit the run summary as JSON", false)
+    .action(async (file, options) => {
+        try {
+            const { testCommand } = await import("./commands/test");
+            await testCommand(file, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken test failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("report [file]")
+    .description("Run tests and write a detailed HTML report with screenshots")
+    .option("--from <json>", "Build from an existing Playwright results JSON (skip running)")
+    .option("--format <formats>", "Comma-separated: html,markdown,json (default html,json)")
+    .option("--output <dir>", "Output directory (default test-reports)")
+    .option("--open", "Open the HTML report when done", false)
+    .option("--json", "Emit the report result as JSON", false)
+    .action(async (file, options) => {
+        try {
+            const { reportCommand } = await import("./commands/report");
+            await reportCommand(file, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken report failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -370,17 +560,72 @@ program
         "Ticket/issue ID to analyze (auto-detected from branch if omitted)",
     )
     .action(async (options) => {
-        checkApiKey();
+        await checkApiKey();
         try {
             const { syncCommand } = await import("./commands/sync");
             await syncCommand(options);
         } catch (error) {
             console.error(
-                chalk.red("\n ❌ Sync failed:"),
+                chalk.red("\n ✗ Sync failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(1);
         }
     });
 
-program.parse(process.argv);
+/**
+ * One-shot dispatch. When the user leads with `-p`/`--print`, run a single
+ * non-interactive agent request and exit, bypassing commander entirely so its
+ * flags never collide with the subcommands' identically-named options.
+ * `-p` must be the first argument (so `raiken start -p 7101` is unaffected).
+ */
+async function runOneShotFromArgv(argv: string[]): Promise<void> {
+    const flag = (name: string): boolean => argv.includes(name);
+    const valueAfter = (name: string): string | undefined => {
+        const i = argv.indexOf(name);
+        return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith("-") ? argv[i + 1] : undefined;
+    };
+
+    // The prompt is the first positional token after `-p`/`--print` that isn't a
+    // flag; if absent it's read from piped stdin inside the command.
+    const printIdx = argv.findIndex((a) => a === "-p" || a === "--print");
+    const next = argv[printIdx + 1];
+    const prompt = next && !next.startsWith("-") ? next : "";
+
+    let timeoutMs: number | undefined;
+    const timeoutRaw = valueAfter("--timeout");
+    if (timeoutRaw !== undefined) {
+        const parsed = Number(timeoutRaw);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            console.error(
+                chalk.red(`Invalid --timeout: "${timeoutRaw}". Must be a positive number of ms.`),
+            );
+            process.exit(1);
+        }
+        timeoutMs = parsed;
+    }
+
+    const { runOneShotCommand } = await import("./commands/oneshot");
+    await runOneShotCommand({
+        prompt,
+        json: flag("--json"),
+        streamJson: flag("--stream-json"),
+        save: !flag("--no-save"),
+        run: flag("--run"),
+        headed: flag("--headed"),
+        timeoutMs,
+    });
+}
+
+const cliArgs = process.argv.slice(2);
+if (cliArgs[0] === "-p" || cliArgs[0] === "--print") {
+    runOneShotFromArgv(cliArgs).catch((error) => {
+        console.error(
+            chalk.red("Raiken one-shot failed:"),
+            error instanceof Error ? error.message : error,
+        );
+        process.exit(1);
+    });
+} else {
+    program.parse(process.argv);
+}

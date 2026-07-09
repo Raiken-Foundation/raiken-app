@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { queryTrace, type TraceResult } from "@raiken/core";
 import chalk from "chalk";
+import { cliExit } from "../repl/exit";
 
 interface TraceCommandOptions {
     file?: string;
@@ -34,14 +35,21 @@ export async function traceCommand(
                 "No stack trace provided. Pass --file <path>, a positional arg, or pipe via stdin.",
             ),
         );
-        process.exit(2);
+        cliExit(2);
     }
 
-    const minConfidence = options.minConfidence ? Number(options.minConfidence) : 0;
-    const limit = options.limit ? Number(options.limit) : 20;
+    // Guard against non-numeric / out-of-range CLI input (e.g. `--limit abc`
+    // would otherwise become NaN and silently break the query).
+    const parsedConfidence = options.minConfidence ? Number(options.minConfidence) : 0;
+    const minConfidence =
+        Number.isFinite(parsedConfidence) && parsedConfidence >= 0
+            ? Math.min(parsedConfidence, 1)
+            : 0;
+    const parsedLimit = options.limit ? Number(options.limit) : 20;
+    const limit = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : 20;
 
     if (!options.json) {
-        console.log(chalk.cyan("\n🔍 raiken trace\n"));
+        console.log(chalk.cyan("\nraiken trace\n"));
     }
 
     const result = await queryTrace({
@@ -53,11 +61,11 @@ export async function traceCommand(
 
     if (options.json) {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        process.exit(result.matches.length === 0 ? 1 : 0);
+        cliExit(result.matches.length === 0 ? 1 : 0);
     }
 
     printHumanResult(result);
-    process.exit(result.matches.length === 0 ? 1 : 0);
+    cliExit(result.matches.length === 0 ? 1 : 0);
 }
 
 async function resolveTraceInput(
@@ -97,7 +105,7 @@ function printHumanResult(result: TraceResult): void {
         console.log();
         console.log(
             chalk.yellow(
-                "⚠️  None of the trace frames map to files in this project. " +
+                "⚠ None of the trace frames map to files in this project. " +
                     "Check that you're running from the right repo, or that the trace " +
                     "isn't entirely from node_modules / browser internals.",
             ),

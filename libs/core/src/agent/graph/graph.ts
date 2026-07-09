@@ -18,6 +18,17 @@ import { createSummarizeNode } from "./nodes/summarize";
 import type { AgentNodeDeps } from "./nodes/types";
 import { GraphState, type GraphStateType } from "./state";
 
+/**
+ * Safety net for classifier misfires: an unambiguous "write/generate a test"
+ * request must produce a spec even if the classifier labeled it explain/explore
+ * (which would otherwise yield an essay instead of a runnable test).
+ */
+function userClearlyWantsTest(prompt: string): boolean {
+    return /\b(write|generate|create|make|add|build|scaffold)\s+(me\s+|a\s+|an\s+|some\s+)?(e2e\s+|end-to-end\s+|integration\s+|unit\s+|playwright\s+)?tests?\b/i.test(
+        prompt,
+    );
+}
+
 export function createAgentGraph(deps: AgentNodeDeps) {
     const graph = new StateGraph(GraphState)
         .addNode("classifyGoal", createClassifyGoalNode(deps))
@@ -39,6 +50,25 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             "classifyGoal",
             (state: GraphStateType) => {
                 if (state.awaitUserMessage) return "awaitUser";
+                // Resuming a live-page blocker (auth/otp/consent/…): go straight
+                // back to the interruption path so the credentials the user just
+                // supplied actually get filled and submitted. Without this, a bare
+                // "password" reply is misrouted by nextTool and the page stays stuck.
+                if (state.resumeBlocker) return "detectInterruption";
+                // Intent is authoritative for test generation. A request to
+                // CREATE tests must always reach the generator, even when
+                // discovery data exists and the classifier over-eagerly picks
+                // nextTool="discoveryRead" (which would otherwise divert us to a
+                // discovery summary and never write a spec). Take the live DOM
+                // path only when the classifier explicitly points at the browser
+                // or a specific URL; otherwise gather code/discovery context and
+                // generate directly.
+                if (state.intent === "generateTests") {
+                    if (state.nextTool === "domCapture" || state.targetUrl) {
+                        return "navigate";
+                    }
+                    return "gatherContext";
+                }
                 if (state.nextTool === "discoveryRead") {
                     return "answerQuestions";
                 }
@@ -57,7 +87,19 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             },
             ["awaitUser", "answerQuestions", "gatherContext", "detectInterruption", "navigate"],
         )
-        .addEdge("navigate", "detectInterruption")
+        .addConditionalEdges(
+            "navigate",
+            (state: GraphStateType) => {
+                // If navigation couldn't proceed (no URL / load failure), stop
+                // now rather than running detect→explore→…→summarize on a page
+                // that never loaded and only surfacing the pause at the end.
+                if (state.shouldPause || state.awaitUserMessage) return "awaitUser";
+                // Optional grounding failed (app down) → generate from code.
+                if (state.groundingFailed) return "gatherContext";
+                return "detectInterruption";
+            },
+            ["awaitUser", "detectInterruption", "gatherContext"],
+        )
         .addConditionalEdges(
             "detectInterruption",
             (state: GraphStateType) => {
@@ -92,6 +134,8 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             "gatherContext",
             (state: GraphStateType) => {
                 if (state.intent === "generateTests") return "generateTests";
+                // Misclassification safety net: honor an explicit test request.
+                if (userClearlyWantsTest(state.userPrompt)) return "generateTests";
                 return "answerQuestions";
             },
             ["generateTests", "answerQuestions", "summarize"],

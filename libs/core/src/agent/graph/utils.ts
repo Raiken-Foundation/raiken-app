@@ -9,6 +9,23 @@ export type InterruptionType =
     | "consent"
     | "unknown";
 
+/**
+ * A single input field the page is asking the user to fill. Enumerated
+ * directly from the DOM so it works for arbitrary credentials (a PIN, an
+ * employee number, a one-off code, email + password, etc.) rather than a
+ * fixed username/password schema.
+ */
+export interface RequestedField {
+    /** Stable key used to correlate the field with a user-provided value. */
+    key: string;
+    /** Human-readable label (from name/placeholder) shown to the user. */
+    label: string;
+    /** HTML input type, when known (e.g. "password", "tel", "email"). */
+    type?: string;
+    /** DOM-derived selectors used to fill the field. */
+    selectors: string[];
+}
+
 export interface InterruptionInfo {
     type: InterruptionType;
     message: string;
@@ -21,29 +38,181 @@ export interface InterruptionInfo {
         code?: string[];
         submit?: string[];
     };
-}
-
-export interface Credentials {
-    username?: string;
-    email?: string;
-    password?: string;
-    code?: string;
-    useDefaults: boolean;
+    /** DOM-derived fields the page is requesting (dynamic, label-driven). */
+    requestedFields?: RequestedField[];
+    /** Selectors for the primary submit/continue button, if any. */
+    submitSelectors?: string[];
 }
 
 export interface SummaryElement {
     role: string;
     name: string;
     type?: string;
+    /** Link target (for anchors/links), when present in the DOM summary. */
+    href?: string;
     /** First/primary selector (for backward compat) */
     selector?: string;
     /** All DOM-derived selectors for this element */
     selectors: string[];
 }
 
+/**
+ * LLM plan for what context to assemble before generating a test. Produced by
+ * the context-planner step so gathering is deliberate (targeted code queries +
+ * DOM aspects) rather than a single blind semantic search.
+ */
+export interface ContextPlan {
+    /** Focused code-search queries to run against the code graph. */
+    searchQueries: string[];
+    /** Specific file paths the model expects to be relevant (may be empty). */
+    focusFiles: string[];
+    /** Which live-DOM aspects matter (forms, validation, async states, …). */
+    domAspects: string[];
+    /** One-line rationale for what was gathered and why. */
+    rationale: string;
+}
+
+/**
+ * Outcome of a goal-directed action search (e.g. the user asked the agent to
+ * "sign out"). Recorded so the graph can report the exact path taken and so
+ * test generation can reproduce it.
+ */
+export interface ActionResult {
+    /** The action phrase we were hunting for (e.g. "sign out"). */
+    action: string;
+    /** Whether a matching control was located. */
+    found: boolean;
+    /** Whether the control was actually clicked. */
+    performed: boolean;
+    /** URL of the page where the control was found. */
+    page: string | null;
+    /** DOM-derived selector that was clicked (primary). */
+    selector: string | null;
+    /** How we got there (e.g. "opened user menu -> clicked Sign out"). */
+    note: string;
+}
+
+// Common action synonyms so "sign out" also matches "log out", "logout", etc.
+// Each group is a set of interchangeable phrases; a user action matches an
+// element when they share a group or the element name contains the action.
+const ACTION_SYNONYM_GROUPS: string[][] = [
+    ["sign out", "signout", "sign-out", "log out", "logout", "log-out", "sign off", "signoff"],
+    ["sign in", "signin", "sign-in", "log in", "login", "log-in"],
+    ["sign up", "signup", "sign-up", "register", "create account"],
+    ["add to cart", "add to bag", "add to basket"],
+    ["delete", "remove", "trash"],
+    ["save", "submit", "confirm", "apply"],
+    ["edit", "update", "modify"],
+    ["settings", "preferences", "account settings"],
+    ["profile", "account", "my account"],
+];
+
+function normalizeActionText(text: string): string {
+    return text.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Expand an action phrase into the set of interchangeable phrases to match
+ * against element names. Always includes the action itself.
+ */
+export function expandActionSynonyms(action: string): string[] {
+    const norm = normalizeActionText(action);
+    const set = new Set<string>([norm]);
+    for (const group of ACTION_SYNONYM_GROUPS) {
+        if (group.some((phrase) => norm.includes(phrase) || phrase.includes(norm))) {
+            for (const phrase of group) set.add(phrase);
+        }
+    }
+    return Array.from(set).filter(Boolean);
+}
+
+/**
+ * Does an element name/label match the requested action (synonym-aware)?
+ */
+export function matchesAction(elementName: string, action: string): boolean {
+    if (!elementName || !action) return false;
+    const name = normalizeActionText(elementName);
+    if (!name) return false;
+    return expandActionSynonyms(action).some(
+        (phrase) => phrase.length > 0 && name.includes(phrase),
+    );
+}
+
+/**
+ * Normalize a URL for visited-set dedup during exploration: drop the hash and
+ * any trailing slash so `/settings`, `/settings/`, and `/settings#top` are
+ * treated as the same page (the source of the "cycling between the same pages"
+ * feel). Returns the input unchanged when it is not a parseable URL.
+ */
+export function normalizeExploreUrl(href: string): string {
+    if (!href) return href;
+    try {
+        const u = new URL(href);
+        u.hash = "";
+        // Strip trailing slashes from the path, but keep the root "/".
+        if (u.pathname !== "/" && u.pathname.endsWith("/")) {
+            u.pathname = u.pathname.replace(/\/+$/, "");
+        }
+        return u.toString();
+    } catch {
+        const stripped = href.replace(/#.*$/, "").replace(/\/+$/, "");
+        return stripped || "/";
+    }
+}
+
 export function extractUrlFromText(text: string): string | undefined {
     const match = text.match(/https?:\/\/[^\s)]+/i);
     return match ? match[0] : undefined;
+}
+
+/**
+ * True when the user's goal is to test the UNAUTHENTICATED / login experience
+ * itself (e.g. "test the sign-in page", "verify the unauthenticated landing
+ * page", "assert the login form is visible — do not assume a logged-in session").
+ *
+ * In that case a login wall is the TARGET, not a blocker: the agent must keep the
+ * captured login DOM and generate a test for it instead of trying to sign in,
+ * slip past it with a saved session, or crawl deeper into the identity provider.
+ * Without this, an app that gates every route behind auth can never have its
+ * login page tested.
+ */
+export function goalTargetsUnauthedPage(prompt: string): boolean {
+    const p = (prompt || "").toLowerCase();
+
+    // 1. Explicit logged-out / unauthenticated intent always wins.
+    const explicitUnauthed =
+        /\bunauthenticated\b/.test(p) ||
+        /\bnot\s+(?:logged|signed)\s+in\b/.test(p) ||
+        /\b(?:logged|signed)\s+out\b/.test(p) ||
+        /\bwithout\s+(?:signing|logging)\s+in\b/.test(p) ||
+        /\bdo\s+not\s+assume\s+a\s+logged[-\s]?in\b/.test(p);
+    if (explicitUnauthed) return true;
+
+    // 2. Authenticated intent dominates an incidental login-page mention. Without
+    // this, a NEGATED reference ("verify it loads authenticated, NOT the login
+    // page") would wrongly suppress the saved session and make every generated
+    // test run logged-out — failing on the sign-in redirect.
+    const authedIntent =
+        /\bauthenticated\b/.test(p) ||
+        /\bsigned[-\s]?in\b/.test(p) ||
+        /\blogged[-\s]?in\b/.test(p);
+    if (authedIntent) return false;
+
+    // 3. Otherwise treat "the login/sign-in/get-started page" as the target only
+    // when it is NOT negated (skip "not the login page", "don't land on ...").
+    const loginNoun =
+        /(?:login|log[-\s]?in|sign[-\s]?in|signin|get[-\s]?started|landing)\s+(?:page|screen|ui|form|experience|flow)/;
+    const m = loginNoun.exec(p);
+    if (!m) return false;
+    const before = p.slice(Math.max(0, m.index - 24), m.index);
+    if (
+        /\b(?:not|never|avoid|without|isn't|aren't|shouldn't|don't|no longer)\b|n't\s+\w*\s*$/.test(
+            before,
+        )
+    ) {
+        return false;
+    }
+    return true;
 }
 
 export function parseSummaryElements(summary: string): SummaryElement[] {
@@ -62,13 +231,16 @@ export function parseSummaryElements(summary: string): SummaryElement[] {
         if (!inElements || !line.startsWith("• ")) {
             continue;
         }
-        const match = line.match(/^•\s+([^:]+):\s+"(.*)"(?:\s+\[type=(\S+)\])?$/);
+        const match = line.match(
+            /^•\s+([^:]+):\s+"(.*?)"(?:\s+\[type=([^\]]+)\])?(?:\s+\[href=([^\]]+)\])?\s*$/,
+        );
         if (!match) {
             continue;
         }
         const role = match[1].trim();
         const name = match[2].trim();
         const type = match[3] || undefined;
+        const href = match[4] || undefined;
         const nextLine = (lines[i + 1] || "").trim();
         // Parse all selectors (pipe-delimited) or single selector
         const selectorsMatch = nextLine.match(/^Selectors?:\s+(.+)$/);
@@ -82,6 +254,7 @@ export function parseSummaryElements(summary: string): SummaryElement[] {
             role,
             name,
             type,
+            href,
             selector: allSelectors[0],
             selectors: allSelectors,
         });
@@ -153,6 +326,13 @@ export interface StructuralSignals {
     hasPasswordField: boolean;
     hasEmailOrUserField: boolean;
     hasCodeField: boolean;
+    /**
+     * True when the page exposes ANY fillable input (text, tel, email, number,
+     * search, …) — not just password/code. This is what lets the LLM classifier
+     * see arbitrary field-based blockers (a bare phone form, a name gate, a
+     * custom access field) that the password/code-specific signals miss.
+     */
+    hasFormInputs: boolean;
     hasBlockingOverlay: boolean;
     isDeadEnd: boolean;
     elementCount: number;
@@ -252,13 +432,22 @@ export function getStructuralSignals(
     const hasPasswordField = passwordEl !== null;
     const hasEmailOrUserField = identityEl !== null && hasPasswordField;
     const hasCodeField = codeEl !== null;
+    const hasFormInputs = elements.some(
+        (el) => INPUT_ROLES.includes(el.role) && el.type !== "checkbox" && el.type !== "radio",
+    );
 
     return {
         hasPasswordField,
         hasEmailOrUserField,
         hasCodeField,
+        hasFormInputs,
         hasBlockingOverlay,
-        isDeadEnd: elements.length <= 3,
+        // A page with zero interactive elements almost always means the
+        // capture failed or the page hasn't loaded yet — not a real
+        // user-actionable dead-end. Genuine dead-ends (error pages, captcha
+        // walls) still expose 1–3 controls like a "Go back" or "Retry"
+        // button, so we require at least one element before flagging.
+        isDeadEnd: elements.length >= 1 && elements.length <= 3,
         elementCount: elements.length,
         pageTitle,
         passwordSelectors: collectSelectors(passwordEl),
@@ -269,15 +458,45 @@ export function getStructuralSignals(
 
 /**
  * Decide whether the page warrants an LLM classification call.
- * This is intentionally generous (some false triggers are fine) to avoid
- * missing real blockers. The LLM will filter out non-blockers.
+ *
+ * This is a cheap PRE-FILTER, not the decision itself — the LLM
+ * ({@link classifyInterruption}) is what actually decides whether a page is a
+ * blocker and what it needs. We keep a filter only to avoid spending an LLM
+ * call on pages that clearly can't be a field/blocker (pure content pages with
+ * no inputs, no overlay, and plenty of navigation).
+ *
+ * Crucially it now fires on ANY page with fillable inputs — not just
+ * password/code — so arbitrary gated forms (a bare phone number, a name, a
+ * custom access field) reach the LLM instead of being silently skipped by the
+ * old password/code-only rules.
  */
 export function shouldClassifyInterruption(signals: StructuralSignals): boolean {
     if (signals.hasPasswordField) return true;
     if (signals.hasCodeField) return true;
+    if (signals.hasFormInputs) return true;
     if (signals.hasBlockingOverlay) return true;
     if (signals.isDeadEnd) return true;
     return false;
+}
+
+/**
+ * Enumerate every fillable input the page is presenting, with its label, type,
+ * and DOM-derived selectors. Unlike the auth-specific signal helpers, this is
+ * generic: it captures whatever fields a blocker is asking for so the values
+ * the user provides can be mapped onto them dynamically. Checkboxes/radios are
+ * excluded since they are toggles, not free-text credential inputs.
+ */
+export function getRequestedInputFields(elements: SummaryElement[]): RequestedField[] {
+    const fields: RequestedField[] = [];
+    elements.forEach((el, index) => {
+        if (!INPUT_ROLES.includes(el.role)) return;
+        if (el.type === "checkbox" || el.type === "radio") return;
+        const selectors = collectSelectors(el);
+        if (selectors.length === 0) return;
+        const label = el.name?.trim() || (el.type ? `${el.type} field` : "field");
+        fields.push({ key: `field_${index}`, label, type: el.type, selectors });
+    });
+    return fields;
 }
 
 /**

@@ -19,6 +19,7 @@ import { looksLikeLoginUrl } from "@raiken/core";
 import { resolveAuthStorageStateDestination } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
+import { cliExit } from "../repl/exit";
 
 interface AuthOptions {
     url?: string;
@@ -85,7 +86,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
         return;
     }
 
-    console.log(chalk.cyan("\n🔐 Starting authentication flow...\n"));
+    console.log(chalk.cyan("\nStarting authentication flow...\n"));
 
     const url = options.url ?? "about:blank";
 
@@ -101,7 +102,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             chromium = pw.chromium;
         } catch {
             spinner.fail(chalk.red("Playwright is not installed. Run: npx playwright install"));
-            process.exit(1);
+            cliExit(1);
         }
     }
 
@@ -130,7 +131,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 
     const baseline = await captureBaseline(context, page);
 
-    console.log(chalk.yellow("📝 Log in to your application in the browser window."));
+    console.log(chalk.yellow("Log in to your application in the browser window."));
     console.log(chalk.dim("   Raiken will detect the successful login and save automatically."));
     console.log(chalk.dim("   Press Enter to save manually, or close the browser to abort.\n"));
 
@@ -220,13 +221,13 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     }
 
     if (!storageState) {
-        console.log(chalk.red("\n❌ Could not read browser session state. Auth aborted."));
+        console.log(chalk.red("\n✗ Could not read browser session state. Auth aborted."));
         try {
             await browser.close();
         } catch {
             // already closed
         }
-        process.exit(1);
+        cliExit(1);
     }
 
     fs.writeFileSync(authStatePath, JSON.stringify(storageState, null, 2));
@@ -244,11 +245,11 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 
     console.log();
     if (savedReason === "manual") {
-        console.log(chalk.green("✅ Saved (manual)"));
+        console.log(chalk.green("✓ Saved (manual)"));
     } else if (savedReason === "browser-closed") {
-        console.log(chalk.green("✅ Saved (browser closed)"));
+        console.log(chalk.green("✓ Saved (browser closed)"));
     } else {
-        console.log(chalk.green("✅ Login detected — saved automatically"));
+        console.log(chalk.green("✓ Login detected — saved automatically"));
     }
     console.log(chalk.dim(`   File:           ${authStatePath}`));
     console.log(chalk.dim(`   Cookies:        ${cookieCount}`));
@@ -278,7 +279,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     }
 
     if (cookieCount === 0 && originCount === 0) {
-        process.exit(1);
+        cliExit(1);
     }
 }
 
@@ -436,30 +437,30 @@ function waitForEnterKey(): { promise: Promise<void>; cancel: () => void } {
 async function importFromStateFile(src: string, dest: string, projectPath: string): Promise<void> {
     const resolved = path.isAbsolute(src) ? src : path.resolve(projectPath, src);
     if (!fs.existsSync(resolved)) {
-        console.error(chalk.red(`\n❌ State file not found: ${resolved}`));
-        process.exit(1);
+        console.error(chalk.red(`\n✗ State file not found: ${resolved}`));
+        cliExit(1);
     }
     let parsed: PlaywrightStorageStateShape;
     try {
         const raw = fs.readFileSync(resolved, "utf-8");
         parsed = JSON.parse(raw) as PlaywrightStorageStateShape;
     } catch (err) {
-        console.error(chalk.red(`\n❌ Could not parse ${resolved}: ${(err as Error).message}`));
-        process.exit(1);
+        console.error(chalk.red(`\n✗ Could not parse ${resolved}: ${(err as Error).message}`));
+        cliExit(1);
     }
     if (!Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
         console.error(
             chalk.red(
-                "\n❌ File doesn't look like a Playwright storage state (missing cookies/origins arrays).",
+                "\n✗ File doesn't look like a Playwright storage state (missing cookies/origins arrays).",
             ),
         );
-        process.exit(1);
+        cliExit(1);
     }
 
     fs.writeFileSync(dest, JSON.stringify(parsed, null, 2));
     await markAuthBlockersResolved(projectPath, dest);
 
-    console.log(chalk.green("\n✅ Imported storage state"));
+    console.log(chalk.green("\n✓ Imported storage state"));
     console.log(chalk.dim(`   From: ${resolved}`));
     console.log(chalk.dim(`   To:   ${dest}`));
     console.log(chalk.dim(`   Cookies:        ${parsed.cookies.length}`));
@@ -474,18 +475,18 @@ async function importFromFlags(
     if (!options.domain) {
         console.error(
             chalk.red(
-                "\n❌ --domain is required when using --cookie or --storage (e.g. --domain app.example.com).",
+                "\n✗ --domain is required when using --cookie or --storage (e.g. --domain app.example.com).",
             ),
         );
-        process.exit(1);
+        cliExit(1);
     }
     const domain = options.domain
         .replace(/^https?:\/\//, "")
         .replace(/\/.*$/, "")
         .trim();
     if (!domain) {
-        console.error(chalk.red("\n❌ --domain is empty."));
-        process.exit(1);
+        console.error(chalk.red("\n✗ --domain is empty."));
+        cliExit(1);
     }
     // Default the cookie domain to ".host" so subdomain variations match.
     const cookieDomain = domain.startsWith(".") ? domain : `.${domain}`;
@@ -528,8 +529,8 @@ async function importFromFlags(
     }
 
     if (cookies.length === 0 && localStorage.length === 0) {
-        console.error(chalk.red("\n❌ No cookies or storage entries to import."));
-        process.exit(1);
+        console.error(chalk.red("\n✗ No cookies or storage entries to import."));
+        cliExit(1);
     }
 
     const state: PlaywrightStorageStateShape = {
@@ -540,7 +541,7 @@ async function importFromFlags(
     fs.writeFileSync(dest, JSON.stringify(state, null, 2));
     await markAuthBlockersResolved(projectPath, dest);
 
-    console.log(chalk.green("\n✅ Imported auth state"));
+    console.log(chalk.green("\n✓ Imported auth state"));
     console.log(chalk.dim(`   File:           ${dest}`));
     console.log(chalk.dim(`   Domain:         ${domain}`));
     console.log(chalk.dim(`   Cookies:        ${cookies.length}`));

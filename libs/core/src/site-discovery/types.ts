@@ -14,12 +14,42 @@ export interface DiscoveredPage {
     normalizedUrl: string;
     title: string | null;
     snapshotJson: string | null;
+    /**
+     * JSON-serialised {@link PageForms} — the structured form fields discovery
+     * extracted from this page (label/type/selector per input + submit labels).
+     * Null when the page has no forms or was recorded before form capture.
+     */
+    formsJson: string | null;
     parentUrl: string | null;
     navigationAction: string | null;
     depth: number;
     discoveredAt: number;
     lastVisitedAt: number;
     visitCount: number;
+}
+
+/**
+ * A single form input discovery observed on a page. Kept lightweight and
+ * selector-friendly so test generation can build getByRole/getByLabel/
+ * getByPlaceholder locators without re-visiting the page.
+ */
+export interface DiscoveredFormField {
+    /** Best human label (aria-label, <label>, placeholder, or name). */
+    label: string;
+    /** Input type (e.g. "email", "password", "text") or the tag for select/textarea. */
+    type: string;
+    placeholder?: string;
+    name?: string;
+    id?: string;
+    testId?: string;
+    required?: boolean;
+}
+
+/** Structured forms captured for one page. */
+export interface PageForms {
+    fields: DiscoveredFormField[];
+    /** Text/labels of submit-style buttons on the page. */
+    submits: string[];
 }
 
 /**
@@ -234,6 +264,14 @@ export interface DiscoveryOptions {
      * Defaults to 30 minutes. Set to 0 to disable.
      */
     maxRunTimeMs?: number;
+    /**
+     * Keep query strings when deduping/normalizing URLs. By default the crawler
+     * collapses `/item?id=1` and `/item?id=2` into a single page (`/item`),
+     * which is right for tracking params but wrong for apps that render distinct
+     * content per query value. Enable to treat query-distinct URLs as distinct
+     * pages. Fragments and trailing slashes are still normalized.
+     */
+    preserveQueryParams?: boolean;
 }
 
 /**
@@ -272,10 +310,24 @@ export interface SelectorHint {
 }
 
 /**
+ * A single page discovery actually visited — the authoritative route catalog
+ * the test generator uses instead of guessing URLs.
+ */
+export interface DiscoveredRoute {
+    url: string;
+    title: string | null;
+    depth: number;
+    /** Structured form controls observed on this page, when any. */
+    forms?: PageForms;
+}
+
+/**
  * Aggregated site knowledge for agent context
  */
 export interface SiteKnowledge {
     pagesDiscovered: number;
+    /** Real routes discovery visited (url + title). The generator MUST use these. */
+    routes: DiscoveredRoute[];
     verifiedPaths: NavigationPath[];
     authRequiredRoutes: string[];
     workingSelectors: SelectorHint[];
@@ -319,12 +371,3 @@ export type DiscoveryEventData =
     | { stats: DiscoveryStats; reason?: "aborted" }
     | { url: string; message: string }
     | { error: Error };
-
-/**
- * Auth detector result.
- * @deprecated Prefer the generic detector pipeline result type.
- */
-export interface AuthDetectorResult {
-    detected: boolean;
-    blocker: DiscoveryBlocker | null;
-}

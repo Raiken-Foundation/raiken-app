@@ -70,13 +70,18 @@ export class ProjectContext {
      * Singleton pattern ensures one instance per project.
      */
     static getInstance(projectPath: string): ProjectContext {
-        const existing = ProjectContext.instances.get(projectPath);
+        // Key on the resolved absolute path (like AgentMemory) so callers
+        // passing "." vs an absolute path (or a trailing slash) share one
+        // instance instead of building duplicate contexts + DB handles for the
+        // same project.
+        const key = path.resolve(projectPath);
+        const existing = ProjectContext.instances.get(key);
         if (existing) {
             return existing;
         }
 
-        const instance = new ProjectContext(projectPath);
-        ProjectContext.instances.set(projectPath, instance);
+        const instance = new ProjectContext(key);
+        ProjectContext.instances.set(key, instance);
         return instance;
     }
 
@@ -97,14 +102,23 @@ export class ProjectContext {
     /**
      * Initialize the context by scanning the project.
      * Should be called once at server startup.
+     *
+     * @param verbose Log progress to the console (default `true`, so
+     *   existing callers — the dashboard server, internal lazy-init call
+     *   sites — keep their current output). Callers with their own status
+     *   UI (e.g. the CLI's REPL, which shows a spinner) pass `false`.
      */
-    async initialize(): Promise<void> {
+    async initialize(verbose = true): Promise<void> {
+        const log = (...args: unknown[]) => {
+            if (verbose) console.log(...args);
+        };
+
         if (this.initialized) {
-            console.log("ProjectContext already initialized");
+            log("ProjectContext already initialized");
             return;
         }
 
-        console.log("Initializing ProjectContext...");
+        log("Initializing ProjectContext...");
 
         // Create CodeGraph
         this.graph = new CodeGraph(this.projectPath, {
@@ -117,10 +131,10 @@ export class ProjectContext {
         const saved = db.loadGraph();
 
         if (saved && saved.nodes.size > 0) {
-            console.log(`Loading ${saved.nodes.size} files from database...`);
+            log(`Loading ${saved.nodes.size} files from database...`);
             this.graph.loadFromNodes(saved.nodes);
         } else {
-            console.log("Scanning project...");
+            log("Scanning project...");
             await this.graph.scanProject();
         }
 
@@ -133,7 +147,7 @@ export class ProjectContext {
         // Try to load keyword index from DB (for faster cold starts)
         const savedIndex = this.loadKeywordIndexFromDB(db);
         if (savedIndex && savedIndex.size > 0) {
-            console.log(`Loaded ${savedIndex.size} keywords from database`);
+            log(`Loaded ${savedIndex.size} keywords from database`);
             // Merge with freshly built index (fresh takes priority)
             for (const [keyword, files] of savedIndex) {
                 if (!this.keywordIndex.has(keyword)) {
@@ -147,7 +161,7 @@ export class ProjectContext {
 
         db.close();
 
-        console.log(
+        log(
             `ProjectContext initialized: ${this.keywordIndex.size} keywords, ${this.modules.length} modules`,
         );
     }

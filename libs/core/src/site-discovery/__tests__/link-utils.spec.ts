@@ -11,6 +11,9 @@ import { describe, expect, it } from "vitest";
 import {
     buildLinkSelector,
     escapeSelectorText,
+    isLikelyRouteHref,
+    mergeBlockedUrlIntoQueue,
+    resolveRouteHref,
     safeOrigin,
     stripControlChars,
 } from "../link-utils";
@@ -92,6 +95,83 @@ describe("buildLinkSelector", () => {
 
     it("returns the safe a[href] fallback when everything is empty", () => {
         expect(buildLinkSelector("", "", null)).toBe("a[href]");
+    });
+
+    it("builds non-anchor selectors for SPA buttons with data-testid", () => {
+        expect(
+            buildLinkSelector("/settings", "Settings", "nav-settings", { tagName: "button" }),
+        ).toBe('button[data-testid="nav-settings"]');
+    });
+
+    it("uses role+text for role=link without href", () => {
+        expect(buildLinkSelector("", "Settings", null, { tagName: "div", role: "link" })).toBe(
+            '[role="link"]:has-text("Settings")',
+        );
+    });
+});
+
+describe("isLikelyRouteHref / resolveRouteHref", () => {
+    it("accepts root-relative and absolute URLs", () => {
+        expect(isLikelyRouteHref("/settings")).toBe(true);
+        expect(isLikelyRouteHref("https://app.example.com/x")).toBe(true);
+        expect(isLikelyRouteHref("./relative")).toBe(true);
+    });
+
+    it("rejects actions and fragments", () => {
+        expect(isLikelyRouteHref("submit")).toBe(false);
+        expect(isLikelyRouteHref("#section")).toBe(false);
+        expect(isLikelyRouteHref("mailto:a@b.c")).toBe(false);
+        expect(isLikelyRouteHref("")).toBe(false);
+    });
+
+    it("picks the first route-like attribute", () => {
+        expect(resolveRouteHref({ href: "#", "data-to": "/team" })).toBe("/team");
+        expect(resolveRouteHref({ "data-path": "/billing", href: null })).toBe("/billing");
+        expect(resolveRouteHref({ href: "submit" })).toBeNull();
+    });
+});
+
+describe("mergeBlockedUrlIntoQueue", () => {
+    const normalize = (url: string) => url.replace(/\/$/, "") || "/";
+
+    it("prepends blockedAtUrl when missing from the snapshot", () => {
+        const merged = mergeBlockedUrlIntoQueue(
+            [{ url: "https://app/a", uniqueKey: "https://app/a" }],
+            "https://app/login",
+            normalize,
+        );
+        expect(merged[0]?.url).toBe("https://app/login");
+        expect(merged).toHaveLength(2);
+    });
+
+    it("does not duplicate an already-queued blocked URL", () => {
+        const merged = mergeBlockedUrlIntoQueue(
+            [{ url: "https://app/login", uniqueKey: "https://app/login" }],
+            "https://app/login",
+            normalize,
+        );
+        expect(merged).toHaveLength(1);
+    });
+
+    it("returns only the blocked URL when the queue snapshot is empty", () => {
+        const merged = mergeBlockedUrlIntoQueue([], "https://app/blocked", normalize);
+        expect(merged).toEqual([
+            {
+                url: "https://app/blocked",
+                uniqueKey: "https://app/blocked",
+                userData: { depth: 0, resumeBlocked: true },
+            },
+        ]);
+    });
+
+    it("leaves the queue unchanged when blockedAtUrl is null", () => {
+        const merged = mergeBlockedUrlIntoQueue(
+            [{ url: "https://app/a", uniqueKey: "https://app/a" }],
+            null,
+            normalize,
+        );
+        expect(merged).toHaveLength(1);
+        expect(merged[0]?.url).toBe("https://app/a");
     });
 });
 

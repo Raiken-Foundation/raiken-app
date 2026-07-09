@@ -1,12 +1,339 @@
+import fsSync from "node:fs";
 import path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { z } from "zod";
 import { ProjectContext } from "../../../analysis/project-context";
+import { cleanGeneratedTestCode } from "../../../utils";
+import { AgentMemory } from "../../memory";
+import type { ContextData } from "../../prompts";
 import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
 import type { GraphStateType } from "../state";
-import { normalizeSelector, parseSummaryElements } from "../utils";
+import type { ContextPlan } from "../utils";
+import { goalTargetsUnauthedPage, normalizeSelector, parseSummaryElements } from "../utils";
 import type { AgentNodeDeps } from "./types";
 
+/**
+ * Return the locators used in a generated test that do NOT appear in the
+ * captured page context (DOM summary + every visited page summary). Best-effort
+ * and warn-only: it validates the semantic locators we can compare structurally
+ * (getByRole/TestId/Label/Placeholder against captured selectors) plus, more
+ * loosely, getByText / page.locator by checking whether their literal argument
+ * appears anywhere in the captured text. The goal is to flag likely guesses, so
+ * we err toward NOT flagging (false negatives) over noisy false positives.
+ */
+function findUngroundedSelectors(testCode: string, summaries: string[]): string[] {
+    const domSelectors = new Set<string>();
+    // Full captured text (selectors + names + visible text) used for the looser
+    // text/CSS containment checks below.
+    let combinedText = "";
+    for (const summary of summaries) {
+        if (!summary) continue;
+        combinedText += `\n${summary}`;
+        for (const el of parseSummaryElements(summary)) {
+            for (const sel of el.selectors) {
+                domSelectors.add(sel);
+                const normalized = normalizeSelector(sel);
+                if (normalized) domSelectors.add(normalized);
+            }
+        }
+    }
+    if (domSelectors.size === 0 && !combinedText.trim()) return [];
+
+    const missing: string[] = [];
+    const flag = (raw: string) => {
+        if (!missing.includes(raw)) missing.push(raw);
+    };
+
+    // Structural locators: must match a captured selector.
+    const semantic = testCode.match(/getBy(?:Role|TestId|Label|Placeholder)\([^)]*\)/g) || [];
+    for (const sel of semantic) {
+        const normalized = normalizeSelector(sel) || sel;
+        if (!domSelectors.has(sel) && !domSelectors.has(normalized)) flag(sel);
+    }
+
+    // Text locators: the quoted text should appear somewhere in the captured
+    // text. Only flag when we have text to compare against.
+    if (combinedText.trim()) {
+        const textLocators = testCode.match(/getByText\(\s*(['"`])([^'"`]+)\1/g) || [];
+        for (const loc of textLocators) {
+            const m = loc.match(/getByText\(\s*(['"`])([^'"`]+)\1/);
+            const text = m?.[2]?.trim();
+            if (
+                text &&
+                text.length > 2 &&
+                !combinedText.toLowerCase().includes(text.toLowerCase())
+            ) {
+                flag(loc.endsWith(")") ? loc : `${loc})`);
+            }
+        }
+
+        // page.locator("css") — the raw selector string should be recognizable
+        // in the captured selectors or text. Very loose (CSS is unstable), so
+        // only the exact literal is checked.
+        const cssLocators = testCode.match(/\.locator\(\s*(['"`])([^'"`]+)\1/g) || [];
+        for (const loc of cssLocators) {
+            const m = loc.match(/\.locator\(\s*(['"`])([^'"`]+)\1/);
+            const css = m?.[2]?.trim();
+            if (css && css.length > 2 && !domSelectors.has(css) && !combinedText.includes(css)) {
+                flag(loc.endsWith(")") ? loc : `${loc})`);
+            }
+        }
+    }
+
+    return missing;
+}
+
 const PAGE_SUMMARIES_MAX_CHARS = 3000;
+
+/**
+ * Render a completed goal-directed action (e.g. "sign out") as a prompt block
+ * so both the answer and the generated test reflect the exact path taken:
+ * which page, which control, and whether it was performed.
+ */
+function formatActionResult(state: GraphStateType): string | null {
+    const result = state.actionResult;
+    if (!result || !result.found) return null;
+    const lines = [
+        "[ACTION PATH]",
+        `- Action: ${result.action}`,
+        `- Located on page: ${result.page ?? "current page"}`,
+    ];
+    if (result.selector) lines.push(`- Control selector: ${result.selector}`);
+    lines.push(`- How it was reached: ${result.note}`);
+    lines.push(`- Performed in browser: ${result.performed ? "yes" : "no"}`);
+    return lines.join("\n");
+}
+
+/** Render the context plan so the generator knows what was assembled and why. */
+function formatContextPlan(plan: ContextPlan | null | undefined): string | null {
+    if (!plan) return null;
+    const lines = ["[CONTEXT PLAN]", `- Rationale: ${plan.rationale}`];
+    if (plan.searchQueries.length > 0) {
+        lines.push(`- Code searched for: ${plan.searchQueries.join("; ")}`);
+    }
+    if (plan.domAspects.length > 0) {
+        lines.push(`- Focus the test on these UI aspects: ${plan.domAspects.join("; ")}`);
+    }
+    return lines.join("\n");
+}
+
+/**
+ * Surface every action path the agent has previously located (not just
+ * logout) — e.g. "add to cart", "delete account" — so the generator reuses the
+ * exact page + selector instead of guessing.
+ */
+function formatKnownActions(projectPath: string): string | null {
+    let actions: Array<{ action: string; page: string | null; selector: string | null }> = [];
+    try {
+        actions = AgentMemory.getInstance(projectPath)
+            .getActionPaths()
+            .filter((a) => a.selector);
+    } catch {
+        return null;
+    }
+    if (actions.length === 0) return null;
+    const lines = ["[KNOWN ACTIONS — located live in this app; prefer these selectors]"];
+    for (const a of actions.slice(0, 20)) {
+        lines.push(`- ${a.action}: ${a.selector}${a.page ? ` (on ${a.page})` : ""}`);
+    }
+    return lines.join("\n");
+}
+
+const AUTH_TASK_RE =
+    /\b(auth|authentication|log[\s-]?in|login|log[\s-]?out|logout|sign[\s-]?in|sign[\s-]?out|sign[\s-]?up|register|credential|session)\b/i;
+
+/** Is this generation about authentication (login/logout/sign-in flows)? */
+function isAuthTask(state: GraphStateType): boolean {
+    const text = [state.userPrompt, state.activeGoal, state.targetFeature, state.targetAction]
+        .filter(Boolean)
+        .join(" ");
+    return AUTH_TASK_RE.test(text);
+}
+
+interface StoredLoginContext {
+    url: string | null;
+    fields: Array<{ label: string; type: string | null; selector: string | null }>;
+    submit: string | null;
+}
+
+interface StoredActionPath {
+    page: string | null;
+    selector: string | null;
+    note?: string;
+}
+
+/**
+ * Path (relative to the project root) of a reusable Playwright storageState, if
+ * one exists. Mirrors `resolveAuthStatePath` in tools.ts but returns a RELATIVE
+ * path suitable for `test.use({ storageState })` (Playwright resolves it against
+ * the config directory, i.e. the project root). Returns null when no captured
+ * session is available. This is the signal that the app requires auth AND we
+ * already have a signed-in session to reuse — the key to making generated tests
+ * run authenticated instead of stalling at a login wall.
+ */
+function resolveAuthStateRelPath(projectPath: string): string | null {
+    try {
+        const configPath = path.join(projectPath, "raiken.config.json");
+        const raw = fsSync.readFileSync(configPath, "utf-8");
+        const config = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
+        if (config.auth?.storageStatePath) {
+            const abs = path.resolve(projectPath, config.auth.storageStatePath);
+            if (fsSync.existsSync(abs)) {
+                return path.relative(projectPath, abs) || config.auth.storageStatePath;
+            }
+        }
+    } catch {
+        // Config missing/invalid — fall through to the default location.
+    }
+    const fallbackRel = path.join(".raiken", "auth-state.json");
+    if (fsSync.existsSync(path.join(projectPath, fallbackRel))) return fallbackRel;
+    return null;
+}
+
+/**
+ * Guidance telling the model to reuse a captured signed-in session via
+ * `test.use({ storageState })`. Emitted for EVERY generation (not just auth
+ * tasks) when a session exists, because most tests target authenticated pages —
+ * without this the model, seeing an app that needs auth but no login flow,
+ * invents a `test.skip`/TODO and the test never runs (the exact bug reported).
+ */
+function formatStorageStateGuidance(relPath: string): string {
+    return [
+        "[AUTHENTICATION — a reusable signed-in session is available]",
+        `- This app requires authentication and a valid Playwright storage state exists at "${relPath}".`,
+        "- Reuse it so every test runs as an already-authenticated user. Add this line EXACTLY ONCE, right after the imports and before any test.describe/test:",
+        `    test.use({ storageState: ${JSON.stringify(relPath)} });`,
+        "- Treat the browser as already signed in. Do NOT navigate to a login page, do NOT implement a login flow, do NOT call test.skip for authentication, and do NOT add TODOs about login.",
+        "- Assert authenticated-only UI and behaviour directly (the app will be on its post-login pages).",
+    ].join("\n");
+}
+
+/**
+ * Deterministically ensure a generated spec reuses the captured session, so the
+ * fix doesn't depend on the model remembering to add the line. Inserts
+ * `test.use({ storageState })` right after the import block when the code
+ * doesn't already reference a storage state. Idempotent.
+ */
+function injectStorageState(code: string, relPath: string): string {
+    if (!code.trim()) return code;
+    if (/storageState/.test(code)) return code; // model already added it
+    const lines = code.split("\n");
+    let lastImport = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (/^\s*import\b.*\bfrom\b.*['"].*['"];?\s*$/.test(lines[i])) lastImport = i;
+    }
+    const useLine = `test.use({ storageState: ${JSON.stringify(relPath)} });`;
+    if (lastImport >= 0) {
+        lines.splice(lastImport + 1, 0, "", useLine);
+        return lines.join("\n");
+    }
+    return `${useLine}\n\n${code}`;
+}
+
+/**
+ * Build an [AUTH FLOW] block from what the agent actually observed while going
+ * through the app: the real login page URL + fields (captured when the login
+ * form was on screen), and a logout control if one was found. This is what
+ * stops auth specs from being generated against an invented "/login" route and
+ * makes them state-aware (log out first if a session exists, then log in).
+ *
+ * When a reusable session exists (`hasStorageState`), the "no login observed"
+ * fallback is suppressed — the storageState guidance handles that case, and a
+ * TODO-to-implement-login would directly contradict it.
+ */
+function formatAuthFlow(
+    projectPath: string,
+    state: GraphStateType,
+    hasStorageState: boolean,
+): string | null {
+    if (!isAuthTask(state)) return null;
+
+    let login: StoredLoginContext | null = null;
+    let logout: StoredActionPath | null = null;
+    // Guard each parse independently: a single malformed preference must not
+    // disable the whole auth block (previously one bad value skipped both).
+    const safeParse = <T>(raw: string | null | undefined): T | null => {
+        if (!raw) return null;
+        try {
+            return JSON.parse(raw) as T;
+        } catch {
+            return null;
+        }
+    };
+    try {
+        const memory = AgentMemory.getInstance(projectPath);
+        login = safeParse<StoredLoginContext>(memory.getPreference("auth_login"));
+        logout =
+            safeParse<StoredActionPath>(memory.getPreference("action_path:sign out")) ||
+            safeParse<StoredActionPath>(memory.getPreference("action_path:log out")) ||
+            safeParse<StoredActionPath>(memory.getPreference("action_path:logout"));
+    } catch {
+        /* memory unavailable — skip the block */
+    }
+
+    // Nothing observed live. Rather than silently letting the model invent a
+    // "/login" route, explicitly forbid guessing and point it at the grounded
+    // routes/DOM (or a TODO) — this is an auth task, so guidance still helps.
+    // BUT if a reusable session exists, defer entirely to the storageState
+    // guidance: telling the model to "add a login TODO" here would contradict
+    // "reuse the signed-in session" and reproduce the stalls-at-login bug.
+    if (!login?.url && !logout?.selector) {
+        if (hasStorageState) return null;
+        return [
+            "[AUTH FLOW]",
+            "- No login flow was observed live in this session.",
+            '- Do NOT invent a login route such as "/login" or "/signin".',
+            "- Use only routes/selectors from the Discovered Routes and live DOM sections above.",
+            "- If the real login route/selectors are unknown, add a clear TODO comment in the test instead of guessing.",
+            "- Read credentials from environment variables; never hardcode them.",
+        ].join("\n");
+    }
+
+    const lines = ["[AUTH FLOW — observed live in this app; use verbatim, do not invent routes]"];
+    if (login?.url) {
+        let pathPart = login.url;
+        try {
+            pathPart = new URL(login.url).pathname || login.url;
+        } catch {
+            /* not absolute */
+        }
+        lines.push(`- Login page URL: ${login.url}  (path: ${pathPart})`);
+    }
+    if (login?.fields?.length) {
+        for (const f of login.fields) {
+            if (!f.selector) continue;
+            lines.push(
+                `- Login field "${f.label}"${f.type ? ` [type=${f.type}]` : ""}: ${f.selector}`,
+            );
+        }
+    }
+    if (login?.submit) lines.push(`- Login submit: ${login.submit}`);
+    if (logout?.selector) {
+        lines.push(
+            `- Logout control: ${logout.selector}${logout.page ? ` (on ${logout.page})` : ""}`,
+        );
+    }
+
+    lines.push("");
+    lines.push("Authentication test requirements:");
+    lines.push(
+        "- Use the observed login page URL above — never guess a route like /login or /signin.",
+    );
+    lines.push(
+        "- Do NOT assume the app starts logged out: a saved session may exist. Establish a known state first (e.g. clear state / start unauthenticated, or if already logged in, log out).",
+    );
+    lines.push("- Read credentials from environment variables, never hardcode them.");
+    if (logout?.selector) {
+        lines.push(
+            "- Cover the full cycle: if logged in, log out, then log in again; assert both the logged-out and logged-in states.",
+        );
+    } else {
+        lines.push(
+            "- Perform login via the observed fields and assert the authenticated result (URL change or an authenticated-only element); also assert an error on invalid credentials.",
+        );
+    }
+    return lines.join("\n");
+}
 
 function truncatePageSummaries(summaries: string[]): string {
     const lines: string[] = [];
@@ -23,22 +350,195 @@ function truncatePageSummaries(summaries: string[]): string {
     return lines.join("\n\n");
 }
 
-export const createGatherContextNode =
-    ({ gatherContext, projectPath }: AgentNodeDeps) =>
-    async (state: GraphStateType) => {
-        const contextPrompt = state.activeGoal || state.targetFeature || state.userPrompt;
-        const context = await gatherContext(contextPrompt, projectPath);
+const contextPlanSchema = z.object({
+    searchQueries: z
+        .array(z.string())
+        .describe(
+            "2-4 focused code-search queries that would surface the code most relevant to writing this test (e.g. component names, feature keywords, route/handler names). Order by importance.",
+        ),
+    focusFiles: z
+        .array(z.string())
+        .describe(
+            "Specific file paths you already believe are relevant (from the prompt, @mentions, or explored pages). Empty array if none are known.",
+        ),
+    domAspects: z
+        .array(z.string())
+        .describe(
+            "Which parts of the live UI matter for this test: e.g. 'login form fields', 'submit button', 'validation errors', 'post-submit navigation', 'async loading states'.",
+        ),
+    rationale: z.string().describe("One sentence: what should be gathered and why."),
+});
+
+const MAX_PLAN_QUERIES = 4;
+const MAX_MERGED_FILES = 12;
+
+/**
+ * Ask the model what context to assemble before writing the test. Fails open
+ * (returns a minimal single-query plan) so a planner error never blocks
+ * generation.
+ */
+async function planTestContext(deps: AgentNodeDeps, state: GraphStateType): Promise<ContextPlan> {
+    const basePrompt = state.activeGoal || state.targetFeature || state.userPrompt;
+    const fallback: ContextPlan = {
+        searchQueries: [basePrompt].filter(Boolean),
+        focusFiles: state.fileContext || [],
+        domAspects: [],
+        rationale: "Default single-query gather (planner unavailable).",
+    };
+    try {
+        const pagesSeen = (state.pageSummaries || [])
+            .map((s, i) => `  ${i + 1}. ${extractPageTitleSafe(s)}`)
+            .slice(0, 8)
+            .join("\n");
+        const planner = deps.model.withStructuredOutput(contextPlanSchema, {
+            name: "plan_test_context",
+        });
+        const system = [
+            "You are planning what context to gather before writing an end-to-end (Playwright) test.",
+            "Decide the minimal set of code-search queries, known files, and live-DOM aspects needed.",
+            "Be specific and concise. Do not invent file paths you have no evidence for.",
+        ].join(" ");
+        const human = [
+            `User request: ${state.userPrompt}`,
+            state.activeGoal ? `Goal: ${state.activeGoal}` : "",
+            state.targetFeature ? `Feature: ${state.targetFeature}` : "",
+            state.targetUrl ? `URL: ${state.targetUrl}` : "",
+            state.fileContext && state.fileContext.length > 0
+                ? `Files the user referenced: ${state.fileContext.join(", ")}`
+                : "",
+            pagesSeen ? `Pages explored so far:\n${pagesSeen}` : "",
+            state.actionResult?.found
+                ? `A UI action was located: ${state.actionResult.action} (selector: ${state.actionResult.selector ?? "n/a"}).`
+                : "",
+        ]
+            .filter(Boolean)
+            .join("\n");
+        const plan = await planner.invoke([new SystemMessage(system), new HumanMessage(human)]);
+        const searchQueries =
+            plan.searchQueries && plan.searchQueries.length > 0
+                ? plan.searchQueries.slice(0, MAX_PLAN_QUERIES)
+                : fallback.searchQueries;
+        return {
+            searchQueries,
+            focusFiles: Array.from(
+                new Set([...(state.fileContext || []), ...(plan.focusFiles || [])]),
+            ),
+            domAspects: plan.domAspects || [],
+            rationale: plan.rationale || fallback.rationale,
+        };
+    } catch (error) {
+        console.warn(
+            "Context planner failed, using single-query gather:",
+            error instanceof Error ? error.message : error,
+        );
+        return fallback;
+    }
+}
+
+function extractPageTitleSafe(summary: string): string {
+    const match = summary.match(/Page Title:\s*(.+)/i);
+    return (match?.[1] || "(untitled)").trim();
+}
+
+/** Merge several ContextData results, deduping files by path (highest score wins). */
+function mergeContexts(contexts: ContextData[]): ContextData | null {
+    const nonEmpty = contexts.filter(Boolean);
+    if (nonEmpty.length === 0) return null;
+    const base = nonEmpty[0];
+    const byPath = new Map<string, ContextData["files"][number]>();
+    for (const ctx of nonEmpty) {
+        for (const file of ctx.files) {
+            const existing = byPath.get(file.path);
+            if (!existing || file.relevanceScore > existing.relevanceScore) {
+                byPath.set(file.path, file);
+            }
+        }
+    }
+    const mergedFiles = Array.from(byPath.values())
+        .sort((a, b) => b.relevanceScore - a.relevanceScore)
+        .slice(0, MAX_MERGED_FILES);
+    return {
+        ...base,
+        files: mergedFiles,
+        totalTokens: mergedFiles.reduce((sum, f) => sum + Math.ceil(f.fullContext.length / 4), 0),
+    };
+}
+
+export const createGatherContextNode = (deps: AgentNodeDeps) => async (state: GraphStateType) => {
+    const { gatherContext, projectPath } = deps;
+    const contextPrompt = state.activeGoal || state.targetFeature || state.userPrompt;
+
+    // For test generation, plan the gather first (multiple targeted queries
+    // + focus files + DOM aspects) so the prompt is rich and deliberate.
+    if (state.intent === "generateTests") {
+        try {
+            const plan = await planTestContext(deps, state);
+            const gathered: ContextData[] = [];
+            for (const query of plan.searchQueries) {
+                try {
+                    gathered.push(await gatherContext(query, projectPath, plan.focusFiles));
+                } catch (err) {
+                    console.warn(
+                        `gatherContext failed for query "${query}":`,
+                        err instanceof Error ? err.message : err,
+                    );
+                }
+            }
+            if (gathered.length === 0) {
+                gathered.push(await gatherContext(contextPrompt, projectPath, plan.focusFiles));
+            }
+            const merged = mergeContexts(gathered);
+            return {
+                context: merged,
+                testDirectory: merged?.testDirectory,
+                contextPlan: plan,
+            };
+        } catch (error) {
+            console.warn(
+                "Planned gather failed, falling back:",
+                error instanceof Error ? error.message : error,
+            );
+            // Fall through to the simple single-query gather below.
+        }
+    }
+
+    try {
+        const context = await gatherContext(contextPrompt, projectPath, state.fileContext);
         return {
             context,
             testDirectory: context.testDirectory,
         };
-    };
+    } catch (error) {
+        // DB / embedding failures must not reject graph.invoke. Continue with
+        // an empty context so downstream nodes degrade gracefully.
+        console.warn("gatherContext failed:", error instanceof Error ? error.message : error);
+        return {};
+    }
+};
 
 export const createGenerateTestsNode =
-    ({ gatherContext, projectPath, model, buildSystemPrompt, getMemoryContext }: AgentNodeDeps) =>
+    ({
+        gatherContext,
+        projectPath,
+        model,
+        buildSystemPrompt,
+        getMemoryContext,
+        onProgress,
+        onToken,
+    }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
-        const context = state.context || (await gatherContext(state.userPrompt, projectPath));
-        if (context.files.length === 0 && !state.domSummary) {
+        const context =
+            state.context ||
+            (await gatherContext(state.userPrompt, projectPath, state.fileContext));
+        // Generation needs *some* grounding: code files, a live DOM snapshot, or
+        // explored/discovered page summaries. Previously we only accepted code
+        // files or domSummary, so a purely site-knowledge run (discovery data,
+        // no matching source files) fell through to the "no context" help.
+        const hasGrounding =
+            context.files.length > 0 ||
+            !!state.domSummary ||
+            (state.pageSummaries?.length ?? 0) > 0;
+        if (!hasGrounding) {
             return {
                 summary: NO_CONTEXT_HELP_MESSAGE,
             };
@@ -46,6 +546,36 @@ export const createGenerateTestsNode =
 
         const memoryContext = getMemoryContext();
         let systemPrompt = buildSystemPrompt(context, state.userPrompt, "golden-v1", memoryContext);
+
+        const planBlock = formatContextPlan(state.contextPlan);
+        if (planBlock) {
+            systemPrompt = `${systemPrompt}\n\n${planBlock}`;
+        }
+
+        // A reusable signed-in session (captured storageState) turns "this app
+        // needs auth" from a blocker into a one-liner. Surface it FIRST so the
+        // model writes authenticated tests instead of login TODOs/skips.
+        //
+        // BUT never inject it when the goal is to test the UNAUTHENTICATED / login
+        // experience: loading a signed-in storageState there would skip the very
+        // login page under test (and a stale one would just add noise). Keep the
+        // test genuinely logged-out.
+        const authStateRel = goalTargetsUnauthedPage(state.userPrompt)
+            ? null
+            : resolveAuthStateRelPath(projectPath);
+        if (authStateRel) {
+            systemPrompt = `${systemPrompt}\n\n${formatStorageStateGuidance(authStateRel)}`;
+        }
+
+        const authBlock = formatAuthFlow(projectPath, state, !!authStateRel);
+        if (authBlock) {
+            systemPrompt = `${systemPrompt}\n\n${authBlock}`;
+        }
+
+        const knownActionsBlock = formatKnownActions(projectPath);
+        if (knownActionsBlock) {
+            systemPrompt = `${systemPrompt}\n\n${knownActionsBlock}`;
+        }
 
         if (state.pageSummaries && state.pageSummaries.length > 1) {
             const truncated = truncatePageSummaries(state.pageSummaries);
@@ -56,6 +586,11 @@ export const createGenerateTestsNode =
             systemPrompt = `${systemPrompt}\n\n${state.domSummary}`;
         }
 
+        const actionBlock = formatActionResult(state);
+        if (actionBlock) {
+            systemPrompt = `${systemPrompt}\n\n${actionBlock}`;
+        }
+
         if (state.conversationHistory && state.conversationHistory.length > 0) {
             const historyText = state.conversationHistory
                 .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
@@ -63,19 +598,81 @@ export const createGenerateTestsNode =
             systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
         }
 
+        onProgress?.("Generating test");
         try {
-            const response = await model.invoke([
-                new SystemMessage(systemPrompt),
-                new HumanMessage(state.userPrompt),
-            ]);
-            const content = Array.isArray(response.content)
-                ? response.content
-                      .map((part) => (typeof part === "string" ? part : part?.text || ""))
-                      .join("")
-                : response.content;
+            const messages = [new SystemMessage(systemPrompt), new HumanMessage(state.userPrompt)];
+
+            // Stream tokens live when the model supports it so the dashboard
+            // shows the test being written instead of a long silent wait. Fall
+            // back to a single invoke() when streaming isn't available.
+            let content = "";
+            if (onToken && typeof model.stream === "function") {
+                try {
+                    const stream = await model.stream(messages);
+                    for await (const chunk of stream) {
+                        const part = Array.isArray(chunk.content)
+                            ? chunk.content
+                                  .map((p) => (typeof p === "string" ? p : p?.text || ""))
+                                  .join("")
+                            : (chunk.content as string);
+                        if (part) {
+                            content += part;
+                            onToken(part);
+                        }
+                    }
+                } catch (streamError) {
+                    // Streaming failed. If nothing streamed yet, fall back to a
+                    // plain invoke below. If we already streamed a partial draft,
+                    // keep it (re-invoking would duplicate the streamed tokens).
+                    console.warn(
+                        "Test generation streaming failed:",
+                        streamError instanceof Error ? streamError.message : streamError,
+                    );
+                }
+            }
+
+            if (!content) {
+                const response = await model.invoke(messages);
+                content = Array.isArray(response.content)
+                    ? response.content
+                          .map((part) => (typeof part === "string" ? part : part?.text || ""))
+                          .join("")
+                    : (response.content as string);
+            }
+
+            // Clean at generation time (strip code fences / normalize) so the
+            // draft equals what lands on disk — the editor buffer must match the
+            // saved file, and malformed fences must never reach save.
+            let cleaned = content ? cleanGeneratedTestCode(content) : "";
+
+            // Safety net: deterministically wire in the captured session so the
+            // spec runs authenticated even if the model omitted the line. Without
+            // this, a fresh `playwright test` browser is logged out and the test
+            // stalls at the login wall.
+            if (cleaned && authStateRel) {
+                cleaned = injectStorageState(cleaned, authStateRel);
+            }
+
+            // Best-effort selector validation: warn (in logs) when the generated
+            // test references selectors that weren't present in ANY captured page
+            // (live DOM + every visited page summary), which usually means the
+            // model guessed. Never blocks generation.
+            const groundingSummaries = [state.domSummary, ...(state.pageSummaries || [])].filter(
+                (s): s is string => typeof s === "string" && s.length > 0,
+            );
+            if (cleaned && groundingSummaries.length > 0) {
+                const missing = findUngroundedSelectors(cleaned, groundingSummaries);
+                if (missing.length > 0) {
+                    console.warn(
+                        `Generated test references ${missing.length} selector(s) not seen in the DOM: ${missing
+                            .slice(0, 5)
+                            .join(", ")}`,
+                    );
+                }
+            }
 
             return {
-                testDraft: content || "",
+                testDraft: cleaned,
                 context,
                 testDirectory: context.testDirectory,
             };
@@ -255,7 +852,9 @@ export const createAnswerQuestionsNode =
             };
         }
 
-        const context = state.context || (await gatherContext(state.userPrompt, projectPath));
+        const context =
+            state.context ||
+            (await gatherContext(state.userPrompt, projectPath, state.fileContext));
         if (context.files.length === 0 && !state.domSummary) {
             return {
                 summary: NO_EXPLORATION_CONTEXT_MESSAGE,
@@ -285,6 +884,11 @@ export const createAnswerQuestionsNode =
 
         if (state.domSummary) {
             systemPrompt = `${systemPrompt}\n\n[DOM SUMMARY]\n${state.domSummary}`;
+        }
+
+        const actionBlock = formatActionResult(state);
+        if (actionBlock) {
+            systemPrompt = `${systemPrompt}\n\n${actionBlock}\nWhen the user asked to perform this action, report exactly where it was found and whether it was carried out.`;
         }
 
         if (state.conversationHistory && state.conversationHistory.length > 0) {
@@ -422,56 +1026,74 @@ export const createAnswerQuestionsNode =
             return cleaned;
         };
 
-        let content = await invokeWithPrompt(systemPrompt);
+        let content: string;
+        try {
+            content = await invokeWithPrompt(systemPrompt);
+        } catch (error) {
+            // A provider timeout / rate-limit / network error here must not
+            // reject graph.invoke and kill the whole run. Surface it as the
+            // answer so the user gets a clear message instead of a crash.
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+                summary: `I couldn't complete the analysis due to an AI provider error: ${message}`,
+                context,
+            };
+        }
         if (typeof content === "string") {
-            const evidence = extractEvidenceInfo(content);
-            if (!evidence.hasEvidence) {
-                content = `${content}\n\nNote: Evidence section lacks file paths or DOM references.`;
-            } else if (evidence.filePaths.length > 0) {
-                const projectContext = ProjectContext.getInstance(projectPath);
-                if (!projectContext.isInitialized()) {
-                    await projectContext.initialize();
-                }
-                const repoFileSet = new Set(projectContext.getAllFilePaths());
-                const contextFileSet = new Set(context.files.map((file) => file.path));
-                const normalized = evidence.filePaths.map(normalizeEvidencePath);
-                const missingInRepo = normalized.filter((filePath) => !repoFileSet.has(filePath));
-                const missingInContext = normalized.filter(
-                    (filePath) => !contextFileSet.has(filePath),
-                );
-                if (missingInRepo.length > 0) {
-                    content = `${content}\n\nNote: Evidence references files not found in the repo index: ${missingInRepo.join(
-                        ", ",
-                    )}.`;
-                } else if (missingInContext.length > 0) {
-                    content = `${content}\n\nNote: Evidence references files not in retrieved context: ${missingInContext.join(
-                        ", ",
-                    )}.`;
-                }
-            }
-            if (state.domSummary && evidence.selectors.length > 0) {
-                const elements = parseSummaryElements(state.domSummary);
-                const domSelectors = new Set<string>();
-                for (const el of elements) {
-                    for (const sel of el.selectors) {
-                        domSelectors.add(sel);
-                        const normalized = normalizeSelector(sel);
-                        if (normalized) {
-                            domSelectors.add(normalized);
-                        }
+            try {
+                const evidence = extractEvidenceInfo(content);
+                if (!evidence.hasEvidence) {
+                    content = `${content}\n\nNote: Evidence section lacks file paths or DOM references.`;
+                } else if (evidence.filePaths.length > 0) {
+                    const projectContext = ProjectContext.getInstance(projectPath);
+                    if (!projectContext.isInitialized()) {
+                        await projectContext.initialize();
                     }
-                }
-                if (domSelectors.size > 0) {
-                    const missingSelectors = evidence.selectors.filter((selector) => {
-                        const normalized = normalizeSelector(selector) || selector;
-                        return !domSelectors.has(selector) && !domSelectors.has(normalized);
-                    });
-                    if (missingSelectors.length > 0) {
-                        content = `${content}\n\nNote: Evidence references selectors not found in the DOM summary: ${missingSelectors.join(
+                    const repoFileSet = new Set(projectContext.getAllFilePaths());
+                    const contextFileSet = new Set(context.files.map((file) => file.path));
+                    const normalized = evidence.filePaths.map(normalizeEvidencePath);
+                    const missingInRepo = normalized.filter(
+                        (filePath) => !repoFileSet.has(filePath),
+                    );
+                    const missingInContext = normalized.filter(
+                        (filePath) => !contextFileSet.has(filePath),
+                    );
+                    if (missingInRepo.length > 0) {
+                        content = `${content}\n\nNote: Evidence references files not found in the repo index: ${missingInRepo.join(
+                            ", ",
+                        )}.`;
+                    } else if (missingInContext.length > 0) {
+                        content = `${content}\n\nNote: Evidence references files not in retrieved context: ${missingInContext.join(
                             ", ",
                         )}.`;
                     }
                 }
+                if (state.domSummary && evidence.selectors.length > 0) {
+                    const elements = parseSummaryElements(state.domSummary);
+                    const domSelectors = new Set<string>();
+                    for (const el of elements) {
+                        for (const sel of el.selectors) {
+                            domSelectors.add(sel);
+                            const normalized = normalizeSelector(sel);
+                            if (normalized) {
+                                domSelectors.add(normalized);
+                            }
+                        }
+                    }
+                    if (domSelectors.size > 0) {
+                        const missingSelectors = evidence.selectors.filter((selector) => {
+                            const normalized = normalizeSelector(selector) || selector;
+                            return !domSelectors.has(selector) && !domSelectors.has(normalized);
+                        });
+                        if (missingSelectors.length > 0) {
+                            content = `${content}\n\nNote: Evidence references selectors not found in the DOM summary: ${missingSelectors.join(
+                                ", ",
+                            )}.`;
+                        }
+                    }
+                }
+            } catch {
+                // Evidence validation is best-effort — never let it block the answer.
             }
         }
 

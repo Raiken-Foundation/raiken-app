@@ -36,7 +36,10 @@ export const aiConfigSchema = z.object({
     /** AI model identifier (e.g. anthropic/claude-sonnet-4.5, gpt-4o, claude-3-5-sonnet-20241022). */
     model: z.string().optional(),
     /** Base URL override (used for self-hosted Ollama or 'custom' providers). */
-    baseURL: z.string().url().optional(),
+    baseURL: z.preprocess(
+        (value) => (value === "" ? undefined : value),
+        z.string().url().optional(),
+    ),
     /** Maximum tokens per request (default: 4000) */
     maxTokens: z.number().int().positive().optional(),
     /** Temperature for AI responses (default: 0.7) */
@@ -113,6 +116,12 @@ export const discoveryConfigSchema = z.object({
     pauseOnAuth: z.boolean().optional(),
     /** Hard wall-clock cap on a single discovery run, in ms (default: 1_800_000 = 30 min). 0 disables. */
     maxRunTimeMs: z.number().int().min(0).optional(),
+    /**
+     * Treat URLs that differ only by query string as distinct routes (default:
+     * false). Enable for apps where `?id=`/`?tab=` select real content;
+     * otherwise query params are stripped so `/x?a=1` and `/x?a=2` collapse.
+     */
+    preserveQueryParams: z.boolean().optional(),
 });
 
 export const indexingConfigSchema = z.object({
@@ -231,6 +240,7 @@ export const defaultConfig = {
         excludePatterns: [] as string[],
         pauseOnAuth: true,
         maxRunTimeMs: 30 * 60 * 1000,
+        preserveQueryParams: false,
     },
     indexing: {
         fullScan: false,

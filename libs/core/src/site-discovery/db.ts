@@ -73,10 +73,18 @@ function detectorIdToLegacyAuthType(
 export class SiteKnowledgeDB {
     private db: Database.Database;
     private projectPath: string;
+    /**
+     * Must match the crawler's URL normalization so pages/links written by the
+     * crawler and looked up by the DB agree on identity. When the crawler
+     * preserves query params (e.g. `?id=1` vs `?id=2` are distinct routes),
+     * the DB must too — otherwise the two collapse rows and dedupe wrongly.
+     */
+    private preserveQueryParams: boolean;
 
-    constructor(db: Database.Database, projectPath: string) {
+    constructor(db: Database.Database, projectPath: string, preserveQueryParams = false) {
         this.db = db;
         this.projectPath = projectPath;
+        this.preserveQueryParams = preserveQueryParams;
     }
 
     // ==========================================================================
@@ -93,9 +101,9 @@ export class SiteKnowledgeDB {
                 `
             INSERT OR REPLACE INTO discovered_pages (
                 project_path, url, normalized_url, title, snapshot_json,
-                parent_url, navigation_action, depth, discovered_at,
+                forms_json, parent_url, navigation_action, depth, discovered_at,
                 last_visited_at, visit_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
             )
             .run(
@@ -104,6 +112,7 @@ export class SiteKnowledgeDB {
                 normalizedUrl,
                 page.title,
                 page.snapshotJson,
+                page.formsJson,
                 page.parentUrl,
                 page.navigationAction,
                 page.depth,
@@ -181,6 +190,37 @@ export class SiteKnowledgeDB {
         `,
             )
             .run(Date.now(), this.projectPath, normalizedUrl);
+    }
+
+    /**
+     * Refresh a re-visited page's captured content (title/snapshot/forms)
+     * alongside its visit metadata. Without this, a page crawled again after
+     * e.g. an auth handoff keeps its pre-login DOM forever — `updatePageVisit`
+     * alone only bumps `last_visited_at`/`visit_count` and never touches the
+     * captured content columns.
+     */
+    updatePageContent(
+        url: string,
+        content: { title: string; snapshotJson: string | null; formsJson: string | null },
+    ): void {
+        const normalizedUrl = this.normalizeUrl(url);
+        this.db
+            .prepare(
+                `
+            UPDATE discovered_pages
+            SET title = ?, snapshot_json = ?, forms_json = ?,
+                last_visited_at = ?, visit_count = visit_count + 1
+            WHERE project_path = ? AND normalized_url = ?
+        `,
+            )
+            .run(
+                content.title,
+                content.snapshotJson,
+                content.formsJson,
+                Date.now(),
+                this.projectPath,
+                normalizedUrl,
+            );
     }
 
     /**
@@ -342,6 +382,28 @@ export class SiteKnowledgeDB {
      * manual-pause path (`category: "manual"`).
      */
     saveBlocker(blocker: Omit<DiscoveryBlocker, "id">): number {
+        // Dedup: a re-visit (e.g. after auth, or a resumed crawl) would
+        // otherwise pile up an identical unresolved blocker row per hit,
+        // flooding the UI and the auth-route list. Drop any existing UNRESOLVED
+        // blocker for the same url+category+detector before inserting the fresh
+        // one. Resolved rows are kept as history.
+        this.db
+            .prepare(
+                `
+            DELETE FROM discovery_blockers
+            WHERE project_path = ? AND url = ? AND category = ?
+              AND (detector_id IS ? OR detector_id = ?)
+              AND resolved_at IS NULL
+        `,
+            )
+            .run(
+                blocker.projectPath,
+                blocker.url,
+                blocker.category,
+                blocker.detectorId,
+                blocker.detectorId,
+            );
+
         const result = this.db
             .prepare(
                 `
@@ -710,6 +772,7 @@ export class SiteKnowledgeDB {
             normalizedUrl: row["normalized_url"] as string,
             title: (row["title"] as string | null) ?? null,
             snapshotJson: (row["snapshot_json"] as string | null) ?? null,
+            formsJson: (row["forms_json"] as string | null) ?? null,
             parentUrl: (row["parent_url"] as string | null) ?? null,
             navigationAction: (row["navigation_action"] as string | null) ?? null,
             depth: row["depth"] as number,
@@ -784,7 +847,7 @@ export class SiteKnowledgeDB {
     // ==========================================================================
 
     private normalizeUrl(url: string): string {
-        return normalizeUrl(url);
+        return normalizeUrl(url, { preserveQueryParams: this.preserveQueryParams });
     }
 
     /**

@@ -100,7 +100,19 @@ export function SettingsView() {
 
     const configQuery = trpc.getConfig.useQuery();
     const saveMutation = trpc.updateConfig.useMutation({
-        onSuccess: () => {
+        onSuccess: (data) => {
+            // The server validates the merged config and returns
+            // `{ success: false, errors }` for an invalid write instead of
+            // throwing — surface those to the user rather than flashing "Saved".
+            const res = data as { success: boolean; errors?: string[] };
+            if (res && res.success === false) {
+                setSaveError(
+                    res.errors?.length
+                        ? `Invalid configuration — ${res.errors.join("; ")}`
+                        : "Invalid configuration.",
+                );
+                return;
+            }
             setDirty(false);
             setSaved(true);
             setSaveError(null);

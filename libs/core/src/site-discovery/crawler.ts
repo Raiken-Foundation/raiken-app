@@ -25,7 +25,7 @@ import {
     runBlockerPipeline,
 } from "./detectors";
 import { looksLikeLoginUrl } from "./detectors/auth";
-import { buildLinkSelector, safeOrigin } from "./link-utils";
+import { buildLinkSelector, mergeBlockedUrlIntoQueue, safeOrigin } from "./link-utils";
 import type { BlockerCategory, DiscoveryBlocker, DiscoveryOptions, DiscoveryStats } from "./types";
 import { normalizeUrl } from "./url-utils";
 
@@ -48,6 +48,107 @@ type StorageStateInput = {
         localStorage?: Array<{ name: string; value: string }>;
     }>;
 };
+
+/**
+ * Extract the visible form controls on a page as structured, selector-friendly
+ * metadata (label/type/name/id/placeholder per field + submit-button labels).
+ * Runs entirely in the page context so it works for any framework. Best-effort:
+ * returns null on failure or when the page has no meaningful form controls, so
+ * a busted page never aborts the crawl. Persisted per page (forms_json) and fed
+ * to test generation so specs reference real fields instead of guessing them.
+ */
+async function extractPageForms(page: Page): Promise<string | null> {
+    try {
+        const forms = await page.evaluate(() => {
+            const isVisible = (el: Element): boolean => {
+                const he = el as HTMLElement;
+                if (he.hidden) return false;
+                const style = window.getComputedStyle(he);
+                if (style.display === "none" || style.visibility === "hidden") return false;
+                // offsetParent is null for display:none / detached; allow position:fixed.
+                return he.offsetParent !== null || style.position === "fixed";
+            };
+
+            const labelFor = (el: Element): string => {
+                const aria = el.getAttribute("aria-label");
+                if (aria?.trim()) return aria.trim();
+                const labelledby = el.getAttribute("aria-labelledby");
+                if (labelledby) {
+                    const text = labelledby
+                        .split(/\s+/)
+                        .map((id) => document.getElementById(id)?.textContent || "")
+                        .join(" ")
+                        .trim();
+                    if (text) return text;
+                }
+                const id = (el as HTMLInputElement).id;
+                if (id) {
+                    const escaped =
+                        typeof CSS !== "undefined" && CSS.escape
+                            ? CSS.escape(id)
+                            : id.replace(/"/g, '\\"');
+                    const label = document.querySelector(`label[for="${escaped}"]`);
+                    if (label?.textContent?.trim()) return label.textContent.trim();
+                }
+                const wrapping = el.closest("label");
+                if (wrapping?.textContent?.trim()) return wrapping.textContent.trim();
+                return (el.getAttribute("placeholder") || el.getAttribute("name") || "").trim();
+            };
+
+            const fieldEls = Array.from(
+                document.querySelectorAll("input, select, textarea"),
+            ).filter((el) => {
+                const type = (el.getAttribute("type") || "").toLowerCase();
+                if (type === "hidden") return false;
+                return isVisible(el);
+            });
+
+            const fields = fieldEls.slice(0, 40).map((el) => {
+                const tag = el.tagName.toLowerCase();
+                const placeholder = el.getAttribute("placeholder");
+                const name = el.getAttribute("name");
+                const idAttr = (el as HTMLInputElement).id;
+                const testId = el.getAttribute("data-testid") || el.getAttribute("data-test-id");
+                return {
+                    label: labelFor(el).slice(0, 100),
+                    type: (el.getAttribute("type") || tag).toLowerCase(),
+                    required:
+                        el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
+                    placeholder: placeholder ? placeholder.slice(0, 100) : undefined,
+                    name: name || undefined,
+                    id: idAttr || undefined,
+                    testId: testId || undefined,
+                };
+            });
+
+            const submits = Array.from(
+                document.querySelectorAll(
+                    "button, input[type=submit], input[type=button], [role=button]",
+                ),
+            )
+                .filter((el) => isVisible(el))
+                .map((el) =>
+                    (
+                        el.textContent ||
+                        el.getAttribute("value") ||
+                        el.getAttribute("aria-label") ||
+                        ""
+                    )
+                        .trim()
+                        .slice(0, 60),
+                )
+                .filter((text) => text.length > 0)
+                .slice(0, 15);
+
+            return { fields, submits };
+        });
+
+        if (forms.fields.length === 0 && forms.submits.length === 0) return null;
+        return JSON.stringify(forms);
+    } catch {
+        return null;
+    }
+}
 
 export class SiteDiscovery extends EventEmitter {
     private crawler: PlaywrightCrawler | null = null;
@@ -84,6 +185,17 @@ export class SiteDiscovery extends EventEmitter {
         userData?: Record<string, unknown>;
     }> | null = null;
     /**
+     * URLs enqueued but not yet successfully visited, keyed by normalized URL.
+     * This is our own source of truth for "what's left to crawl" because
+     * Crawlee runs with `persistStorage: false` (an in-memory queue that never
+     * writes to disk), so there is no on-disk queue file to read for resume.
+     * We persist THIS map to `crawl_session.queueJson` and re-seed from it.
+     */
+    private pendingRequests = new Map<
+        string,
+        { url: string; uniqueKey: string; userData?: Record<string, unknown> }
+    >();
+    /**
      * Sanitised storage state ready to hand directly to
      * `browser.newContext({ storageState })` via Crawlee's
      * `prePageCreateHooks`. Applying it at context-creation time (rather than
@@ -104,7 +216,6 @@ export class SiteDiscovery extends EventEmitter {
     private storageStateWarningEmitted = false;
     /** Set once a request returns a real authenticated page. */
     private hasSeenAuthenticatedSuccess = false;
-    private crawleeStorageDir: string | null = null;
     private wallClockTimer: NodeJS.Timeout | null = null;
     private aborted = false;
     private snapshotFailureReports = 0;
@@ -187,6 +298,7 @@ export class SiteDiscovery extends EventEmitter {
             continueSession: options.continueSession ?? false,
             purgeQueueOnResume: options.purgeQueueOnResume ?? false,
             maxRunTimeMs: options.maxRunTimeMs ?? 30 * 60 * 1000,
+            preserveQueryParams: options.preserveQueryParams ?? false,
         };
 
         this.compiledExcludeMatchers = this.options.excludePatterns.map(compileExcludeMatcher);
@@ -199,7 +311,11 @@ export class SiteDiscovery extends EventEmitter {
 
         // Initialize database
         this.db = new CodeGraphDB(this.options.projectPath);
-        this.siteDb = new SiteKnowledgeDB(this.db.getRawDatabase(), this.options.projectPath);
+        this.siteDb = new SiteKnowledgeDB(
+            this.db.getRawDatabase(),
+            this.options.projectPath,
+            this.options.preserveQueryParams,
+        );
 
         // Initialise the blocker detector pipeline. Order is by `priority`
         // — the manual-fallback detector runs first so a 5xx page or a
@@ -230,7 +346,6 @@ export class SiteDiscovery extends EventEmitter {
             const crawleeDir = path.join(this.options.projectPath, ".raiken", "crawlee");
             fs.mkdirSync(crawleeDir, { recursive: true });
             process.env["CRAWLEE_STORAGE_DIR"] = crawleeDir;
-            this.crawleeStorageDir = crawleeDir;
 
             // CRITICAL: install a fresh, in-memory-only `MemoryStorage`
             // for *every* discovery run.
@@ -262,10 +377,11 @@ export class SiteDiscovery extends EventEmitter {
             // race with the prior run's references.
             //
             // We deliberately drop `persistStorage` because Crawlee's
-            // on-disk persistence is redundant for us: cross-process
-            // resume goes through our own `crawl_session_queue` table
-            // in SQLite (see `crawl-session-store.ts`), and within a
-            // single run an in-memory queue is strictly faster.
+            // on-disk persistence is redundant for us: cross-process resume
+            // goes through the discovery session row in SQLite (queueJson,
+            // persisted via `persistQueueState` from our in-memory
+            // `pendingRequests` map), and within a single run an in-memory
+            // queue is strictly faster.
             const fresh = new MemoryStorage({
                 localDataDirectory: crawleeDir,
                 persistStorage: false,
@@ -302,6 +418,16 @@ export class SiteDiscovery extends EventEmitter {
                         userData: request.userData,
                     })),
                 );
+                // Mirror the re-seeded queue into our pending map so a second
+                // pause/resume still knows what remains.
+                for (const request of this.queuedRequests) {
+                    const key = request.uniqueKey ?? this.normalizeUrl(request.url);
+                    this.pendingRequests.set(key, {
+                        url: request.url,
+                        uniqueKey: key,
+                        userData: request.userData,
+                    });
+                }
             }
 
             // Navigation timeout governs a single goto(); the request handler
@@ -388,6 +514,17 @@ export class SiteDiscovery extends EventEmitter {
                 !this.options.purgeQueueOnResume
                     ? []
                     : [this.options.startUrl];
+
+            // Track the initial seed in our pending map too (Crawlee's queue is
+            // in-memory only, so this is what resume relies on).
+            for (const seed of startUrls) {
+                const key = this.normalizeUrl(seed);
+                this.pendingRequests.set(key, {
+                    url: seed,
+                    uniqueKey: key,
+                    userData: { depth: 0 },
+                });
+            }
 
             // On resume with no live queue, detect the dead-end case: Crawlee's
             // on-disk RequestQueue may already have this URL marked handled, in
@@ -553,7 +690,7 @@ export class SiteDiscovery extends EventEmitter {
         if (!cap || cap <= 0) return;
         this.wallClockTimer = setTimeout(() => {
             console.warn(
-                `⏱️  Discovery hit wall-clock cap of ${Math.round(cap / 1000)}s — pausing.`,
+                `Discovery hit wall-clock cap of ${Math.round(cap / 1000)}s — pausing.`,
             );
             void this.pause().catch(() => {
                 // pause failures shouldn't crash the timer
@@ -575,13 +712,36 @@ export class SiteDiscovery extends EventEmitter {
     /**
      * Pause the discovery process.
      */
-    async pause(): Promise<void> {
+    async pause(options: { blockedAtUrl?: string | null } = {}): Promise<void> {
         this.isPaused = true;
         this.stats.status = "paused";
+
+        // Treat in-flight URLs as still pending so a mid-request pause
+        // doesn't drop the page that was being crawled when we stopped.
+        for (const url of this.inFlightUrls) {
+            const key = this.normalizeUrl(url);
+            if (!this.pendingRequests.has(key) && !this.visitedUrls.has(key)) {
+                this.pendingRequests.set(key, {
+                    url,
+                    uniqueKey: key,
+                    userData: { depth: 0, resumedFromInFlight: true },
+                });
+            }
+        }
+
+        if (options.blockedAtUrl) {
+            const key = this.normalizeUrl(options.blockedAtUrl);
+            this.pendingRequests.set(key, {
+                url: options.blockedAtUrl,
+                uniqueKey: key,
+                userData: { depth: 0, resumeBlocked: true },
+            });
+        }
 
         if (this.sessionId) {
             this.siteDb.updateSession(this.sessionId, {
                 status: "paused",
+                ...(options.blockedAtUrl ? { blockedAtUrl: options.blockedAtUrl } : {}),
             });
         }
 
@@ -641,15 +801,35 @@ export class SiteDiscovery extends EventEmitter {
             this.options.maxDepth = activeSession.maxDepth;
         }
 
-        if (activeSession.queueJson && !this.options.purgeQueueOnResume) {
-            try {
-                const parsed = JSON.parse(activeSession.queueJson) as Array<{
-                    url: string;
-                    uniqueKey?: string;
-                    userData?: Record<string, unknown>;
-                }>;
-                this.queuedRequests = parsed.filter((item) => Boolean(item?.url));
-            } catch {
+        if (!this.options.purgeQueueOnResume) {
+            let parsed: Array<{
+                url: string;
+                uniqueKey?: string;
+                userData?: Record<string, unknown>;
+            }> = [];
+            if (activeSession.queueJson) {
+                try {
+                    const raw = JSON.parse(activeSession.queueJson) as Array<{
+                        url: string;
+                        uniqueKey?: string;
+                        userData?: Record<string, unknown>;
+                    }>;
+                    parsed = Array.isArray(raw) ? raw.filter((item) => Boolean(item?.url)) : [];
+                } catch {
+                    parsed = [];
+                }
+            }
+
+            // Always re-seed the pause point. On blocker pause the blocked URL
+            // is removed from pendingRequests (marked committed) before
+            // queue_json is written, so without this merge resume would drain
+            // siblings and never retry the page that actually blocked.
+            this.queuedRequests = mergeBlockedUrlIntoQueue(
+                parsed,
+                activeSession.blockedAtUrl,
+                (url) => this.normalizeUrl(url),
+            );
+            if (this.queuedRequests.length === 0) {
                 this.queuedRequests = null;
             }
         }
@@ -760,7 +940,7 @@ export class SiteDiscovery extends EventEmitter {
      *      requests that don't count toward the user's cap.
      */
     private async handleRequest(context: PlaywrightCrawlingContext): Promise<void> {
-        const { page, request, enqueueLinks, response } = context;
+        const { page, request, response } = context;
         const url = request.url;
         const depth = (request.userData["depth"] as number) || 0;
 
@@ -900,14 +1080,10 @@ export class SiteDiscovery extends EventEmitter {
                     return;
                 }
 
-                if (this.sessionId) {
-                    this.siteDb.updateSession(this.sessionId, {
-                        status: "paused",
-                        blockedAtUrl: url,
-                    });
-                }
-
-                await this.pause();
+                // Pass blockedAtUrl into pause so it is re-inserted into
+                // pendingRequests *before* queue_json is serialized — otherwise
+                // the committed delete below would leave it out of the snapshot.
+                await this.pause({ blockedAtUrl: url });
                 committed = true;
                 return;
             }
@@ -979,6 +1155,11 @@ export class SiteDiscovery extends EventEmitter {
                 }
             }
 
+            // Structured form fields (label/type/selector per input). Best-effort
+            // so a busted page never aborts the save. Fed to test generation so
+            // specs reference real form controls instead of guessing them.
+            const formsJson = await extractPageForms(page);
+
             // Title is also best-effort — Playwright throws "Target page,
             // context or browser has been closed" here when the page
             // navigates away mid-handler. Falling back to "" is strictly
@@ -1002,7 +1183,11 @@ export class SiteDiscovery extends EventEmitter {
             const existingPage = this.siteDb.getPage(saveUrl);
 
             if (existingPage) {
-                this.siteDb.updatePageVisit(saveUrl);
+                // Refresh the captured content on revisit, not just visit
+                // metadata — a page re-crawled after an auth handoff (or a
+                // resumed session hitting the same URL twice) otherwise keeps
+                // its stale pre-login snapshot/forms forever.
+                this.siteDb.updatePageContent(saveUrl, { title, snapshotJson, formsJson });
             } else {
                 this.siteDb.savePage({
                     projectPath: this.options.projectPath,
@@ -1010,6 +1195,7 @@ export class SiteDiscovery extends EventEmitter {
                     normalizedUrl: saveNormalized,
                     title,
                     snapshotJson,
+                    formsJson,
                     parentUrl: (request.userData["parentUrl"] as string) || null,
                     navigationAction: null,
                     depth,
@@ -1055,6 +1241,11 @@ export class SiteDiscovery extends EventEmitter {
             // common cases that pure `a[href]` misses.
             const extracted = await this.extractLinks(page);
 
+            // Same-origin URLs we should crawl next. Collected from the FULL
+            // extracted set (a[href] + role=link + data-href) so SPA routes that
+            // Crawlee's DOM-selector `enqueueLinks` misses still get visited.
+            const enqueueCandidates: string[] = [];
+
             for (const item of extracted) {
                 const cleanedHref = item.href.trim();
                 if (
@@ -1083,6 +1274,7 @@ export class SiteDiscovery extends EventEmitter {
                     cleanedHref,
                     item.text.trim(),
                     item.dataTestId ?? null,
+                    { tagName: item.tagName, role: item.role },
                 );
 
                 this.siteDb.saveLink({
@@ -1098,38 +1290,41 @@ export class SiteDiscovery extends EventEmitter {
                     verifiedAt: null,
                 });
 
+                enqueueCandidates.push(absoluteUrl);
                 this.stats.linksFound++;
             }
 
-            // Hand queueing off to Crawlee, but apply our own filtering
-            // (excluded patterns + already-visited normalization +
-            // maxPages cap) BEFORE it dispatches a worker — otherwise
-            // we'd waste a Playwright launch just to bail at the top of
-            // `handleRequest`. We also override `uniqueKey` so Crawlee
-            // dedupes on our normalized URL (it would otherwise see
-            // `/x?a=1` and `/x?a=2` as distinct and dispatch both even
-            // though we'd reject the second on entry — significant on
-            // SPAs with many query-paramed links).
-            await enqueueLinks({
-                selector: 'a[href], [role="link"][href]',
-                userData: {
-                    depth: depth + 1,
-                    parentUrl: saveUrl,
-                },
-                strategy: "same-origin",
-                transformRequestFunction: (req) => {
-                    if (this.shouldExclude(req.url)) return false;
-                    const norm = this.normalizeUrl(req.url);
-                    if (this.visitedUrls.has(norm) || this.inFlightUrls.has(norm)) {
-                        return false;
-                    }
-                    if (this.stats.pagesDiscovered >= this.options.maxPages) {
-                        return false;
-                    }
-                    req.uniqueKey = norm;
-                    return req;
-                },
-            });
+            // Enqueue the URLs we extracted ourselves rather than delegating to
+            // Crawlee's DOM-selector `enqueueLinks`. `extractLinks` already
+            // resolves `a[href]`, `[role="link"]` AND `[data-href]` (the last
+            // two are common on SPAs that hijack navigation) — enqueueLinks with
+            // a CSS selector would miss `data-href` and `role=link` without an
+            // href entirely, so those routes were saved as links but never
+            // crawled. We apply our own filtering (excluded patterns +
+            // already-visited normalization + maxPages cap) and set `uniqueKey`
+            // to our normalized URL so Crawlee dedupes on it (otherwise
+            // `/x?a=1` and `/x?a=2` dispatch as distinct even when we'd reject
+            // the second on entry — significant on query-paramed SPA links).
+            const requests: Array<{
+                url: string;
+                uniqueKey: string;
+                userData: { depth: number; parentUrl: string };
+            }> = [];
+            const seenKeys = new Set<string>();
+            for (const candidate of enqueueCandidates) {
+                if (this.shouldExclude(candidate)) continue;
+                const norm = this.normalizeUrl(candidate);
+                if (this.visitedUrls.has(norm) || this.inFlightUrls.has(norm)) continue;
+                if (seenKeys.has(norm)) continue;
+                if (this.stats.pagesDiscovered >= this.options.maxPages) break;
+                seenKeys.add(norm);
+                const userData = { depth: depth + 1, parentUrl: saveUrl };
+                requests.push({ url: candidate, uniqueKey: norm, userData });
+                this.pendingRequests.set(norm, { url: candidate, uniqueKey: norm, userData });
+            }
+            if (requests.length > 0 && this.requestQueue) {
+                await this.requestQueue.addRequests(requests);
+            }
 
             if (this.sessionId) {
                 this.siteDb.updateSession(this.sessionId, {
@@ -1143,6 +1338,9 @@ export class SiteDiscovery extends EventEmitter {
             this.inFlightUrls.delete(normalizedUrl);
             if (committed) {
                 this.visitedUrls.add(normalizedUrl);
+                // No longer pending once we've fully processed it. Left in the
+                // map on failure so a resume retries it.
+                this.pendingRequests.delete(normalizedUrl);
             }
             // If `committed` is false the URL is left out of `visitedUrls`
             // so Crawlee's retry layer can dispatch it again; the failed-
@@ -1163,32 +1361,108 @@ export class SiteDiscovery extends EventEmitter {
             text: string;
             role: string | null;
             dataTestId: string | null;
+            tagName: string | null;
         }>
     > {
         try {
+            // SPA-aware extraction: plain anchors plus route-bearing custom
+            // components (role=link without href, data-to/data-path buttons in
+            // nav). Mirrors BrowserSession's richer selectors so discovery and
+            // live agent exploration see the same graph.
             return await page.evaluate(() => {
+                const ROUTE_ATTRS = [
+                    "href",
+                    "data-href",
+                    "data-url",
+                    "data-to",
+                    "data-path",
+                    "to",
+                ] as const;
+                const MAX = 250;
+
+                const isLikelyRoute = (value: string): boolean => {
+                    const v = value.trim();
+                    if (!v) return false;
+                    if (
+                        v.startsWith("#") ||
+                        v.startsWith("mailto:") ||
+                        v.startsWith("tel:") ||
+                        v.startsWith("javascript:") ||
+                        v.startsWith("data:")
+                    ) {
+                        return false;
+                    }
+                    if (
+                        /^(https?:)?\/\//i.test(v) ||
+                        v.startsWith("/") ||
+                        v.startsWith("./") ||
+                        v.startsWith("../")
+                    ) {
+                        return true;
+                    }
+                    return /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]*)*$/.test(v) && v.includes("/");
+                };
+
+                const resolveHref = (el: Element): string => {
+                    for (const name of ROUTE_ATTRS) {
+                        const raw = el.getAttribute(name);
+                        if (raw && isLikelyRoute(raw)) return raw.trim();
+                    }
+                    return "";
+                };
+
+                const isVisible = (el: HTMLElement): boolean => {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden") return false;
+                    if (style.opacity === "0") return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+
+                const selectors = [
+                    "a[href]",
+                    "a[to]",
+                    "[data-href]",
+                    "[data-url]",
+                    "[data-to]",
+                    "[data-path]",
+                    '[role="link"]',
+                    "nav button[data-href], nav button[data-url], nav button[data-to], nav button[data-path]",
+                    'nav [role="button"][data-href], nav [role="button"][data-to], nav [role="button"][data-path]',
+                    'nav [role="tab"][data-href], nav [role="tab"][data-to], nav [role="tab"][data-path]',
+                    'nav [role="menuitem"][data-href], nav [role="menuitem"][data-to], nav [role="menuitem"][data-path]',
+                ];
+
                 const out: Array<{
                     href: string;
                     text: string;
                     role: string | null;
                     dataTestId: string | null;
+                    tagName: string | null;
                 }> = [];
-                const selectors = ["a[href]", '[role="link"][href]', "[data-href]"];
                 const seen = new Set<Element>();
+                const seenHrefs = new Set<string>();
+
                 for (const sel of selectors) {
+                    if (out.length >= MAX) break;
                     const nodes = document.querySelectorAll(sel);
                     for (const node of Array.from(nodes)) {
+                        if (out.length >= MAX) break;
                         if (seen.has(node)) continue;
                         seen.add(node);
                         const el = node as HTMLElement;
-                        const href = el.getAttribute("href") || el.getAttribute("data-href") || "";
+                        if (!isVisible(el)) continue;
+                        const href = resolveHref(el);
                         if (!href) continue;
+                        if (seenHrefs.has(href)) continue;
+                        seenHrefs.add(href);
                         const text = (el.textContent || "").replace(/\s+/g, " ").trim();
                         out.push({
                             href,
                             text: text.slice(0, 200),
                             role: el.getAttribute("role"),
                             dataTestId: el.getAttribute("data-testid"),
+                            tagName: el.tagName ? el.tagName.toLowerCase() : null,
                         });
                     }
                 }
@@ -1232,46 +1506,6 @@ export class SiteDiscovery extends EventEmitter {
     }
 
     /**
-     * Add a URL to the session-scoped skip set. The crawler will refuse to
-     * fetch it on this and any subsequent run within this session, so the
-     * user's "skip this URL" choice survives a pause/resume cycle.
-     */
-    addSkippedUrl(url: string): void {
-        this.skippedUrls.add(url);
-        const normalized = this.normalizeUrl(url);
-        if (normalized !== url) {
-            this.skippedUrls.add(normalized);
-        }
-        this.persistSessionMemory();
-    }
-
-    /**
-     * Add a category to the session-scoped ignore set. Detectors still fire
-     * (so we keep visibility), but the blocker is recorded with severity
-     * `log` instead of `pause`, so the crawl keeps going.
-     */
-    addIgnoredCategory(category: BlockerCategory): void {
-        this.ignoredCategories.add(category);
-        this.persistSessionMemory();
-    }
-
-    /** Snapshot for callers that want to reflect session memory in the UI. */
-    getSessionMemory(): { skippedUrls: string[]; ignoredCategories: BlockerCategory[] } {
-        return {
-            skippedUrls: Array.from(this.skippedUrls),
-            ignoredCategories: Array.from(this.ignoredCategories),
-        };
-    }
-
-    private persistSessionMemory(): void {
-        if (!this.sessionId) return;
-        this.siteDb.updateSession(this.sessionId, {
-            skippedUrlsJson: JSON.stringify(Array.from(this.skippedUrls)),
-            ignoredCategoriesJson: JSON.stringify(Array.from(this.ignoredCategories)),
-        });
-    }
-
-    /**
      * Check if a URL should be excluded. Patterns can be:
      *  - Plain substring (legacy: e.g. "/admin" matches any URL containing "/admin")
      *  - Glob (e.g. "/admin/**", "*.pdf") — only when the pattern contains "*"
@@ -1284,7 +1518,9 @@ export class SiteDiscovery extends EventEmitter {
     }
 
     private normalizeUrl(url: string): string {
-        return normalizeUrl(url);
+        return normalizeUrl(url, {
+            preserveQueryParams: this.options.preserveQueryParams,
+        });
     }
 
     private getOriginSafe(url: string): string | null {
@@ -1404,7 +1640,7 @@ export class SiteDiscovery extends EventEmitter {
         try {
             if (!fs.existsSync(this.options.storageStatePath)) {
                 if (!this.storageStateWarningEmitted) {
-                    console.warn(`⚠️  Storage state not found at ${this.options.storageStatePath}`);
+                    console.warn(`Storage state not found at ${this.options.storageStatePath}`);
                     this.storageStateWarningEmitted = true;
                 }
                 this.playwrightStorageState = null;
@@ -1415,7 +1651,7 @@ export class SiteDiscovery extends EventEmitter {
             this.playwrightStorageState = sanitizeStorageState(parsed);
         } catch {
             if (!this.storageStateWarningEmitted) {
-                console.warn("⚠️  Failed to load storage state for discovery");
+                console.warn("Failed to load storage state for discovery");
                 this.storageStateWarningEmitted = true;
             }
             this.playwrightStorageState = null;
@@ -1458,55 +1694,22 @@ export class SiteDiscovery extends EventEmitter {
     }
 
     private async persistQueueState(): Promise<void> {
-        if (!this.sessionId || !this.requestQueue) {
+        if (!this.sessionId) {
             return;
         }
 
         try {
-            // S1: Crawlee's storage dir is set in `start()` to
-            // `<project>/.raiken/crawlee/`. The previous implementation read
-            // from `<project>/storage/...` which never exists in our setup,
-            // so the persisted queue was always empty and resume only ever
-            // worked from the in-memory snapshot.
-            const baseDir =
-                this.crawleeStorageDir ?? path.join(this.options.projectPath, ".raiken", "crawlee");
-            const queueDir = path.join(baseDir, "request_queues", "default");
-            if (!fs.existsSync(queueDir)) {
-                return;
-            }
-
-            const files = fs.readdirSync(queueDir).filter((file) => file.endsWith(".json"));
-            const serialized: Array<{
-                url: string;
-                uniqueKey?: string;
-                userData?: Record<string, unknown>;
-            }> = [];
-
-            for (const file of files) {
-                try {
-                    const raw = fs.readFileSync(path.join(queueDir, file), "utf-8");
-                    const outer = JSON.parse(raw) as { json?: string };
-                    if (!outer.json) {
-                        continue;
-                    }
-                    const request = JSON.parse(outer.json) as {
-                        url?: string;
-                        uniqueKey?: string;
-                        userData?: Record<string, unknown>;
-                        handledAt?: string | null;
-                    };
-                    if (!request.url || request.handledAt) {
-                        continue;
-                    }
-                    serialized.push({
-                        url: request.url,
-                        uniqueKey: request.uniqueKey,
-                        userData: request.userData,
-                    });
-                } catch {
-                    // Ignore malformed queue entries
-                }
-            }
+            // Crawlee runs with `persistStorage: false`, so its request queue
+            // lives only in memory and never writes to disk — reading
+            // `request_queues/*` (as this used to) always found nothing and
+            // resume silently lost every pending URL. We instead persist our
+            // own `pendingRequests` map, which is the authoritative record of
+            // enqueued-but-unvisited URLs, so a resume re-seeds ALL of them.
+            const serialized = Array.from(this.pendingRequests.values()).map((request) => ({
+                url: request.url,
+                uniqueKey: request.uniqueKey,
+                userData: request.userData,
+            }));
 
             this.siteDb.updateSession(this.sessionId, {
                 queueJson: JSON.stringify(serialized),

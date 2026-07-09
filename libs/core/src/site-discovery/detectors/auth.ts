@@ -52,7 +52,12 @@ export const LOGIN_URL_PATTERNS: readonly RegExp[] = [
     /\/log-in(?:\/|$)/i,
     /\/log_in(?:\/|$)/i,
     /\/authenticate(?:\/|$)/i,
-    /\/auth(?:\/|$)/i,
+    // Only the terminal `/auth` (or `/auth/`) — NOT every `/auth/*` route.
+    // Apps commonly use `/auth` as a namespace for non-login pages; login
+    // leaves like `/auth/login` and `/auth/signin` are still matched by the
+    // `/login` and `/signin` patterns above. This kills the biggest source of
+    // `/auth/*` false positives.
+    /\/auth\/?$/i,
     /\/sso(?:\/|$)/i,
     /\/account\/(?:login|signin|sign-in|sign_in)(?:\/|$)/i,
     /\/oauth(?:\/|$)/i,
@@ -92,16 +97,33 @@ const OAUTH_PATTERNS: Array<{ pattern: RegExp; provider: string }> = [
     { pattern: /log in with github/i, provider: "GitHub" },
 ];
 
-const AUTH_ERROR_PATTERNS: RegExp[] = [
+/**
+ * Unambiguous auth-error PHRASES. These are safe to match against a page's
+ * visible text because they almost never appear as incidental body copy.
+ * Single words like "forbidden" / "unauthorized" are deliberately NOT here —
+ * a docs page or blog about HTTP status codes would trip them. Those are only
+ * consulted inside a scoped error/alert element (see {@link ERROR_ONLY_PATTERNS}).
+ */
+const AUTH_ERROR_PHRASES: RegExp[] = [
     /access denied/i,
-    /unauthorized/i,
     /please log in/i,
     /please sign in/i,
     /authentication required/i,
     /you must be logged in/i,
     /login required/i,
-    /forbidden/i,
     /you don't have permission/i,
+    /not authorized to/i,
+];
+
+/**
+ * Broader single-word signals only trusted when they appear inside a scoped
+ * error/alert element (role="alert", .alert-danger, …) — never against the
+ * whole page body, where they produce false positives.
+ */
+const ERROR_ONLY_PATTERNS: RegExp[] = [
+    ...AUTH_ERROR_PHRASES,
+    /unauthorized/i,
+    /forbidden/i,
     /not authorized/i,
 ];
 
@@ -304,20 +326,50 @@ async function checkOAuthButtons(page: Page): Promise<{ provider: string; text: 
     }
 }
 
+/**
+ * Best-effort visible text of the page. Uses `document.body.innerText` (what a
+ * user actually sees) and falls back to raw HTML when `evaluate` is unavailable
+ * or throws, so phrase matching stays robust without over-matching hidden HTML.
+ */
+async function getVisibleText(page: Page): Promise<string> {
+    try {
+        const text = await page.evaluate(() => document.body?.innerText ?? "");
+        if (typeof text === "string" && text.trim().length > 0) return text;
+    } catch {
+        // evaluate not available (e.g. test mock) or execution context gone.
+    }
+    try {
+        return await page.content();
+    } catch {
+        return "";
+    }
+}
+
 async function checkErrorMessages(page: Page): Promise<{ message: string } | null> {
     try {
-        const content = await page.content();
-        for (const pattern of AUTH_ERROR_PATTERNS) {
+        // Match only the UNAMBIGUOUS phrases against page text. Single words
+        // like "forbidden"/"unauthorized" are deliberately excluded here — they
+        // appear as incidental copy on docs/blog pages and produced false auth
+        // walls; those are only trusted inside a scoped error element below.
+        //
+        // Prefer VISIBLE body text over raw HTML: phrases hidden in <script>
+        // JSON, comments, or metadata otherwise trip a false auth wall. Falls
+        // back to page.content() when innerText isn't available (e.g. a page
+        // mock without evaluate()).
+        const content = await getVisibleText(page);
+        for (const pattern of AUTH_ERROR_PHRASES) {
             const match = content.match(pattern);
             if (match) return { message: match[0] };
         }
 
+        // Broader single-word signals are only trusted inside a scoped
+        // error/alert element.
         for (const selector of ERROR_SELECTORS) {
             const element = page.locator(selector).first();
             if ((await element.count()) > 0) {
                 const text = await element.textContent();
                 if (text) {
-                    for (const pattern of AUTH_ERROR_PATTERNS) {
+                    for (const pattern of ERROR_ONLY_PATTERNS) {
                         if (pattern.test(text)) {
                             return { message: text.trim() };
                         }

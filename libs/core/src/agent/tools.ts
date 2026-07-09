@@ -16,7 +16,9 @@ import { BrowserSession } from "../browser/session";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "../site-discovery/db";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
+import { stripEditMarkers } from "../testing/edit-blocks";
 import { TestRunner, type TestRunResult } from "../testing/runner";
+import { cleanGeneratedTestCode } from "../utils";
 import { createRunAction, createSaveAction, type HITLAction, shouldSkipHITL } from "./hitl-types";
 import { AgentMemory } from "./memory";
 
@@ -87,6 +89,84 @@ function getBoundBrowserSession(projectPath: string): BrowserSession {
     const memory = AgentMemory.getInstance(projectPath);
     session.setSelectorMemory(memory.asSelectorMemory());
     return session;
+}
+
+/**
+ * Single source of truth for the headless flag. `RAIKEN_HEADLESS` (set to
+ * "1"/"true" or "0"/"false") always wins so CI can force headless and the
+ * interactive REPL can force headed, regardless of a call site's preference.
+ * Otherwise the caller's `preferred` value is used (defaulting to headed so
+ * the user can watch the agent work).
+ */
+function resolveHeadless(preferred = false): boolean {
+    const env = process.env["RAIKEN_HEADLESS"];
+    if (env !== undefined) {
+        if (/^(1|true|yes)$/i.test(env)) return true;
+        if (/^(0|false|no)$/i.test(env)) return false;
+    }
+    return preferred;
+}
+
+/**
+ * Ensure the browser is running before an interaction. Previously only
+ * navigate/capture auto-started, so a click/fill issued before navigation
+ * failed with "Browser session not active".
+ */
+async function ensureBrowserStarted(session: BrowserSession, projectPath: string): Promise<void> {
+    if (!session.isActive()) {
+        const storageStatePath = resolveAuthStatePath(projectPath);
+        await session.start({ headless: resolveHeadless(false), storageStatePath });
+    }
+}
+
+/** Result shape returned by interaction tools, including the post-action page. */
+interface ActionResultData {
+    url?: string;
+    summary?: string;
+    changed?: boolean;
+    /** False when the post-action page snapshot could not be captured. */
+    captured?: boolean;
+    clicked?: boolean;
+    filled?: boolean;
+    pressed?: boolean;
+    selected?: boolean;
+    toggled?: boolean;
+}
+
+/**
+ * Re-capture the page after an interaction so the agent always sees the new
+ * state (URL + DOM) instead of reasoning against a stale snapshot. `changed`
+ * reflects whether the URL changed relative to before the action.
+ */
+async function snapshotAfterAction(
+    session: BrowserSession,
+    prevUrl?: string,
+): Promise<{ url: string; summary: string; changed: boolean; captured: boolean }> {
+    try {
+        // Let the page settle first: an action often triggers navigation or a
+        // client-side re-render that lands *after* the call returns. Capturing
+        // immediately yielded a stale/empty snapshot. `settle()` fails open, so
+        // a genuinely static page still proceeds without extra delay.
+        await session.settle();
+        const dom = await session.captureCurrentPage();
+        const snap = buildPageSnapshot(dom);
+        return {
+            url: snap.url,
+            summary: snap.summary,
+            changed: prevUrl !== undefined ? snap.url !== prevUrl : true,
+            captured: true,
+        };
+    } catch {
+        // Capture failed — surface that honestly (captured:false) with an
+        // explicit sentinel summary so the agent never mistakes an empty string
+        // for a genuinely empty page and starts guessing selectors.
+        return {
+            url: prevUrl ?? "",
+            summary: "(page state could not be re-captured after this action)",
+            changed: false,
+            captured: false,
+        };
+    }
 }
 
 function formatToolError<T = unknown>(context: string, error: unknown): ToolResult<T> {
@@ -190,6 +270,9 @@ function persistPageDiscovery(
             normalizedUrl: snapshot.url,
             title: snapshot.title,
             snapshotJson: snapshot.summary,
+            // Structured form capture is done by the crawler (which has the live
+            // Playwright page). The agent-nav path stores the text summary only.
+            formsJson: null,
             parentUrl: parentUrl ?? null,
             navigationAction: null,
             depth,
@@ -418,7 +501,7 @@ export function createAgentTools(ctx: ToolContext) {
                     const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
                         const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: true, storageStatePath });
+                        await session.start({ headless: resolveHeadless(true), storageStatePath });
                     }
 
                     const domContext = await session.navigate(url);
@@ -457,21 +540,39 @@ export function createAgentTools(ctx: ToolContext) {
                 testName: z.string().optional().describe("Name of the test (for display)"),
             }),
             execute: async (params): Promise<ToolResult<{ path: string; saved: boolean }>> => {
-                const { filePath, content, testName } = params as {
+                const {
+                    filePath,
+                    content: rawContent,
+                    testName,
+                } = params as {
                     filePath: string;
                     content: string;
                     testName?: string;
                 };
                 const name = testName || path.basename(filePath, path.extname(filePath));
+                // Normalize once so the preview shown to the user and the bytes
+                // written to disk are identical, regardless of save path. Strip
+                // any stray SEARCH/REPLACE markers first (a malformed edit block
+                // falling back to a full-file rewrite) so they can never end up
+                // as invalid TypeScript on disk.
+                const content = cleanGeneratedTestCode(stripEditMarkers(rawContent));
 
                 // Check if we can skip HITL
                 if (shouldSkipHITL("save", autonomy)) {
-                    // Auto-save enabled - save immediately
+                    // Auto-save enabled - save immediately.
                     try {
                         const fullPath = safePath(projectPath, filePath);
-                        // Ensure directory exists
-                        await fs.mkdir(path.dirname(fullPath), { recursive: true });
-                        await fs.writeFile(fullPath, content, "utf-8");
+                        // Atomic write (temp + rename) so a crash mid-write can't
+                        // leave a truncated/corrupt spec — matching the semantics
+                        // of the dashboard's saveGeneratedTest path.
+                        const dir = path.dirname(fullPath);
+                        await fs.mkdir(dir, { recursive: true });
+                        const tmp = path.join(
+                            dir,
+                            `.${path.basename(fullPath)}.tmp-${process.pid}-${Date.now()}`,
+                        );
+                        await fs.writeFile(tmp, content, "utf-8");
+                        await fs.rename(tmp, fullPath);
                         return {
                             success: true,
                             data: { path: filePath, saved: true },
@@ -667,8 +768,9 @@ export function createAgentTools(ctx: ToolContext) {
                     }>;
                 }>
             > => {
+                let discovery: DiscoveryQueryService | null = null;
                 try {
-                    const discovery = new DiscoveryQueryService(projectPath);
+                    discovery = new DiscoveryQueryService(projectPath);
                     const overview = discovery.getOverview();
                     return {
                         success: true,
@@ -705,6 +807,8 @@ export function createAgentTools(ctx: ToolContext) {
                         success: false,
                         message: `Failed to load discovery overview: ${error instanceof Error ? error.message : "Unknown error"}`,
                     };
+                } finally {
+                    discovery?.close();
                 }
             },
         }),
@@ -738,8 +842,9 @@ export function createAgentTools(ctx: ToolContext) {
                 }>
             > => {
                 const { limit = 20, offset = 0 } = params as { limit?: number; offset?: number };
+                let discovery: DiscoveryQueryService | null = null;
                 try {
-                    const discovery = new DiscoveryQueryService(projectPath);
+                    discovery = new DiscoveryQueryService(projectPath);
                     const result = discovery.listPages({ limit, offset });
                     return {
                         success: true,
@@ -767,6 +872,8 @@ export function createAgentTools(ctx: ToolContext) {
                         success: false,
                         message: `Failed to list discovered pages: ${error instanceof Error ? error.message : "Unknown error"}`,
                     };
+                } finally {
+                    discovery?.close();
                 }
             },
         }),
@@ -794,8 +901,9 @@ export function createAgentTools(ctx: ToolContext) {
                 } | null>
             > => {
                 const { url } = params as { url: string };
+                let discovery: DiscoveryQueryService | null = null;
                 try {
-                    const discovery = new DiscoveryQueryService(projectPath);
+                    discovery = new DiscoveryQueryService(projectPath);
                     const page = discovery.getPageSnapshot(url);
                     if (!page) {
                         return {
@@ -822,6 +930,8 @@ export function createAgentTools(ctx: ToolContext) {
                         success: false,
                         message: `Failed to get discovered snapshot: ${error instanceof Error ? error.message : "Unknown error"}`,
                     };
+                } finally {
+                    discovery?.close();
                 }
             },
         }),
@@ -847,14 +957,15 @@ export function createAgentTools(ctx: ToolContext) {
             }),
             execute: async (params): Promise<ToolResult<{ active: boolean }>> => {
                 const { headless = false } = params as { headless?: boolean };
+                const effectiveHeadless = resolveHeadless(headless);
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     const storageStatePath = resolveAuthStatePath(projectPath);
-                    await session.start({ headless, storageStatePath });
+                    await session.start({ headless: effectiveHeadless, storageStatePath });
                     return {
                         success: true,
                         data: { active: true },
-                        message: `Browser started (headless: ${headless})`,
+                        message: `Browser started (headless: ${effectiveHeadless})`,
                     };
                 } catch (error) {
                     return {
@@ -904,7 +1015,7 @@ export function createAgentTools(ctx: ToolContext) {
                     const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
                         const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: false, storageStatePath });
+                        await session.start({ headless: resolveHeadless(false), storageStatePath });
                     }
 
                     let previousUrl: string | undefined;
@@ -939,15 +1050,24 @@ export function createAgentTools(ctx: ToolContext) {
                     .union([z.string(), z.array(z.string())])
                     .describe("Selector or array of DOM-derived selectors to try"),
             }),
-            execute: async (params): Promise<ToolResult<{ clicked: boolean }>> => {
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
                 const { selector } = params as { selector: string | string[] };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    let prevUrl: string | undefined;
+                    try {
+                        prevUrl = session.getCurrentUrl();
+                    } catch {
+                        /* not started yet */
+                    }
                     await session.click(selector);
+                    const after = await snapshotAfterAction(session, prevUrl);
+                    const target = Array.isArray(selector) ? selector[0] : selector;
                     return {
                         success: true,
-                        data: { clicked: true },
-                        message: `Clicked: ${Array.isArray(selector) ? selector[0] : selector}`,
+                        data: { clicked: true, ...after },
+                        message: `Clicked: ${target}${after.changed && after.url ? ` → ${after.url}` : ""}`,
                     };
                 } catch (error) {
                     return {
@@ -969,17 +1089,25 @@ export function createAgentTools(ctx: ToolContext) {
                     .describe("Selector or array of DOM-derived selectors to try"),
                 value: z.string().describe("Value to fill"),
             }),
-            execute: async (params): Promise<ToolResult<{ filled: boolean }>> => {
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
                 const { selector, value } = params as {
                     selector: string | string[];
                     value: string;
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    let prevUrl: string | undefined;
+                    try {
+                        prevUrl = session.getCurrentUrl();
+                    } catch {
+                        /* not started yet */
+                    }
                     await session.fill(selector, value);
+                    const after = await snapshotAfterAction(session, prevUrl);
                     return {
                         success: true,
-                        data: { filled: true },
+                        data: { filled: true, ...after },
                         message: `Filled ${Array.isArray(selector) ? selector[0] : selector} with value`,
                     };
                 } catch (error) {
@@ -1001,15 +1129,23 @@ export function createAgentTools(ctx: ToolContext) {
                     .string()
                     .describe("Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')"),
             }),
-            execute: async (params): Promise<ToolResult<{ pressed: boolean }>> => {
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
                 const { key } = params as { key: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    let prevUrl: string | undefined;
+                    try {
+                        prevUrl = session.getCurrentUrl();
+                    } catch {
+                        /* not started yet */
+                    }
                     await session.press(key);
+                    const after = await snapshotAfterAction(session, prevUrl);
                     return {
                         success: true,
-                        data: { pressed: true },
-                        message: `Pressed: ${key}`,
+                        data: { pressed: true, ...after },
+                        message: `Pressed: ${key}${after.changed && after.url ? ` → ${after.url}` : ""}`,
                     };
                 } catch (error) {
                     return {
@@ -1032,7 +1168,7 @@ export function createAgentTools(ctx: ToolContext) {
                     const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
                         const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: false, storageStatePath });
+                        await session.start({ headless: resolveHeadless(false), storageStatePath });
                     }
                     const domContext = await session.captureCurrentPage();
                     const snapshot = buildPageSnapshot(domContext);
@@ -1059,23 +1195,96 @@ export function createAgentTools(ctx: ToolContext) {
                     .describe("Selector or array of selectors to wait for"),
                 timeout: z.number().optional().default(5000).describe("Timeout in milliseconds"),
             }),
-            execute: async (params): Promise<ToolResult<{ found: boolean }>> => {
+            execute: async (
+                params,
+            ): Promise<
+                ToolResult<{ found: boolean; url?: string; summary?: string; captured?: boolean }>
+            > => {
                 const { selector, timeout } = params as {
                     selector: string | string[];
                     timeout?: number;
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
                     await session.waitForSelector(selector, timeout);
+                    // Re-capture so the agent sees what actually appeared instead
+                    // of reasoning against whatever DOM it had before the wait.
+                    const after = await snapshotAfterAction(session);
                     return {
                         success: true,
-                        data: { found: true },
+                        data: { found: true, ...after },
                         message: `Element found: ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
                     return {
                         success: false,
                         message: `Wait failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    };
+                }
+            },
+        }),
+
+        /**
+         * Type text character-by-character (for React/controlled inputs that
+         * ignore Playwright's fill()). Appends to any existing value.
+         */
+        typeText: tool({
+            description:
+                "Type text character-by-character into a field. Use for React/controlled inputs when fillInput doesn't register the value.",
+            inputSchema: z.object({
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of DOM-derived selectors to try"),
+                text: z.string().describe("Text to type"),
+            }),
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
+                const { selector, text } = params as { selector: string | string[]; text: string };
+                try {
+                    const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    await session.type(selector, text);
+                    const after = await snapshotAfterAction(session);
+                    return {
+                        success: true,
+                        data: { filled: true, ...after },
+                        message: `Typed into ${Array.isArray(selector) ? selector[0] : selector}`,
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: `Type failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    };
+                }
+            },
+        }),
+
+        /**
+         * Hover over an element (reveals menus/tooltips before interacting).
+         */
+        hoverElement: tool({
+            description: "Hover over an element to reveal menus, tooltips, or hidden controls.",
+            inputSchema: z.object({
+                selector: z
+                    .union([z.string(), z.array(z.string())])
+                    .describe("Selector or array of DOM-derived selectors to try"),
+            }),
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
+                const { selector } = params as { selector: string | string[] };
+                try {
+                    const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    await session.hover(selector);
+                    const after = await snapshotAfterAction(session);
+                    return {
+                        success: true,
+                        data: { ...after },
+                        message: `Hovered: ${Array.isArray(selector) ? selector[0] : selector}`,
+                    };
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: `Hover failed: ${error instanceof Error ? error.message : "Unknown error"}`,
                     };
                 }
             },
@@ -1092,17 +1301,25 @@ export function createAgentTools(ctx: ToolContext) {
                     .describe("Selector or array of selectors for the select element"),
                 value: z.string().describe("Option value to select"),
             }),
-            execute: async (params): Promise<ToolResult<{ selected: boolean }>> => {
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
                 const { selector, value } = params as {
                     selector: string | string[];
                     value: string;
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    let prevUrl: string | undefined;
+                    try {
+                        prevUrl = session.getCurrentUrl();
+                    } catch {
+                        /* not started yet */
+                    }
                     await session.selectOption(selector, value);
+                    const after = await snapshotAfterAction(session, prevUrl);
                     return {
                         success: true,
-                        data: { selected: true },
+                        data: { selected: true, ...after },
                         message: `Selected ${value} from ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
@@ -1125,21 +1342,29 @@ export function createAgentTools(ctx: ToolContext) {
                     .describe("Selector or array of selectors for the checkbox"),
                 checked: z.boolean().describe("True to check, false to uncheck"),
             }),
-            execute: async (params): Promise<ToolResult<{ toggled: boolean }>> => {
+            execute: async (params): Promise<ToolResult<ActionResultData>> => {
                 const { selector, checked } = params as {
                     selector: string | string[];
                     checked: boolean;
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
+                    let prevUrl: string | undefined;
+                    try {
+                        prevUrl = session.getCurrentUrl();
+                    } catch {
+                        /* not started yet */
+                    }
                     if (checked) {
                         await session.check(selector);
                     } else {
                         await session.uncheck(selector);
                     }
+                    const after = await snapshotAfterAction(session, prevUrl);
                     return {
                         success: true,
-                        data: { toggled: true },
+                        data: { toggled: true, ...after },
                         message: `Checkbox ${checked ? "checked" : "unchecked"}: ${Array.isArray(selector) ? selector[0] : selector}`,
                     };
                 } catch (error) {
@@ -1185,6 +1410,7 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (): Promise<ToolResult<{ saved: boolean; path: string }>> => {
                 try {
                     const session = getBoundBrowserSession(projectPath);
+                    await ensureBrowserStarted(session, projectPath);
                     const fs = await import("node:fs");
                     const authDir = path.join(projectPath, ".raiken");
                     if (!fs.existsSync(authDir)) {
@@ -1226,7 +1452,7 @@ export function createAgentTools(ctx: ToolContext) {
                     const session = getBoundBrowserSession(projectPath);
                     if (!session.isActive()) {
                         const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: false, storageStatePath });
+                        await session.start({ headless: resolveHeadless(false), storageStatePath });
                     }
                     const allLinks = await session.discoverLinks();
 

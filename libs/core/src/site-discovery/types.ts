@@ -368,6 +368,6 @@ export type DiscoveryEventData =
     | { page: DiscoveredPage }
     | { link: DiscoveredLink }
     | { blocker: DiscoveryBlocker }
-    | { stats: DiscoveryStats; reason?: "aborted" }
-    | { url: string; message: string }
+    | { stats: DiscoveryStats; reason?: "aborted" | "wall_clock_cap" }
+    | { url: string; message: string; code?: string }
     | { error: Error };

@@ -92,7 +92,7 @@ describeIfBrowser("run-after-clear regression (Issue 6)", () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
     });
 
-    it("two back-to-back SiteDiscovery instances both dispatch requests", async () => {
+    it("repeat crawls count refreshed pages and survive a data clear", async () => {
         // Browser-launch sanity check (mirrors captcha-handoff pattern):
         // skip the assertion if Chromium isn't present locally rather
         // than failing the suite.
@@ -173,5 +173,21 @@ describeIfBrowser("run-after-clear regression (Issue 6)", () => {
         // fire on either run.
         expect(firstStats.status, "run #1 status").toBe("completed");
         expect(secondStats.status, "run #2 status").toBe("completed");
+
+        // ── Run #3 (same DB, pages already exist) ─────────────────────
+        // A successful refresh must count as session progress even though it
+        // updates an existing row rather than inserting a new one. Pre-fix,
+        // pagesDiscovered stayed at 0 and the crawl falsely failed with
+        // "No pages discovered" despite rendering and refreshing the page.
+        const third = new SiteDiscovery(baseOptions);
+        await third.start();
+        const thirdStats = third.getStats();
+        await third.close();
+
+        expect(
+            thirdStats.pagesDiscovered,
+            "run #3 should count successfully refreshed pages",
+        ).toBeGreaterThanOrEqual(1);
+        expect(thirdStats.status, "run #3 status").toBe("completed");
     }, 60_000);
 });

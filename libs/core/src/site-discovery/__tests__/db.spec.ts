@@ -350,6 +350,175 @@ describe("SiteKnowledgeDB", () => {
             expect(updated?.skippedUrlsJson).toBe(JSON.stringify(["http://localhost:3000/admin"]));
             expect(updated?.ignoredCategoriesJson).toBe(JSON.stringify(["captcha"]));
         });
+
+        // ─────────────────────────────────────────────────────────────────
+        // failStaleSessions — crash-resume recovery (Phase 6)
+        //
+        // A `running` session left over from a server crash/restart is
+        // resumable when there's something to resume from (a saved queue
+        // or at least one already-discovered page); otherwise there's
+        // nothing to resume and it should be marked `failed` as before.
+        // ─────────────────────────────────────────────────────────────────
+
+        it("pauses (not fails) a stale running session that has a saved queue", () => {
+            const sessionId = siteDb.saveSession({
+                projectPath: testDir,
+                startUrl: "http://localhost:3000",
+                status: "running",
+                pagesDiscovered: 2,
+                linksFound: 5,
+                startedAt: Date.now(),
+                completedAt: null,
+                blockedAtUrl: null,
+                queueJson: JSON.stringify([{ url: "http://localhost:3000/about" }]),
+            });
+
+            const changed = siteDb.failStaleSessions();
+            expect(changed).toBe(1);
+            expect(siteDb.getSession(sessionId)?.status).toBe("paused");
+        });
+
+        it("pauses a stale running session with discovered pages but no queue snapshot", () => {
+            const sessionId = siteDb.saveSession({
+                projectPath: testDir,
+                startUrl: "http://localhost:3000",
+                status: "running",
+                pagesDiscovered: 1,
+                linksFound: 0,
+                // Pages are always discovered after their session starts.
+                startedAt: Date.now() - 1000,
+                completedAt: null,
+                blockedAtUrl: null,
+                queueJson: null,
+            });
+
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000",
+                normalizedUrl: "http://localhost:3000",
+                title: "Home",
+                snapshotJson: null,
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+
+            siteDb.failStaleSessions();
+            expect(siteDb.getSession(sessionId)?.status).toBe("paused");
+        });
+
+        it("fails a stale running session whose only pages belong to an earlier session", () => {
+            // A page from a previous, completed crawl…
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000",
+                normalizedUrl: "http://localhost:3000",
+                title: "Home",
+                snapshotJson: null,
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now() - 60_000,
+                lastVisitedAt: Date.now() - 60_000,
+                visitCount: 1,
+            });
+
+            // …must not make a brand-new crashed session (no checkpoint, no
+            // pages of its own) look resumable.
+            const sessionId = siteDb.saveSession({
+                projectPath: testDir,
+                startUrl: "http://localhost:3000",
+                status: "running",
+                pagesDiscovered: 0,
+                linksFound: 0,
+                startedAt: Date.now(),
+                completedAt: null,
+                blockedAtUrl: null,
+                queueJson: null,
+            });
+
+            siteDb.failStaleSessions();
+            expect(siteDb.getSession(sessionId)?.status).toBe("failed");
+        });
+
+        it("fails a stale running session with nothing to resume from", () => {
+            const sessionId = siteDb.saveSession({
+                projectPath: testDir,
+                startUrl: "http://localhost:3000",
+                status: "running",
+                pagesDiscovered: 0,
+                linksFound: 0,
+                startedAt: Date.now(),
+                completedAt: null,
+                blockedAtUrl: null,
+                queueJson: null,
+            });
+
+            siteDb.failStaleSessions();
+            const updated = siteDb.getSession(sessionId);
+            expect(updated?.status).toBe("failed");
+            expect(updated?.completedAt).not.toBeNull();
+        });
+
+        it("leaves completed/failed/paused sessions untouched", () => {
+            const completedId = siteDb.saveSession({
+                projectPath: testDir,
+                startUrl: "http://localhost:3000",
+                status: "completed",
+                pagesDiscovered: 3,
+                linksFound: 1,
+                startedAt: Date.now(),
+                completedAt: Date.now(),
+                blockedAtUrl: null,
+                queueJson: null,
+            });
+
+            siteDb.failStaleSessions();
+            expect(siteDb.getSession(completedId)?.status).toBe("completed");
+        });
+
+        it("getAllNormalizedUrls returns the normalized URL of every discovered page", () => {
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000",
+                normalizedUrl: "http://localhost:3000",
+                title: "Home",
+                snapshotJson: null,
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000/about",
+                normalizedUrl: "http://localhost:3000/about",
+                title: "About",
+                snapshotJson: null,
+                formsJson: null,
+                parentUrl: "http://localhost:3000",
+                navigationAction: null,
+                depth: 1,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+
+            const urls = siteDb.getAllNormalizedUrls();
+            expect(urls).toHaveLength(2);
+            expect(
+                urls.some((u) => u.startsWith("http://localhost:3000") && !u.includes("/about")),
+            ).toBe(true);
+            expect(urls).toContain("http://localhost:3000/about");
+        });
     });
 
     describe("Statistics", () => {

@@ -4,7 +4,13 @@
  * Autonomously discover web application structure by crawling pages.
  */
 
-import type { DiscoveryEvent, DiscoverySession, DiscoveryStats, SiteDiscovery } from "@raiken/core";
+import type {
+    DiscoveryBlocker,
+    DiscoveryEvent,
+    DiscoverySession,
+    DiscoveryStats,
+    SiteDiscovery,
+} from "@raiken/core";
 import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -28,13 +34,57 @@ const parseNumber = (value: string | number | undefined, fallback: number): numb
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const getActiveDiscoverySession = async (projectPath: string): Promise<DiscoverySession | null> => {
+/**
+ * Resolve context needed to decide whether a `--continue` resume should
+ * purge Crawlee's persistent queue and restart from `startUrl` instead of
+ * blindly draining the stale pre-auth queue (see `purgeQueueOnResume`
+ * usage below). Bundles the session + blocker lookups into one DB
+ * connection since both are always needed together here.
+ */
+export const getResumeContext = async (
+    projectPath: string,
+): Promise<{ session: DiscoverySession | null; pendingAuthBlockers: DiscoveryBlocker[] }> => {
     const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
     const db = new CodeGraphDB(projectPath);
-    const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
-    const session = siteDb.getActiveSession();
-    db.close();
-    return session;
+    try {
+        const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+        const session = siteDb.getActiveSession();
+        const pendingAuthBlockers = siteDb
+            .getUnresolvedBlockers()
+            .filter((b) => b.category === "auth_required");
+        return { session, pendingAuthBlockers };
+    } finally {
+        db.close();
+    }
+};
+
+/**
+ * Mark the given auth blockers resolved via fresh storage state. Opens its
+ * own short-lived DB connection (mirrors the pattern used throughout this
+ * file rather than threading a shared handle through).
+ */
+export const resolveAuthBlockersWithState = async (
+    projectPath: string,
+    blockers: DiscoveryBlocker[],
+    storageStatePath: string,
+): Promise<void> => {
+    if (blockers.length === 0) return;
+    const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
+    const db = new CodeGraphDB(projectPath);
+    try {
+        const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+        for (const blocker of blockers) {
+            if (blocker.id) {
+                siteDb.markBlockerResolved(blocker.id, {
+                    resolution: "provide_state",
+                    resolvedVia: "cli_continue",
+                    storageStatePath,
+                });
+            }
+        }
+    } finally {
+        db.close();
+    }
 };
 
 const attachDiscoveryListeners = (params: {
@@ -212,10 +262,13 @@ const attachDiscoveryListeners = (params: {
         onCompleted?.(lastStats);
     });
 
-    discovery.on("error", (event: DiscoveryEvent) => {
+    discovery.on("error", () => {
         clearInterval(progressInterval);
         spinner.fail(chalk.red("Discovery failed"));
-        throw (event.data as { error: Error }).error;
+        // `discovery.start()` rejects with this same formatted error. Never
+        // throw from EventEmitter listeners: doing so recursively re-enters
+        // the crawler catch path and collapses useful causes into a generic
+        // AggregateError ("Received one or more errors").
     });
 
     return { updateSpinner, progressInterval };
@@ -337,7 +390,7 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
     console.log(chalk.cyan("\nResuming discovery...\n"));
 
     const config = loadDiscoveryConfig(projectPath);
-    const session = await getActiveDiscoverySession(projectPath);
+    const { session, pendingAuthBlockers } = await getResumeContext(projectPath);
     const maxPages = session?.maxPages ?? parseNumber(options.maxPages, config.maxPages);
     const maxDepth = session?.maxDepth ?? parseNumber(options.maxDepth, config.maxDepth);
     const timeout = parseNumber(options.timeout, config.timeout);
@@ -345,11 +398,33 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
     const excludePatterns = config.excludePatterns;
 
     const storageStatePath = resolveAuthStorageStatePath(projectPath);
+
+    // Mirror the dashboard's `provide_state` / `clear`-with-fresh-state
+    // behavior (see `resolveDiscoveryBlocker` in router.ts): if this
+    // session paused on an auth wall and storage state now resolves (e.g.
+    // the user ran `raiken auth` in between the pause and this
+    // `--continue`), the crawler's persisted queue only reflects the
+    // *unauthenticated* link graph — resuming it verbatim would replay the
+    // login page's links forever and never discover what's actually behind
+    // auth. Purge the queue and restart from `startUrl` so the post-login
+    // DOM gets crawled fresh, and mark the blocker(s) resolved so status
+    // views stop reporting them as pending.
+    const purgeQueueOnResume = Boolean(storageStatePath) && pendingAuthBlockers.length > 0;
+    if (purgeQueueOnResume && storageStatePath) {
+        await resolveAuthBlockersWithState(projectPath, pendingAuthBlockers, storageStatePath);
+        console.log(
+            chalk.dim(
+                `  Fresh auth state found — restarting from ${session?.startUrl ?? "the original start URL"} to re-crawl the authenticated app.\n`,
+            ),
+        );
+    }
+
     const { SiteDiscovery } = await import("@raiken/core");
     const discovery = new SiteDiscovery({
         startUrl: "",
         projectPath,
         continueSession: true,
+        purgeQueueOnResume,
         pauseOnAuth: options.skipAuth ? false : config.pauseOnAuth,
         maxConcurrency,
         timeout,

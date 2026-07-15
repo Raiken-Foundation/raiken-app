@@ -61,7 +61,7 @@ function detectorIdToLegacyAuthType(
     detectorId: string | null,
     category: BlockerCategory,
 ): AuthBlockerType {
-    if (detectorId && detectorId.includes(":")) {
+    if (detectorId?.includes(":")) {
         const suffix = detectorId.split(":", 2)[1];
         if (LEGACY_AUTH_TYPE_SET.has(suffix)) {
             return suffix as AuthBlockerType;
@@ -156,6 +156,25 @@ export class SiteKnowledgeDB {
             .all(this.projectPath) as Array<Record<string, unknown>>;
 
         return rows.map((row) => this.mapPageRow(row));
+    }
+
+    /**
+     * Get just the normalized URLs of every discovered page for this
+     * project — used to rehydrate the crawler's in-memory `visitedUrls`
+     * set on resume, without paying for `snapshot_json`/`forms_json`
+     * payloads that `getAllPages()` would otherwise load for a
+     * potentially large crawl.
+     */
+    getAllNormalizedUrls(): string[] {
+        const rows = this.db
+            .prepare(
+                `
+            SELECT normalized_url FROM discovered_pages
+            WHERE project_path = ?
+        `,
+            )
+            .all(this.projectPath) as Array<{ normalized_url: string }>;
+        return rows.map((row) => row.normalized_url);
     }
 
     /**
@@ -825,21 +844,54 @@ export class SiteKnowledgeDB {
     }
 
     /**
-     * Mark sessions stuck as "running" (from a previous crash) as "failed".
-     * Returns the number of sessions updated.
+     * Recover sessions stuck as "running" from a previous server crash/restart.
+     *
+     * A `running` session with a saved queue (or at least one discovered page)
+     * is resumable — the crawler can rehydrate `visitedUrls` from
+     * `discovered_pages` and drain the persisted queue, so it's flipped to
+     * `paused` rather than `failed`. Only a session with genuinely nothing to
+     * resume from (crashed before the first checkpoint) is marked `failed`.
+     *
+     * Returns the number of sessions updated (paused + failed combined).
      */
     failStaleSessions(): number {
-        const result = this.db
-            .prepare(
-                `
-            UPDATE discovery_sessions
-            SET status = 'failed', completed_at = ?
-            WHERE project_path = ? AND status = 'running'
-        `,
-            )
-            .run(Date.now(), this.projectPath);
+        return this.db.transaction(() => {
+            const resumable = this.db
+                .prepare(
+                    `
+                UPDATE discovery_sessions
+                SET status = 'paused'
+                WHERE project_path = ? AND status = 'running'
+                  AND (
+                    (queue_json IS NOT NULL AND queue_json != '' AND queue_json != '[]')
+                    OR EXISTS (
+                        -- Scoped to pages saved during *this* session's run.
+                        -- discovered_pages persists across sessions, so an
+                        -- unscoped EXISTS would flip every future crash to
+                        -- 'paused' once any crawl had ever saved a page —
+                        -- including brand-new sessions that died before their
+                        -- first checkpoint, which have nothing to resume.
+                        SELECT 1 FROM discovered_pages dp
+                        WHERE dp.project_path = discovery_sessions.project_path
+                          AND dp.last_visited_at >= discovery_sessions.started_at
+                    )
+                  )
+            `,
+                )
+                .run(this.projectPath);
 
-        return result.changes;
+            const failed = this.db
+                .prepare(
+                    `
+                UPDATE discovery_sessions
+                SET status = 'failed', completed_at = ?
+                WHERE project_path = ? AND status = 'running'
+            `,
+                )
+                .run(Date.now(), this.projectPath);
+
+            return resumable.changes + failed.changes;
+        })();
     }
 
     // ==========================================================================

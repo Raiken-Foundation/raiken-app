@@ -117,8 +117,15 @@ describe("isLikelyRouteHref / resolveRouteHref", () => {
         expect(isLikelyRouteHref("./relative")).toBe(true);
     });
 
+    it("accepts bare document filenames used by static documentation sites", () => {
+        expect(isLikelyRouteHref("ch01-00-getting-started.html")).toBe(true);
+        expect(isLikelyRouteHref("index.html?edition=2024")).toBe(true);
+        expect(isLikelyRouteHref("guide.xhtml")).toBe(true);
+    });
+
     it("rejects actions and fragments", () => {
         expect(isLikelyRouteHref("submit")).toBe(false);
+        expect(isLikelyRouteHref("styles.css")).toBe(false);
         expect(isLikelyRouteHref("#section")).toBe(false);
         expect(isLikelyRouteHref("mailto:a@b.c")).toBe(false);
         expect(isLikelyRouteHref("")).toBe(false);

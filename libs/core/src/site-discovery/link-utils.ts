@@ -69,7 +69,14 @@ export function isLikelyRouteHref(value: string): boolean {
     ) {
         return true;
     }
-    // Bare path segment used by some routers (`settings`, `users/1`).
+    // Document sites commonly use a bare filename relative to the current
+    // directory (`chapter-01.html`). It has no slash, but is unambiguously a
+    // navigation target rather than an action label such as `submit`.
+    const pathWithoutQuery = v.split(/[?#]/, 1)[0] ?? v;
+    if (/^[A-Za-z0-9._~-]+\.(?:html?|xhtml|php|aspx?|jsp)$/i.test(pathWithoutQuery)) {
+        return true;
+    }
+    // Bare multi-segment path used by some routers (`users/1`).
     if (/^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]*)*$/.test(v) && v.includes("/")) {
         return true;
     }

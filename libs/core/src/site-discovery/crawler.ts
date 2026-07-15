@@ -25,7 +25,9 @@ import {
     runBlockerPipeline,
 } from "./detectors";
 import { looksLikeLoginUrl } from "./detectors/auth";
+import { formatDiscoveryError } from "./discovery-error";
 import { buildLinkSelector, mergeBlockedUrlIntoQueue, safeOrigin } from "./link-utils";
+import { acquireDiscoveryLock, type DiscoveryLockHandle } from "./project-lock";
 import type { BlockerCategory, DiscoveryBlocker, DiscoveryOptions, DiscoveryStats } from "./types";
 import { normalizeUrl } from "./url-utils";
 
@@ -150,6 +152,21 @@ async function extractPageForms(page: Page): Promise<string | null> {
     }
 }
 
+// `Configuration.getGlobalConfig()` is a Crawlee process-wide singleton.
+// `start()` below mutates it (installs a fresh storage client, flips
+// `purgeOnStart`) on *every* call — if two `SiteDiscovery` instances in the
+// same Node process ever call `start()` concurrently, the second call's
+// mutation yanks the storage client out from under the first crawl's
+// already-open `RequestQueue`/browser pool, corrupting or crashing it
+// silently and unpredictably. Callers (dashboard router, CLI REPL) already
+// try to serialize discovery per project, but that's their responsibility,
+// not something this class enforces on its own — any missed guard, in this
+// codebase or a future one, would race shared global state with no
+// diagnostic. This lock makes the invariant self-enforcing: a second
+// concurrent `start()` in the same process fails fast with a clear error
+// instead of silently corrupting a sibling crawl.
+let activeProcessWideCrawl: SiteDiscovery | null = null;
+
 export class SiteDiscovery extends EventEmitter {
     private crawler: PlaywrightCrawler | null = null;
     private db: CodeGraphDB;
@@ -161,6 +178,16 @@ export class SiteDiscovery extends EventEmitter {
     private visitedUrls = new Set<string>();
     private isPaused = false;
     private startOrigin: string | null = null;
+    /** Held for the lifetime of an active `start()` call; see `project-lock.ts`. */
+    private discoveryLock: DiscoveryLockHandle | null = null;
+    /**
+     * Set once `persistQueueState()` has emitted its one-time failure
+     * warning, so a persistently broken checkpoint (e.g. a locked or
+     * corrupt DB, a full disk) doesn't spam a warning every 15s for the
+     * rest of a long crawl. The user only needs to be told once that
+     * resuming after an interruption may lose unvisited queue state.
+     */
+    private checkpointFailureWarned = false;
     private requestQueue: RequestQueue | null = null;
     /**
      * Per-instance queue name. Crawlee's `RequestQueue.open(name)` caches
@@ -217,6 +244,23 @@ export class SiteDiscovery extends EventEmitter {
     /** Set once a request returns a real authenticated page. */
     private hasSeenAuthenticatedSuccess = false;
     private wallClockTimer: NodeJS.Timeout | null = null;
+    /**
+     * Periodic checkpoint so a mid-crawl crash (server restart, OOM, killed
+     * process) doesn't lose the pending queue. Without this, `queueJson`
+     * was only ever written from `pause()` — a crawl that dies mid-run
+     * (rather than pausing cleanly) had nothing to resume from, and
+     * `failStaleSessions()` recovering it to `paused` would just replay
+     * from `startUrl` with an empty queue.
+     */
+    private checkpointTimer: NodeJS.Timeout | null = null;
+    private static readonly CHECKPOINT_INTERVAL_MS = 15_000;
+    /**
+     * Bounded grace window `pause()` gives *other* concurrently-running
+     * workers to finish their current request normally before we force-
+     * abort the crawler. See `pause()` for why this matters.
+     */
+    private static readonly GRACEFUL_PAUSE_DRAIN_MS = 5_000;
+    private static readonly GRACEFUL_PAUSE_POLL_MS = 50;
     private aborted = false;
     private snapshotFailureReports = 0;
     private compiledExcludeMatchers: Array<(url: string) => boolean> = [];
@@ -339,7 +383,23 @@ export class SiteDiscovery extends EventEmitter {
      * Start the discovery process.
      */
     async start(): Promise<void> {
+        if (activeProcessWideCrawl && activeProcessWideCrawl !== this) {
+            throw new Error(
+                "Another discovery crawl is already running in this process. Crawlee's " +
+                    "global configuration can't be safely shared between concurrent crawls " +
+                    "— wait for the other crawl to finish (or call close() on it) before " +
+                    "starting a new one.",
+            );
+        }
+        activeProcessWideCrawl = this;
         try {
+            // Cross-process guard: prevents a completely separate OS process
+            // (dashboard server, a direct `raiken discover` invocation, the
+            // REPL's background discovery) from crawling this same project
+            // concurrently. The in-memory check above only covers races
+            // within *this* process. See `project-lock.ts` for why.
+            this.discoveryLock = await acquireDiscoveryLock(this.options.projectPath);
+
             // Direct Crawlee's file-based storage into .raiken/crawlee/.
             // We keep the directory around for diagnostic dumps but
             // disable on-disk persistence below.
@@ -458,6 +518,21 @@ export class SiteDiscovery extends EventEmitter {
                 navigationTimeoutSecs: navTimeoutSecs,
                 headless: true,
                 requestQueue: this.requestQueue,
+                // Crawlee's session pool auto-retires (and silently retries up
+                // to `maxRequestRetries` times) any response with a "blocked"
+                // status code — 401/403/429 by default. Left enabled, THIS
+                // fires and throws before our own `handleRequest` ever runs,
+                // so `createAuthDetector`'s HTTP-401/403 check (the strongest,
+                // first-checked auth signal) never gets a chance to classify
+                // the page as an `auth_required` blocker: the request just
+                // fails 3x against the session pool and shows up as a generic
+                // "HTTP 401 failed request" with no pause, no `raiken auth`
+                // prompt, and no way to resume once the user authenticates.
+                // Emptying `blockedStatusCodes` routes these responses through
+                // our own detector pipeline instead, where they're already
+                // handled deliberately (auth_required pause, or the generic
+                // 400+ broken-link path for anything else, e.g. 429).
+                sessionPoolOptions: { blockedStatusCodes: [] },
                 launchContext: {
                     launchOptions: {},
                     // `pageOptions.storageState` is only honored by Playwright's
@@ -573,11 +648,13 @@ export class SiteDiscovery extends EventEmitter {
             // with thousands of in-scope links can crawl far longer than the
             // user expects. Pause gracefully when we hit the deadline.
             this.armWallClockTimer();
+            this.armCheckpointTimer();
 
             try {
                 await this.crawler.run(startUrls);
             } finally {
                 this.disarmWallClockTimer();
+                this.disarmCheckpointTimer();
             }
 
             if (this.isPaused) {
@@ -621,12 +698,11 @@ export class SiteDiscovery extends EventEmitter {
                         completedAt: Date.now(),
                     });
                 }
-                this.emit("error", {
-                    type: "error",
-                    data: { error: new Error(message) },
-                    timestamp: Date.now(),
-                });
-                return;
+                // Throw once and let the outer catch emit the canonical error
+                // event. Emitting here and throwing from a CLI event listener
+                // caused recursive error events that Crawlee collapsed into
+                // the unhelpful "Received one or more errors" AggregateError.
+                throw new Error(message);
             }
 
             // Mark session as completed
@@ -649,13 +725,31 @@ export class SiteDiscovery extends EventEmitter {
             });
         } catch (error) {
             this.disarmWallClockTimer();
+            this.disarmCheckpointTimer();
             this.stats.status = "failed";
+            // Release both locks here too (not just in `close()`) so a
+            // caller that throws away a failed instance without ever
+            // calling `close()` can't permanently wedge every future crawl
+            // in this process or (via the cross-process lock's stale-mtime
+            // fallback, eventually) in this project.
+            if (activeProcessWideCrawl === this) {
+                activeProcessWideCrawl = null;
+            }
+            if (this.discoveryLock) {
+                const lock = this.discoveryLock;
+                this.discoveryLock = null;
+                await lock.release().catch(() => {
+                    // Best-effort — the stale-mtime fallback in
+                    // `project-lock.ts` still frees it eventually.
+                });
+            }
+            const surfacedError = new Error(formatDiscoveryError(error), { cause: error });
             this.emit("error", {
                 type: "error",
-                data: { error: error as Error },
+                data: { error: surfacedError },
                 timestamp: Date.now(),
             });
-            throw error;
+            throw surfacedError;
         }
     }
 
@@ -668,6 +762,7 @@ export class SiteDiscovery extends EventEmitter {
         this.aborted = true;
         this.stats.status = "completed";
         this.disarmWallClockTimer();
+        this.disarmCheckpointTimer();
         if (this.sessionId) {
             this.siteDb.updateSession(this.sessionId, {
                 status: "completed",
@@ -689,10 +784,8 @@ export class SiteDiscovery extends EventEmitter {
         const cap = this.options.maxRunTimeMs;
         if (!cap || cap <= 0) return;
         this.wallClockTimer = setTimeout(() => {
-            console.warn(
-                `Discovery hit wall-clock cap of ${Math.round(cap / 1000)}s — pausing.`,
-            );
-            void this.pause().catch(() => {
+            console.warn(`Discovery hit wall-clock cap of ${Math.round(cap / 1000)}s — pausing.`);
+            void this.pause({ reason: "wall_clock_cap" }).catch(() => {
                 // pause failures shouldn't crash the timer
             });
         }, cap);
@@ -709,15 +802,109 @@ export class SiteDiscovery extends EventEmitter {
         }
     }
 
+    private armCheckpointTimer(): void {
+        // `setInterval`'s first tick doesn't fire until
+        // `CHECKPOINT_INTERVAL_MS` has elapsed. Without an immediate
+        // checkpoint here too, `queueJson` in the DB still reflects
+        // whatever it was *before this run started* (stale from a prior
+        // pause, or `null` for a brand-new session) for up to 15s after
+        // `crawler.run()` begins. A hard kill in that window (crash,
+        // `kill -9`, OOM, laptop sleep) — during which several pages can
+        // easily be discovered and queued — loses all of that progress:
+        // the next resume reads the stale/empty `queueJson` and has no
+        // idea those links were ever found. Persisting once immediately
+        // shrinks the always-vulnerable gap from "up to 15s plus whatever
+        // was stale before this run" down to "up to 15s from right now".
+        void this.persistQueueState().catch(() => {
+            // persistQueueState already swallows its own errors; this
+            // catch only guards against the call itself throwing
+            // synchronously before entering its try block.
+        });
+        this.checkpointTimer = setInterval(() => {
+            void this.persistQueueState().catch(() => {
+                // persistQueueState already swallows its own errors; this
+                // catch only guards against the interval callback itself
+                // throwing synchronously.
+            });
+        }, SiteDiscovery.CHECKPOINT_INTERVAL_MS);
+        // Don't keep the process alive solely for this timer.
+        if (typeof this.checkpointTimer.unref === "function") {
+            this.checkpointTimer.unref();
+        }
+    }
+
+    private disarmCheckpointTimer(): void {
+        if (this.checkpointTimer) {
+            clearInterval(this.checkpointTimer);
+            this.checkpointTimer = null;
+        }
+    }
+
+    /**
+     * Poll (bounded by {@link GRACEFUL_PAUSE_DRAIN_MS}) until Crawlee's
+     * own concurrency counter drops to `threshold`. We deliberately read
+     * `crawler.autoscaledPool.currentConcurrency` rather than our own
+     * `inFlightUrls` set: Crawlee's counter is incremented *before*
+     * `page.goto()` even starts (its own pre-navigation happens before our
+     * `handleRequest` is invoked), whereas `inFlightUrls` is only
+     * populated once execution reaches our handler. Draining against
+     * `inFlightUrls` would return immediately while a sibling worker is
+     * still mid-navigation — exactly the race this exists to close.
+     */
+    private async waitForCrawlerConcurrencyBelow(threshold: number): Promise<void> {
+        const pool = this.crawler?.autoscaledPool;
+        if (!pool) return;
+        const deadline = Date.now() + SiteDiscovery.GRACEFUL_PAUSE_DRAIN_MS;
+        while (pool.currentConcurrency > threshold && Date.now() < deadline) {
+            await new Promise((resolve) =>
+                setTimeout(resolve, SiteDiscovery.GRACEFUL_PAUSE_POLL_MS),
+            );
+        }
+    }
+
     /**
      * Pause the discovery process.
+     *
+     * Gives other in-flight workers ({@link GRACEFUL_PAUSE_DRAIN_MS}) a
+     * chance to finish normally before force-aborting the crawler. A hard
+     * `crawler.teardown()` while a worker is mid-navigation yanks the
+     * browser context out from under it — Crawlee's own retry logic then
+     * keeps trying to reclaim that request against a request queue we're
+     * about to drop in `close()`, producing spurious "crawling will be
+     * terminated" ERROR logs seconds after we've already (correctly)
+     * reported the session as cleanly paused.
+     *
+     * `calledFromHandler` must be set by the one call site inside
+     * `handleRequest` (the blocker-pause path): that invocation is itself
+     * one of the crawler's currently-running tasks, so waiting for
+     * concurrency to reach 0 would deadlock (the task can't finish until
+     * `pause()` returns). We instead wait for concurrency to drop to 1
+     * (i.e. every *other* worker has finished) in that case.
      */
-    async pause(options: { blockedAtUrl?: string | null } = {}): Promise<void> {
+    async pause(
+        options: {
+            blockedAtUrl?: string | null;
+            calledFromHandler?: boolean;
+            /**
+             * Why this pause happened, beyond the "blocked at a URL"
+             * cases (which already have their own `blocker_detected`/
+             * `auth_blocked` events). Threaded into the emitted
+             * `session_paused` event so listeners can tell a deliberate
+             * cap from a blocker-driven pause and message it accordingly,
+             * instead of both looking like an identical, unexplained stop.
+             */
+            reason?: "wall_clock_cap";
+        } = {},
+    ): Promise<void> {
         this.isPaused = true;
         this.stats.status = "paused";
+        this.disarmCheckpointTimer();
 
-        // Treat in-flight URLs as still pending so a mid-request pause
-        // doesn't drop the page that was being crawled when we stopped.
+        await this.waitForCrawlerConcurrencyBelow(options.calledFromHandler ? 1 : 0);
+
+        // Treat any URLs still in-flight (drain window expired) as still
+        // pending so a mid-request pause doesn't drop the page that was
+        // being crawled when we stopped.
         for (const url of this.inFlightUrls) {
             const key = this.normalizeUrl(url);
             if (!this.pendingRequests.has(key) && !this.visitedUrls.has(key)) {
@@ -749,7 +936,7 @@ export class SiteDiscovery extends EventEmitter {
 
         this.emit("session_paused", {
             type: "session_paused",
-            data: { stats: this.stats },
+            data: { stats: this.stats, ...(options.reason ? { reason: options.reason } : {}) },
             timestamp: Date.now(),
         });
 
@@ -780,6 +967,26 @@ export class SiteDiscovery extends EventEmitter {
         this.stats.pagesDiscovered = activeSession.pagesDiscovered;
         this.stats.linksFound = activeSession.linksFound;
         this.stats.startedAt = activeSession.startedAt;
+
+        // Rehydrate `visitedUrls` from what's already persisted so a resumed
+        // crawl (whether from an explicit pause or from `failStaleSessions`
+        // recovering a crashed `running` session) doesn't re-crawl pages it
+        // already has snapshots for. This is a fresh process/instance —
+        // the in-memory set from the crashed run is gone — so without this
+        // the queue-driven re-crawl would duplicate every already-saved page.
+        //
+        // Skipped on the purge path: a purge resume (post-auth handoff)
+        // deliberately restarts from `startUrl` to re-crawl the now-unlocked
+        // link graph, and every already-saved page must be *revisited* so the
+        // existing-page refresh branch in `handleRequest` can replace its
+        // stale pre-login snapshot. Seeding `visitedUrls` here would make the
+        // handler skip the start URL immediately and end the resume with
+        // zero pages crawled.
+        if (!this.options.purgeQueueOnResume) {
+            for (const normalizedUrl of this.siteDb.getAllNormalizedUrls()) {
+                this.visitedUrls.add(normalizedUrl);
+            }
+        }
 
         // When the caller asked us to start fresh (typical after a real
         // auth handoff: the post-login DOM exposes a totally different
@@ -1083,7 +1290,9 @@ export class SiteDiscovery extends EventEmitter {
                 // Pass blockedAtUrl into pause so it is re-inserted into
                 // pendingRequests *before* queue_json is serialized — otherwise
                 // the committed delete below would leave it out of the snapshot.
-                await this.pause({ blockedAtUrl: url });
+                // calledFromHandler: true — this call is itself one of the
+                // crawler's currently-running tasks; see `pause()` doc.
+                await this.pause({ blockedAtUrl: url, calledFromHandler: true });
                 committed = true;
                 return;
             }
@@ -1203,24 +1412,28 @@ export class SiteDiscovery extends EventEmitter {
                     lastVisitedAt: now,
                     visitCount: 1,
                 });
-
-                this.stats.pagesDiscovered++;
-
-                // Confirms the loaded storage state actually unlocked the
-                // app — gates the "downgrade further auth blockers to
-                // skip" behavior above.
-                if (this.playwrightStorageState) {
-                    this.hasSeenAuthenticatedSuccess = true;
-                }
-
-                this.emit("page_discovered", {
-                    type: "page_discovered",
-                    data: {
-                        page: { url: saveUrl, title, depth },
-                    },
-                    timestamp: now,
-                });
             }
+
+            // `pagesDiscovered` is per crawl session, not the number of new DB
+            // rows. A repeat crawl that successfully refreshes an existing page
+            // must count as progress; otherwise a fully cached site ends with a
+            // false "No pages discovered" failure.
+            this.stats.pagesDiscovered++;
+
+            // Confirms the loaded storage state actually unlocked the app —
+            // gates the "downgrade further auth blockers to skip" behavior.
+            if (this.playwrightStorageState) {
+                this.hasSeenAuthenticatedSuccess = true;
+            }
+
+            this.emit("page_discovered", {
+                type: "page_discovered",
+                data: {
+                    page: { url: saveUrl, title, depth },
+                    refreshed: Boolean(existingPage),
+                },
+                timestamp: now,
+            });
 
             // Mark the resolved URL as committed too so a same-page
             // redirect doesn't get re-crawled if a future link points at
@@ -1400,6 +1613,12 @@ export class SiteDiscovery extends EventEmitter {
                     ) {
                         return true;
                     }
+                    const pathWithoutQuery = v.split(/[?#]/, 1)[0] ?? v;
+                    if (
+                        /^[A-Za-z0-9._~-]+\.(?:html?|xhtml|php|aspx?|jsp)$/i.test(pathWithoutQuery)
+                    ) {
+                        return true;
+                    }
                     return /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]*)*$/.test(v) && v.includes("/");
                 };
 
@@ -1573,6 +1792,11 @@ export class SiteDiscovery extends EventEmitter {
                 .map(([reason, count]) => (count > 1 ? `${reason} (×${count})` : reason))
                 .join("; ");
             parts.push(`${this.failedRequests.length} request(s) failed: ${summary}.`);
+            const samples = this.failedRequests
+                .slice(0, 3)
+                .map((failure) => `${failure.url} — ${failure.reason}`)
+                .join("; ");
+            parts.push(`Failed request samples: ${samples}.`);
         }
 
         if (this.stats.authBlockersFound > 0) {
@@ -1621,7 +1845,7 @@ export class SiteDiscovery extends EventEmitter {
             );
         } else if (this.failedRequests.length === 0 && this.stats.authBlockersFound === 0) {
             parts.push(
-                "Either the URL didn't return HTML, the page rendered nothing the crawler could index, or the site detected the headless browser. Try running `raiken auth --url <startUrl>` first to confirm the page is reachable, or test the URL manually.",
+                `The request handler ran, but no page record was committed (0 navigation failures, 0 auth blockers). This points to content capture or persistence rather than basic reachability. In the interactive terminal, run \`/goto ${this.options.startUrl}\` followed by \`/snapshot\`: if a DOM appears, retry discovery and report the output; if it does not, the page is empty, non-HTML, or blocking Chromium.`,
             );
         } else if (this.failedRequests.some((f) => /timeout|net::|closed/i.test(f.reason))) {
             parts.push(
@@ -1714,8 +1938,27 @@ export class SiteDiscovery extends EventEmitter {
             this.siteDb.updateSession(this.sessionId, {
                 queueJson: JSON.stringify(serialized),
             });
-        } catch {
-            // Ignore queue persistence errors
+        } catch (err) {
+            // A checkpoint write failing (locked/corrupt DB, full disk,
+            // non-serializable userData) doesn't stop the crawl — pages
+            // already discovered are unaffected — but it silently breaks
+            // resumability: a later `--continue` would find a stale or
+            // missing queue and re-crawl from scratch, or lose everything
+            // on a hard kill. Warn once so it's visible instead of a mystery.
+            if (!this.checkpointFailureWarned) {
+                this.checkpointFailureWarned = true;
+                this.emit("warning", {
+                    type: "warning",
+                    data: {
+                        code: "checkpoint_failed",
+                        url: this.options.startUrl,
+                        message: `Failed to checkpoint discovery queue; resuming after an interruption may lose unvisited pages: ${
+                            err instanceof Error ? err.message : String(err)
+                        }`,
+                    },
+                    timestamp: Date.now(),
+                });
+            }
         }
     }
 
@@ -1733,6 +1976,18 @@ export class SiteDiscovery extends EventEmitter {
      */
     async close(): Promise<void> {
         this.disarmWallClockTimer();
+        this.disarmCheckpointTimer();
+        if (activeProcessWideCrawl === this) {
+            activeProcessWideCrawl = null;
+        }
+        if (this.discoveryLock) {
+            const lock = this.discoveryLock;
+            this.discoveryLock = null;
+            await lock.release().catch(() => {
+                // Best-effort — the stale-mtime fallback in
+                // `project-lock.ts` still frees it eventually.
+            });
+        }
         if (this.crawler) {
             try {
                 await this.crawler.teardown();
@@ -1757,16 +2012,29 @@ export class SiteDiscovery extends EventEmitter {
         // queue name — the name alone prevents collisions across runs,
         // but the drop releases memory once the run is done.
         if (this.requestQueue) {
-            try {
-                await this.requestQueue.drop();
-            } catch {
-                // Best-effort: dropping a queue that was never fully
-                // initialized (e.g. SiteDiscovery threw before
-                // RequestQueue.open completed) raises an unrelated
-                // error inside Crawlee. Ignored — the unique queue
-                // name already guarantees the next run is clean.
-            }
+            const queueToDrop = this.requestQueue;
             this.requestQueue = null;
+            // Deferred, best-effort drop rather than an immediate awaited
+            // one. If `close()` runs right after a blocker-triggered pause
+            // (the request handler that detected the blocker calls
+            // `pause()` on itself), Crawlee's own bookkeeping for that
+            // request — `markRequestHandled`, internally retried — can
+            // still be unwinding its call stack against this queue even
+            // though `crawler.run()` has already resolved (`abort()`
+            // resolves it immediately, before the calling task returns).
+            // Dropping synchronously here would occasionally race that
+            // straggling call and log a spurious (harmless, but alarming)
+            // "queue does not exist" error. A short delay gives it room to
+            // finish first; the unique per-instance queue name already
+            // guarantees no collision with a subsequent run either way.
+            setTimeout(() => {
+                void queueToDrop.drop().catch(() => {
+                    // Best-effort: dropping a queue that was never fully
+                    // initialized (e.g. SiteDiscovery threw before
+                    // RequestQueue.open completed) raises an unrelated
+                    // error inside Crawlee. Ignored.
+                });
+            }, 2_000).unref?.();
         }
         this.db.close();
     }

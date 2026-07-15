@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractUrl, guessIntent, matchRoutes } from "./plan-heuristics";
+import { extractUrl, guessIntent, matchRoutes } from "../plan-heuristics";
 
 describe("plan heuristics", () => {
     it("guesses generate / explore / explain intents", () => {

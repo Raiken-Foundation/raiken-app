@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createEventStream, nowTs } from "./events";
+import { createEventStream, nowTs } from "../events";
 
 describe("event stream", () => {
     it("emits NDJSON lines when enabled", () => {

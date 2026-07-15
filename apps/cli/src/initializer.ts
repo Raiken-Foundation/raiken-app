@@ -2,15 +2,43 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { confirm, input, select } from "@inquirer/prompts";
-import { detectDevServerPort } from "@raiken/core";
+import { type AIProviderId, detectDevServerPort, listProviders } from "@raiken/core";
 import { createConfig } from "@raiken/shared";
 import chalk from "chalk";
 import {
     detectProject,
+    type PackageManager,
     type ProjectInfo,
     type ProjectType,
     type TestFramework,
 } from "./project-detector";
+
+/**
+ * Which AI provider (if any) has a usable key sitting in the environment
+ * already. `raiken.config.json` always defaulted `ai.provider` to
+ * `"openrouter"` regardless of what was actually set — so a user with only
+ * `ANTHROPIC_API_KEY` in their shell would run `init`, get a config that
+ * checks for `OPENROUTER_API_KEY`, and see "no AI key configured" even
+ * though they have a perfectly usable key for a different provider. Checked
+ * in `listProviders()` order, which puts `openrouter` (Raiken's own
+ * default) first — so if both are set, the default provider wins and we
+ * don't switch out from under an intentional choice.
+ */
+export function detectAIProviderFromEnv(): { provider: AIProviderId; envVar: string } | null {
+    for (const provider of listProviders()) {
+        // "custom" requires a user-supplied baseURL we have no way to infer
+        // (its default is ""); auto-selecting it from the generic
+        // AI_API_KEY fallback would produce a config that can't actually
+        // reach anything, which is worse than leaving it on openrouter.
+        if (provider.id === "custom") continue;
+        for (const envVar of provider.envVars) {
+            if (process.env[envVar]?.trim()) {
+                return { provider: provider.id, envVar };
+            }
+        }
+    }
+    return null;
+}
 
 interface UserPreferences {
     projectType: ProjectType;
@@ -298,8 +326,26 @@ export async function initializeProject(
         await createTestResultsDirectory(projectPath);
         await createRaikenConfig(projectPath, finalProjectInfo, force);
 
+        // Tracks whether `@playwright/test` is actually importable, updated
+        // below if we install it — `finalProjectInfo.hasPlaywrightPackage`
+        // is a point-in-time snapshot from before init ran anything.
+        let playwrightPackageReady = finalProjectInfo.hasPlaywrightPackage;
+
         if (preferences.testFramework === "playwright") {
             await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
+
+            // Pre-fix: init would happily write playwright.config.ts *and*
+            // an example test importing '@playwright/test' without ever
+            // installing the package — `npx playwright test` (and the
+            // agent's own test runs) would fail on
+            // "Cannot find module '@playwright/test'" with no indication
+            // why, since everything else about setup looked complete.
+            if (!playwrightPackageReady) {
+                playwrightPackageReady = await installPlaywrightPackage(
+                    projectPath,
+                    finalProjectInfo,
+                );
+            }
         } else if (preferences.testFramework !== "none") {
             console.log(chalk.yellow(`⚠ Manual setup required for ${preferences.testFramework}`));
             console.log(
@@ -316,7 +362,7 @@ export async function initializeProject(
 
         // Step 11: Install Playwright browsers (if requested)
         if (preferences.installPlaywright) {
-            await installPlaywrightBrowsers(projectPath, finalProjectInfo);
+            await installPlaywrightBrowsers(projectPath, playwrightPackageReady);
         }
 
         // Success message
@@ -476,10 +522,29 @@ async function createRaikenConfig(
 ): Promise<void> {
     const configPath = path.join(projectPath, "raiken.config.json");
 
-    // Use shared config with project-specific overrides
+    // `createConfig` defaults `ai.provider` to "openrouter" unconditionally.
+    // If the user only has a *different* provider's key in their
+    // environment (e.g. ANTHROPIC_API_KEY, no OPENROUTER_API_KEY), writing
+    // that default means `resolveAIConfig` checks the wrong env var forever
+    // and every status check reports "missing key" despite a working key
+    // sitting right there. Detect it up front and bake the matching
+    // provider (+ its default model/baseURL) into the generated config so
+    // it "just works" the moment `init` finishes.
+    const detected = detectAIProviderFromEnv();
+    const provider = detected ? listProviders().find((p) => p.id === detected.provider) : null;
+
     const config = createConfig({
         projectType: projectInfo.type,
         testDirectory: projectInfo.testDir,
+        ...(provider
+            ? {
+                  ai: {
+                      provider: provider.id,
+                      model: provider.defaultModel,
+                      baseURL: provider.defaultBaseURL || undefined,
+                  },
+              }
+            : {}),
     });
 
     try {
@@ -496,6 +561,22 @@ async function createRaikenConfig(
 
     await fs.writeFile(configPath, JSON.stringify(config, null, 2));
     console.log(chalk.green("✓ Created raiken.config.json"));
+
+    if (detected && provider) {
+        console.log(
+            chalk.green(`✓ Found ${detected.envVar} — defaulting to ${provider.label}`) +
+                chalk.gray(` (change anytime in the dashboard's Settings view)`),
+        );
+    } else {
+        console.log(
+            chalk.yellow("⚠ No AI provider key found in your environment.") +
+                chalk.gray(
+                    `\n   Set OPENROUTER_API_KEY (or another provider's key — see raiken.config.json's ` +
+                        `"ai" section) before generating tests,\n   or add it later from the dashboard's ` +
+                        `Settings view.`,
+                ),
+        );
+    }
 }
 
 async function setupPlaywrightConfig(
@@ -508,8 +589,19 @@ async function setupPlaywrightConfig(
     // Prefer a port discovered from the project's actual config files
     // (vite.config.ts → server.port, angular.json → architect.serve.options.port,
     // package.json scripts → --port flag). Only fall back to the static
-    // framework default if nothing is configured.
+    // framework default if nothing is configured. `webServer.port` always
+    // uses this — it's what Playwright polls to know the *local* dev
+    // server is ready, so it has to stay a real local port regardless of
+    // what `use.baseURL` displays.
     const detectedPort = await detectDevServerPort(projectPath, getDefaultPort(projectInfo.type));
+
+    // If we're about to overwrite an existing config (--force), keep its
+    // baseURL rather than clobbering a deliberately-set value (e.g. a
+    // staging URL) with the freshly auto-detected dev-server port. Only
+    // relevant on the overwrite path — when the config doesn't exist yet
+    // there's nothing to preserve.
+    const baseURL =
+        projectInfo.existingPlaywrightConfig?.baseURL ?? `http://localhost:${detectedPort}`;
 
     const config = `import { defineConfig, devices } from '@playwright/test';
 
@@ -522,7 +614,7 @@ export default defineConfig({
   reporter: 'html',
   preserveOutput: 'always',
   use: {
-    baseURL: 'http://localhost:${detectedPort}',
+    baseURL: '${baseURL}',
     trace: 'on-first-retry',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -751,14 +843,82 @@ function getDevCommand(projectInfo: ProjectInfo): string {
     return `${runCommand} dev`;
 }
 
-async function installPlaywrightBrowsers(
+/**
+ * Package-manager install command for `@playwright/test` as a dev
+ * dependency, per manager. `npm`/`yarn`/`pnpm`/`bun` all support `-D`.
+ */
+export function getPlaywrightInstallCommand(manager: PackageManager): {
+    cmd: string;
+    args: string[];
+} {
+    switch (manager) {
+        case "yarn":
+            return { cmd: "yarn", args: ["add", "-D", "@playwright/test"] };
+        case "pnpm":
+            return { cmd: "pnpm", args: ["add", "-D", "@playwright/test"] };
+        case "bun":
+            return { cmd: "bun", args: ["add", "-d", "@playwright/test"] };
+        default:
+            return { cmd: "npm", args: ["install", "-D", "@playwright/test"] };
+    }
+}
+
+/**
+ * Install `@playwright/test` itself (not the browser binaries — see
+ * `installPlaywrightBrowsers`). Returns whether the package is usable
+ * afterward, so the caller can decide whether it's safe to proceed with
+ * browser installation and example-test generation.
+ */
+async function installPlaywrightPackage(
     projectPath: string,
     projectInfo: ProjectInfo,
-): Promise<void> {
-    // Only install browsers if Playwright is already a dependency
-    if (!projectInfo.hasPlaywright) {
+): Promise<boolean> {
+    const { cmd, args } = getPlaywrightInstallCommand(projectInfo.packageManager);
+    console.log(chalk.blue(`Installing @playwright/test (${cmd} ${args.join(" ")})...`));
+
+    try {
+        await Promise.race([
+            new Promise<void>((resolve, reject) => {
+                const child = spawn(cmd, args, { cwd: projectPath, stdio: "inherit" });
+                child.on("close", (code: number) => {
+                    if (code === 0) {
+                        console.log(chalk.green("✓ Installed @playwright/test"));
+                        resolve();
+                    } else {
+                        reject(new Error(`${cmd} exited with code ${code}`));
+                    }
+                });
+                child.on("error", (error: Error) => {
+                    reject(new Error(`Failed to start ${cmd}: ${error.message}`));
+                });
+            }),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("@playwright/test install timed out")), 120000),
+            ),
+        ]);
+        return true;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        console.log(chalk.yellow(`⚠ Could not install @playwright/test automatically: ${message}`));
         console.log(
-            chalk.yellow("⚠ Playwright not detected as dependency, skipping browser installation"),
+            chalk.gray(`   Install it manually: ${cmd} ${args.join(" ")}\n`) +
+                chalk.gray("   Tests won't run until it's installed."),
+        );
+        return false;
+    }
+}
+
+async function installPlaywrightBrowsers(
+    projectPath: string,
+    playwrightPackageReady: boolean,
+): Promise<void> {
+    // Browser binaries are useless without the test runner package itself
+    // — and `npx playwright install` on a project with no Playwright
+    // dependency at all tends to just fetch/run the global CLI, which is
+    // more confusing than helpful here.
+    if (!playwrightPackageReady) {
+        console.log(
+            chalk.yellow("⚠ @playwright/test isn't installed — skipping browser installation"),
         );
         return;
     }

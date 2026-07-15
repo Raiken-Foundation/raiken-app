@@ -23,7 +23,24 @@ export interface ProjectInfo {
     packageManager: PackageManager;
     testDir: string;
     testFramework: TestFramework;
+    /**
+     * True if Playwright looks set up at all — either the npm package is a
+     * dependency OR a `playwright.config.*` file exists. Used for framework
+     * detection and "probably already installed" defaults; NOT sufficient
+     * to assume `npx playwright test` will actually run (see
+     * `hasPlaywrightPackage`).
+     */
     hasPlaywright: boolean;
+    /**
+     * True only if `@playwright/test` (or the legacy `playwright` package)
+     * is an actual dependency. A project can have `hasPlaywright: true`
+     * (a config file exists) while this is `false` — e.g. `node_modules`
+     * was wiped, or the config was committed before `npm install` ever
+     * ran. `raiken init` uses this specifically to decide whether it needs
+     * to install the package before generating an example test that
+     * imports it.
+     */
+    hasPlaywrightPackage: boolean;
     hasJest: boolean;
     hasVitest: boolean;
     hasCypress: boolean;
@@ -32,6 +49,15 @@ export interface ProjectInfo {
     devDependencies: Record<string, string>;
     rootDir: string;
     isMonorepo: boolean;
+    /**
+     * Best-effort `testDir`/`baseURL` scraped from an existing
+     * `playwright.config.*`, if one exists. When `testDir` is present,
+     * `detectProject` uses it instead of the static per-framework guess —
+     * otherwise `raiken.config.json`'s `testDirectory` (which the agent
+     * uses for every save/read of a test file) can silently diverge from
+     * where Playwright itself actually looks.
+     */
+    existingPlaywrightConfig: { testDir?: string; baseURL?: string } | null;
 }
 
 // ============================================================================
@@ -58,19 +84,20 @@ export async function detectProject(projectPath: string): Promise<ProjectInfo> {
     // Detect package manager
     const packageManager = await detectPackageManager(projectPath);
 
-    // Get default test directory
-    const testDir = getDefaultTestDirectory(projectType);
-
     // Detect test frameworks from dependencies
-    let hasPlaywright = !!(allDeps.playwright || allDeps["@playwright/test"]);
+    const hasPlaywrightPackage = !!(allDeps.playwright || allDeps["@playwright/test"]);
     const hasJest = !!(allDeps.jest || allDeps["@types/jest"]);
     const hasVitest = !!allDeps.vitest;
     const hasCypress = !!allDeps.cypress;
 
     // Also check for config files (even if package not installed)
-    if (!hasPlaywright) {
-        hasPlaywright = await hasPlaywrightConfig(projectPath);
-    }
+    const existingPlaywrightConfig = await detectExistingPlaywrightConfig(projectPath);
+    const hasPlaywright = hasPlaywrightPackage || existingPlaywrightConfig !== null;
+
+    // Prefer the real testDir from an existing playwright.config.* over the
+    // static per-framework guess — otherwise raiken.config.json's
+    // testDirectory can point somewhere Playwright itself doesn't.
+    const testDir = existingPlaywrightConfig?.testDir ?? getDefaultTestDirectory(projectType);
 
     const testFramework = detectTestFramework({
         hasPlaywright,
@@ -86,6 +113,7 @@ export async function detectProject(projectPath: string): Promise<ProjectInfo> {
         testDir,
         testFramework,
         hasPlaywright,
+        hasPlaywrightPackage,
         hasJest,
         hasVitest,
         hasCypress,
@@ -94,6 +122,7 @@ export async function detectProject(projectPath: string): Promise<ProjectInfo> {
         devDependencies,
         rootDir: projectPath,
         isMonorepo,
+        existingPlaywrightConfig,
     };
 }
 
@@ -171,25 +200,51 @@ function detectTestFramework(frameworks: {
     return "none";
 }
 
-async function hasPlaywrightConfig(projectPath: string): Promise<boolean> {
-    // Check for Playwright config files
-    const configFiles = [
-        "playwright.config.ts",
-        "playwright.config.js",
-        "playwright.config.mjs",
-        "playwright.config.cjs",
-    ];
+const PLAYWRIGHT_CONFIG_FILENAMES = [
+    "playwright.config.ts",
+    "playwright.config.js",
+    "playwright.config.mjs",
+    "playwright.config.cjs",
+];
 
-    for (const file of configFiles) {
+/**
+ * Best-effort scrape of `testDir`/`use.baseURL` out of an existing
+ * `playwright.config.*`, or `null` if none of the standard filenames exist.
+ *
+ * We can't safely `import()`/`require()` the file (it may pull in
+ * workspace-only or ESM-only packages that fail outside the project's own
+ * build), so — same tactic as `detectDevServerPort`'s Vite-config reader —
+ * this uses a forgiving regex against the raw source instead of executing
+ * it. Returns `{}` (config found, nothing extractable) rather than `null`
+ * when the file exists but doesn't match the expected shape, so callers can
+ * still tell "Playwright is already set up here" from "no config at all".
+ */
+async function detectExistingPlaywrightConfig(
+    projectPath: string,
+): Promise<{ testDir?: string; baseURL?: string } | null> {
+    for (const file of PLAYWRIGHT_CONFIG_FILENAMES) {
+        let content: string;
         try {
-            await fs.access(path.join(projectPath, file));
-            return true;
+            content = await fs.readFile(path.join(projectPath, file), "utf-8");
         } catch {
-            // Continue checking
+            continue;
         }
+
+        const testDirMatch = content.match(/testDir\s*:\s*['"]([^'"]+)['"]/);
+        // `use: { ... baseURL: '...' ... }` — same nested-block approach as
+        // detectViteConfigPort's `server: { ... }` scan.
+        const useBlock = content.match(/use\s*:\s*\{([\s\S]*?)\n\s*\}/);
+        const baseURLMatch = useBlock?.[1]?.match(/baseURL\s*:\s*['"]([^'"]+)['"]/);
+
+        const testDir = testDirMatch
+            ? testDirMatch[1].replace(/^\.\//, "").replace(/\/$/, "")
+            : undefined;
+        const baseURL = baseURLMatch?.[1];
+
+        return { ...(testDir ? { testDir } : {}), ...(baseURL ? { baseURL } : {}) };
     }
 
-    return false;
+    return null;
 }
 
 async function detectPackageManager(projectPath: string): Promise<PackageManager> {

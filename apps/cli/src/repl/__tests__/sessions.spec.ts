@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { InputQueue } from "./queue";
+import { InputQueue } from "../queue";
 import {
     listSessions,
     loadLiveHistory,
@@ -10,7 +10,7 @@ import {
     resolveResumeTarget,
     saveLiveHistory,
     saveSession,
-} from "./sessions";
+} from "../sessions";
 
 describe("InputQueue", () => {
     it("enqueues and drains in order", () => {

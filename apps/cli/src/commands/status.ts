@@ -69,9 +69,24 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
     console.log(accent("\n  AI"));
     row("Provider", providerLabel);
     row("Model", ai.model);
+    const providerDef = getProvider(ai.provider);
     row(
         "API key",
-        ai.apiKey ? chalk.green("configured") : chalk.yellow("missing — see `raiken init`"),
+        ai.apiKey
+            ? chalk.green(`configured (${ai.apiKeySource})`)
+            : providerDef.envVars.length === 0
+              ? // e.g. Ollama — a local, unauthenticated server. Reporting
+                // "missing" here would be a false alarm.
+                chalk.gray("not required for this provider")
+              : // `raiken init` never asks for or writes an API key, so
+                // pointing there was a dead end — the two places that
+                // actually work are an env var (checked automatically) or
+                // the dashboard's Settings view (writes ai.apiKey to
+                // raiken.config.json).
+                chalk.yellow(
+                    `missing — set ${providerDef.envVars[0]} or configure it in the ` +
+                        "dashboard's Settings view",
+                ),
     );
 
     console.log(accent("\n  Code graph"));

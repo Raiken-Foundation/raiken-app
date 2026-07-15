@@ -65,7 +65,8 @@ export function splitHITL(
 /**
  * Render a live tool-call line so the user sees the agent working the DOM.
  * Written to `stderr` so it's visible interactively but never mixed into
- * `stdout` (which carries the agent's actual answer for piping).
+ * `stdout` (which carries the agent's actual answer for piping). Styled to
+ * match the interactive REPL's `⏺` tool-call bullets.
  */
 export function renderToolCall(toolName: string, args: unknown): void {
     const a = (args ?? {}) as Record<string, unknown>;
@@ -78,7 +79,10 @@ export function renderToolCall(toolName: string, args: unknown): void {
         (typeof a.filePath === "string" && a.filePath) ||
         "";
     const value = typeof a.value === "string" ? dim(` = "${a.value}"`) : "";
-    process.stderr.write(dim(`   ⚙ ${toolName}${detail ? ` ${detail}` : ""}${value}\n`));
+    const bullet = chalk.hex("#a78bfa")("⏺");
+    process.stderr.write(
+        `  ${bullet} ${chalk.bold.white(toolName)}${detail ? `  ${dim(detail)}` : ""}${value}\n`,
+    );
 }
 
 /**

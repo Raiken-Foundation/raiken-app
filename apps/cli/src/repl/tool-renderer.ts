@@ -7,6 +7,10 @@ import { dim } from "../agent-stream";
  *
  * Progress events still print immediately. Tool calls buffer for a short
  * window and flush as a single line when the tool name changes or the turn ends.
+ *
+ * Rendering mirrors Claude Code's transcript: a bright `⏺` bullet + bold tool
+ * name for the call itself, with an indented `⎿` line underneath for the
+ * progress note that belongs to it (when one follows).
  */
 export class ToolCallRenderer {
     private lastTool: string | null = null;
@@ -26,7 +30,7 @@ export class ToolCallRenderer {
         const detail = summarizeArgs(args);
         if (this.verbose) {
             this.flush();
-            process.stderr.write(dim(`   ⚙ ${toolName}${detail ? ` ${detail}` : ""}\n`));
+            process.stderr.write(callLine(toolName, detail));
             return;
         }
 
@@ -44,7 +48,7 @@ export class ToolCallRenderer {
 
     onProgress(label: string, detail?: string | null): void {
         this.flush();
-        process.stderr.write(dim(`   … ${label}${detail ? ` ${detail}` : ""}\n`));
+        process.stderr.write(dim(`  ⎿ ${label}${detail ? ` ${detail}` : ""}\n`));
     }
 
     /** Flush any buffered tool group. Call at end of turn / before HITL. */
@@ -62,13 +66,18 @@ export class ToolCallRenderer {
         this.lastDetail = "";
 
         if (n === 1) {
-            process.stderr.write(dim(`   ⚙ ${name}${detail ? ` ${detail}` : ""}\n`));
+            process.stderr.write(callLine(name, detail));
         } else {
-            process.stderr.write(
-                dim(`   ⚙ ${name} ×${n}${detail ? `  ${chalk.dim(detail)}` : ""}\n`),
-            );
+            process.stderr.write(callLine(name, detail, n));
         }
     }
+}
+
+/** `⏺ toolName  detail` (or `⏺ toolName ×N  detail` when collapsed). */
+function callLine(name: string, detail: string, count = 1): string {
+    const bullet = chalk.hex("#a78bfa")("⏺");
+    const label = chalk.bold.white(name) + (count > 1 ? chalk.bold.white(` ×${count}`) : "");
+    return `  ${bullet} ${label}${detail ? `  ${dim(detail)}` : ""}\n`;
 }
 
 function summarizeArgs(args: unknown): string {

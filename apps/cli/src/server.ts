@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import fastifyStatic from "@fastify/static";
-import { BrowserSession, ProjectContext, runOrchestrator } from "@raiken/core";
+import {
+    BrowserSession,
+    humanizeToolCall,
+    ProjectContext,
+    runOrchestrator,
+    type ToolResult,
+} from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
@@ -18,7 +24,20 @@ export async function startServer(port = 7101) {
 
     // Initialize the code graph, ProjectContext, and AgentMemory. Shared with
     // `raiken chat` so both surfaces give the agent the same understanding.
-    await bootstrapProject(projectPath);
+    // A failure here degrades code understanding but must never take the
+    // server down — other dashboard features (discovery, running existing
+    // tests, settings) don't depend on it.
+    const bootstrapResult = await bootstrapProject(projectPath);
+    if (!bootstrapResult.ok) {
+        console.error(
+            "\n  ⚠ Project indexing failed to start — code search, impact analysis, and AI context " +
+                "will be degraded until this is fixed. See the error above for details.\n",
+        );
+    } else if (bootstrapResult.warnings.length > 0) {
+        console.warn(
+            `\n  ⚠ Project indexing completed with ${bootstrapResult.warnings.length} warning(s) — some capabilities may be degraded.\n`,
+        );
+    }
 
     await app.register(fastifyTRPCPlugin, {
         prefix: "/api/trpc",
@@ -109,6 +128,17 @@ export async function startServer(port = 7101) {
             };
             reply.raw.on("close", onClientClose);
 
+            // Structured `{ type: "tool", ... }` SSE events, alongside (not
+            // instead of) the humanized `<!--EVENT:...-->` markers already
+            // embedded in the text stream — a richer signal for dashboard UI
+            // that wants tool name/success/message without scraping text.
+            // Guarded the same way as the `chunk`/`done` writes below since
+            // these callbacks can fire after the client has disconnected.
+            const writeToolEvent = (event: Record<string, unknown>) => {
+                if (clientGone || reply.raw.writableEnded) return;
+                reply.raw.write(`data: ${JSON.stringify({ type: "tool", ...event })}\n\n`);
+            };
+
             try {
                 // Route through orchestrator (LLM decides what tools to call)
                 const stream = runOrchestrator({
@@ -118,6 +148,21 @@ export async function startServer(port = 7101) {
                     targetTestFile,
                     fileContext,
                     signal: abortController.signal,
+                    onToolCall: (toolName) => {
+                        writeToolEvent({
+                            phase: "call",
+                            name: toolName,
+                            label: humanizeToolCall(toolName),
+                        });
+                    },
+                    onToolResult: (toolName, result: ToolResult) => {
+                        writeToolEvent({
+                            phase: "result",
+                            name: toolName,
+                            success: result?.success ?? true,
+                            message: result?.message,
+                        });
+                    },
                 });
 
                 let hasData = false;

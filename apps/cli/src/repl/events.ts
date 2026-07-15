@@ -16,6 +16,8 @@ export type AgentStreamEvent =
           ok: boolean;
           response?: string;
           savedTest?: string | null;
+          /** Why a requested save didn't happen/succeed, when `ok` is false because of it. */
+          saveError?: string | null;
           run?: {
               success: boolean;
               passed: number;

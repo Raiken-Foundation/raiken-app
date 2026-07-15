@@ -8,6 +8,7 @@
 import { loadSiteKnowledge } from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim } from "../agent-stream";
+import { renderBox } from "./box";
 import { extractUrl, guessIntent, matchRoutes, type PlanIntent } from "./plan-heuristics";
 
 export interface PlanStep {
@@ -102,23 +103,24 @@ export async function buildAgentPlan(projectPath: string, prompt: string): Promi
 
 /** Print the plan card to the terminal. */
 export function renderPlan(plan: AgentPlan): void {
-    console.log(accent("\n  ┌─ Plan") + dim(`  ·  ${plan.intent}`));
-    console.log(dim("  │ ") + chalk.white(plan.summary));
+    const lines: string[] = [
+        `${accent("Plan")}  ${dim(`· ${plan.intent}`)}`,
+        "",
+        chalk.white(plan.summary),
+    ];
     for (const [i, step] of plan.steps.entries()) {
-        console.log(
-            dim("  │ ") +
-                chalk.white(`${i + 1}. ${step.label}`) +
+        lines.push(
+            chalk.white(`${i + 1}. ${step.label}`) +
                 (step.detail ? dim(`  ·  ${step.detail}`) : ""),
         );
     }
     if (plan.routes.length > 1) {
-        console.log(dim("  │ candidates:"));
-        for (const r of plan.routes.slice(0, 5)) {
-            console.log(dim(`  │   • ${r}`));
-        }
+        lines.push("", dim("candidates:"));
+        for (const r of plan.routes.slice(0, 5)) lines.push(dim(`  • ${r}`));
     }
-    for (const w of plan.warnings) {
-        console.log(dim("  │ ") + chalk.yellow(`⚠ ${w}`));
-    }
-    console.log(accent("  └─"));
+    if (plan.warnings.length > 0) lines.push("");
+    for (const w of plan.warnings) lines.push(chalk.yellow(`⚠ ${w}`));
+
+    console.log("");
+    console.log(renderBox(lines));
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CliExitError, cliExit, withThrowExit } from "./exit";
-import { ToolCallRenderer } from "./tool-renderer";
+import { CliExitError, cliExit, withThrowExit } from "../exit";
+import { ToolCallRenderer } from "../tool-renderer";
 
 describe("withThrowExit", () => {
     it("captures cliExit codes without killing the process", async () => {
@@ -32,6 +32,11 @@ describe("withThrowExit", () => {
     });
 });
 
+// Chalk emits ANSI codes when nx forces color output; strip them so the
+// assertions see the same text either way.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching the ANSI escape byte is the point
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
 describe("ToolCallRenderer", () => {
     let writes: string[];
     let originalWrite: typeof process.stderr.write;
@@ -55,7 +60,7 @@ describe("ToolCallRenderer", () => {
         r.onToolCall("click", { selector: "#b" });
         r.onToolCall("click", { selector: "#c" });
         r.flush();
-        expect(writes.join("")).toMatch(/click ×3/);
+        expect(stripAnsi(writes.join(""))).toMatch(/click ×3/);
     });
 
     it("flushes when the tool name changes", () => {
@@ -63,7 +68,7 @@ describe("ToolCallRenderer", () => {
         r.onToolCall("click", { selector: "#a" });
         r.onToolCall("fill", { selector: "#email", value: "x" });
         r.flush();
-        const out = writes.join("");
+        const out = stripAnsi(writes.join(""));
         expect(out).toMatch(/click/);
         expect(out).toMatch(/fill/);
     });
@@ -72,7 +77,7 @@ describe("ToolCallRenderer", () => {
         const r = new ToolCallRenderer();
         r.onToolCall("navigate", { url: "https://x" });
         r.onProgress("Exploring", "3/8");
-        expect(writes.join("")).toMatch(/navigate/);
-        expect(writes.join("")).toMatch(/Exploring 3\/8/);
+        expect(stripAnsi(writes.join(""))).toMatch(/navigate/);
+        expect(stripAnsi(writes.join(""))).toMatch(/Exploring 3\/8/);
     });
 });

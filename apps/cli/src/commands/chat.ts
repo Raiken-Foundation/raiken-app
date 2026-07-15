@@ -6,18 +6,41 @@ import chalk from "chalk";
 import ora from "ora";
 import { accent, dim, splitHITL } from "../agent-stream";
 import { bootstrapProject } from "../bootstrap";
+import { gatherAttentionItems, renderAttentionBanner } from "../repl/attention";
 import {
     continueBackgroundDiscover,
     getBackgroundDiscoverStatus,
     startBackgroundDiscover,
 } from "../repl/background-discover";
-import { slashCompleter } from "../repl/completer";
+import {
+    boxWidth,
+    promptBottomBorder,
+    promptPrefix,
+    promptTopBorder,
+    renderBox,
+} from "../repl/box";
+import {
+    booleanFlag,
+    type ParsedCommandArgs,
+    parseCommandArgs,
+    stringFlag,
+    stringFlags,
+} from "../repl/command-args";
+import {
+    matchSlashCommands,
+    resolveSlashCommand,
+    SLASH_COMMAND_REGISTRY,
+    type SlashCommandGroup,
+    slashCompleter,
+} from "../repl/completer";
 import { withThrowExit } from "../repl/exit";
+import { MarkdownStream } from "../repl/markdown";
 import {
     cyclePermissionMode,
     type PermissionMode,
     parsePermissionMode,
     permissionModeLabel,
+    permissionModeToAutonomyOverride,
     shouldAutoRun,
     shouldAutoSave,
 } from "../repl/permissions";
@@ -34,7 +57,9 @@ import {
     setCurrentSessionId,
 } from "../repl/sessions";
 import { printShellSummary, runShellCommand } from "../repl/shell";
+import { SlashMenuOverlay } from "../repl/slash-overlay";
 import { gatherStatusSnapshot, renderStatusStrip } from "../repl/status";
+import { startThinking } from "../repl/thinking";
 import { ToolCallRenderer } from "../repl/tool-renderer";
 
 const HISTORY_LIMIT = 200;
@@ -80,10 +105,34 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     // still matters to show — first-run indexing taking a moment — without
     // leaving anything behind once it's done.
     const boot = ora({ text: dim("Preparing project…"), color: "magenta" }).start();
+    let bootResult: Awaited<ReturnType<typeof bootstrapProject>>;
     try {
-        await bootstrapProject(projectPath, { verbose: false });
+        bootResult = await bootstrapProject(projectPath, { verbose: false });
     } finally {
         boot.stop();
+    }
+    if (!bootResult.ok) {
+        console.log(
+            chalk.yellow(
+                "  ⚠ Code understanding failed to initialize — search, impact analysis, and " +
+                    "context lookups will be empty this session (see error above).\n",
+            ),
+        );
+    }
+
+    // Anything left over from a previous session (paused discovery, an
+    // unresolved auth blocker, a missing AI key) used to only surface as a
+    // confusing failure mid-turn. Surface it once, up front, instead — and
+    // only fold in bootstrap's own non-fatal warnings when `ok` (the fatal
+    // case above is already its own loud, dedicated message).
+    try {
+        const attentionItems = await gatherAttentionItems(
+            projectPath,
+            bootResult.ok ? bootResult.warnings : [],
+        );
+        renderAttentionBanner(attentionItems);
+    } catch {
+        /* attention banner is best-effort — never blocks REPL startup */
     }
 
     const caller = appRouter.createCaller({ projectPath });
@@ -134,14 +183,16 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     let exitArmedUntil = 0;
     /** True while an agent turn is streaming — stdin lines go to the queue. */
     let turnActive = false;
+    /** True only while readline is collecting the main chat prompt. */
+    let readingUserInput = false;
     // Covers the silent gap between submitting a turn and the first token /
     // tool call / progress line — otherwise the prompt just looks frozen
     // while the orchestrator's first (often multi-second) classification
     // call is in flight. Cleared by the first thing that actually prints.
-    let thinkingSpinner: ReturnType<typeof ora> | null = null;
+    let thinking: ReturnType<typeof startThinking> | null = null;
     const stopThinking = (): void => {
-        thinkingSpinner?.stop();
-        thinkingSpinner = null;
+        thinking?.stop();
+        thinking = null;
     };
 
     const rl = readline.createInterface({
@@ -152,8 +203,68 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         completer: slashCompleter,
     });
 
+    let activeReadlinePrompt = "";
+    const slashOverlay = new SlashMenuOverlay(process.stdout);
+    let slashSyncScheduled = false;
+
+    const currentSlashOverlayState = () => ({
+        enabled: readingUserInput,
+        line: rl.line,
+        cursor: rl.cursor,
+        cursorRows: rl.getCursorPos().rows,
+        prompt: activeReadlinePrompt,
+    });
+
+    // Readline updates `rl.line` before this listener runs. Coalesce rapid
+    // keypresses, then keep the ephemeral menu synchronized with the complete
+    // command token (`/` → `/d` → `/do`), including backspace and history.
+    const handleKeypress = (_input: string, key: readline.Key): void => {
+        if (key.name === "return" || key.name === "enter" || (key.ctrl && key.name === "c")) {
+            return;
+        }
+        if (!readingUserInput || slashSyncScheduled) return;
+        slashSyncScheduled = true;
+        setImmediate(() => {
+            slashSyncScheduled = false;
+            slashOverlay.sync(currentSlashOverlayState());
+        });
+    };
+    const handleTerminalResize = (): void => {
+        if (readingUserInput) slashOverlay.sync(currentSlashOverlayState());
+    };
+    process.stdin.on("keypress", handleKeypress);
+    process.stdout.on("resize", handleTerminalResize);
+
     const ask = (query: string): Promise<string> =>
-        new Promise((resolve) => rl.question(query, resolve));
+        new Promise((resolve) => {
+            activeReadlinePrompt = query;
+            rl.question(query, (answer) => {
+                activeReadlinePrompt = "";
+                resolve(answer);
+            });
+        });
+
+    const createManualSaveWatcher = () => {
+        let settled = false;
+        let resolvePromise: () => void = () => undefined;
+        const promise = new Promise<void>((resolve) => {
+            resolvePromise = resolve;
+        });
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            rl.off("line", finish);
+            resolvePromise();
+        };
+        rl.once("line", finish);
+        return {
+            promise,
+            cancel: () => {
+                settled = true;
+                rl.off("line", finish);
+            },
+        };
+    };
 
     const persist = () => saveLiveHistory(projectPath, history);
 
@@ -190,6 +301,8 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
             /* already closed */
         }
         rl.close();
+        process.stdin.off("keypress", handleKeypress);
+        process.stdout.off("resize", handleTerminalResize);
         process.exit(0);
     };
 
@@ -200,6 +313,9 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
      *   3. Idle: arm exit (print hint); second Ctrl+C within 2s exits
      */
     const handleInterrupt = (): void => {
+        if (readingUserInput && slashOverlay.visible) {
+            slashOverlay.hide(currentSlashOverlayState());
+        }
         if (currentAbort) {
             stopThinking();
             currentAbort.abort();
@@ -270,19 +386,30 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
             console.log(dim(`  session: ${activeSessionName}`));
         }
 
+        const width = boxWidth();
+        console.log(promptTopBorder(width));
+
         const lines: string[] = [];
-        let prompt = accent("raiken › ");
-        for (;;) {
-            const raw = await ask(prompt);
-            if (closing) return null;
-            if (raw.endsWith("\\") && !raw.endsWith("\\\\")) {
-                lines.push(raw.slice(0, -1));
-                prompt = dim("     … ");
-                continue;
+        let prompt = promptPrefix();
+        readingUserInput = true;
+        slashOverlay.reset();
+        try {
+            for (;;) {
+                const raw = await ask(prompt);
+                slashOverlay.finish(prompt, raw);
+                if (closing) return null;
+                if (raw.endsWith("\\") && !raw.endsWith("\\\\")) {
+                    lines.push(raw.slice(0, -1));
+                    prompt = promptPrefix(true);
+                    continue;
+                }
+                lines.push(raw);
+                break;
             }
-            lines.push(raw);
-            break;
+        } finally {
+            readingUserInput = false;
         }
+        console.log(promptBottomBorder(width));
         return lines.join("\n").trim();
     };
 
@@ -339,7 +466,7 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
 
         if (shouldAutoSave(permissionMode)) {
             console.log(
-                accent(`\n  ┌─ Auto-saving`) +
+                `\n  ${accent("⏺")} ${chalk.bold.white("Auto-saving")}` +
                     dim(`  ${suggestedPath || "(no path)"}`) +
                     dim(`  ·  ${permissionModeLabel(permissionMode)}`),
             );
@@ -350,13 +477,21 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
             return;
         }
 
-        console.log(accent(`\n  ┌─ Save test?`) + dim(`  ${suggestedPath || "(no path)"}`));
-        for (const line of testCode.split("\n").slice(0, 8)) {
-            console.log(dim(`  │ `) + line);
-        }
-        if (testCode.split("\n").length > 8) console.log(dim("  │ ..."));
+        const codeLines = testCode.split("\n");
+        const preview = codeLines.slice(0, 8).map((l) => chalk.white(l));
+        if (codeLines.length > 8) preview.push(dim("..."));
+        console.log("");
+        console.log(
+            renderBox([
+                `${accent("Save test?")}  ${dim(suggestedPath || "(no path)")}`,
+                "",
+                ...preview,
+            ]),
+        );
 
-        const rawAnswer = await askCancelable(accent("  └─ [Y]es · [e]dit path · [r]un · [n]o › "));
+        const rawAnswer = await askCancelable(
+            `  ${accent("[Y]es · [e]dit path · [r]un · [n]o ›")} `,
+        );
         if (rawAnswer === null) return;
         const answer = rawAnswer.trim().toLowerCase();
         if (answer === "n" || answer === "no") {
@@ -373,6 +508,42 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
 
         const saved = await saveTestToDisk(testCode, suggestedPath);
         if (saved && alsoRun) await runSavedTest(saved);
+    };
+
+    /**
+     * Handle a `run_approval` pause (the test is already saved; the agent
+     * wants to run it but `autoRunTests` isn't on). Mirrors
+     * `handleSaveApproval` — this used to be entirely unhandled (the REPL
+     * captured the `run_approval` marker but never acted on it), so a run
+     * pause was a dead end: the turn just ended and the user had to notice
+     * and run `/test <path>` themselves.
+     */
+    const handleRunApproval = async (hitl: Record<string, unknown>): Promise<void> => {
+        const testFile = typeof hitl.testFile === "string" ? hitl.testFile : "";
+        const testName = typeof hitl.testName === "string" ? hitl.testName : testFile;
+        if (!testFile) return;
+
+        if (shouldAutoRun(permissionMode)) {
+            console.log(
+                `\n  ${accent("⏺")} ${chalk.bold.white("Auto-running")}` +
+                    dim(`  ${testFile}`) +
+                    dim(`  ·  ${permissionModeLabel(permissionMode)}`),
+            );
+            await runSavedTest(testFile);
+            return;
+        }
+
+        console.log("");
+        console.log(renderBox([`${accent("Run test?")}  ${dim(testFile)}`, "", dim(testName)]));
+
+        const rawAnswer = await askCancelable(`  ${accent("[Y]es · [n]o ›")} `);
+        if (rawAnswer === null) return;
+        const answer = rawAnswer.trim().toLowerCase();
+        if (answer === "n" || answer === "no") {
+            console.log(dim("  Skipped."));
+            return;
+        }
+        await runSavedTest(testFile);
     };
 
     const runAgentTurn = async (userText: string): Promise<void> => {
@@ -402,13 +573,19 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         let assistant = "";
         let pendingHITL: Record<string, unknown> | null = null;
         tools.setVerbose(verboseTools);
+        const md = new MarkdownStream();
 
-        thinkingSpinner = ora({ text: dim("Thinking…"), color: "magenta" }).start();
+        thinking = startThinking();
         try {
             const stream = runOrchestrator({
                 userPrompt: userText,
                 projectPath,
                 conversationHistory: priorHistory,
+                // Session-scoped only — never rewrites raiken.config.json — so
+                // `/mode` actually changes what the graph does instead of just
+                // relabeling the status strip while it keeps reading whatever
+                // autoSaveTests/autoRunTests happen to be on disk.
+                autonomyOverride: permissionModeToAutonomyOverride(permissionMode),
                 signal: abort.signal,
                 onToolCall: (name, args) => {
                     stopThinking();
@@ -429,11 +606,13 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                 if (text) {
                     stopThinking();
                     tools.flush();
-                    process.stdout.write(text);
+                    if (!assistant) console.log("");
+                    md.push(text);
                     assistant += text;
                 }
             }
             tools.flush();
+            md.end();
             if (!assistant.endsWith("\n")) process.stdout.write("\n");
         } catch (err) {
             stopThinking();
@@ -455,6 +634,8 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         persist();
         if (pendingHITL?.kind === "save_approval") {
             await handleSaveApproval(pendingHITL);
+        } else if (pendingHITL?.kind === "run_approval") {
+            await handleRunApproval(pendingHITL);
         }
     };
 
@@ -540,11 +721,15 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
 
     const handleSlash = async (line: string): Promise<void> => {
         const spaceIdx = line.indexOf(" ");
-        const cmd = (spaceIdx === -1 ? line.slice(1) : line.slice(1, spaceIdx)).toLowerCase();
+        const enteredCommand = (
+            spaceIdx === -1 ? line.slice(1) : line.slice(1, spaceIdx)
+        ).toLowerCase();
+        const cmd = resolveSlashCommand(enteredCommand)?.name ?? enteredCommand;
         const arg = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim();
+        const parsedArgs = parseCommandArgs(arg);
 
-        if (cmd === "" || cmd === "help" || cmd === "?") return printHelp();
-        if (cmd === "exit" || cmd === "quit") return void (await shutdown());
+        if (cmd === "" || cmd === "help") return printHelp();
+        if (cmd === "exit") return void (await shutdown());
 
         if (cmd === "mode" || cmd === "permissions") {
             if (arg) {
@@ -679,7 +864,8 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
 
         switch (cmd) {
             case "discover": {
-                if (arg === "status" || arg.startsWith("--status")) {
+                const action = parsedArgs.positionals[0]?.toLowerCase();
+                if (action === "status" || booleanFlag(parsedArgs, "status")) {
                     const st = getBackgroundDiscoverStatus();
                     if (st.status === "idle") {
                         const { discoverCommand } = await import("./discover");
@@ -690,7 +876,8 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                         console.log(
                             accent("\n  Background discover") +
                                 dim(
-                                    `  ·  ${st.status}  ·  ${st.pages}/${st.maxPages}  ·  ${st.startUrl}`,
+                                    `  ·  ${st.status}  ·  ${st.pages}/${st.maxPages} pages` +
+                                        `  ·  ${st.links} links  ·  ${st.startUrl}`,
                                 ),
                         );
                         if (st.currentUrl) console.log(dim(`  current: ${st.currentUrl}`));
@@ -701,15 +888,17 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                     }
                     return;
                 }
-                if (arg === "--continue" || arg === "continue") {
+                if (action === "continue" || booleanFlag(parsedArgs, "continue")) {
                     try {
-                        await continueBackgroundDiscover(projectPath);
+                        await continueBackgroundDiscover(projectPath, {
+                            skipAuth: booleanFlag(parsedArgs, "skipAuth"),
+                        });
                     } catch (err) {
                         console.log(chalk.red(`  ✗ ${err instanceof Error ? err.message : err}`));
                     }
                     return;
                 }
-                const url = arg.replace(/^--bg\s+/, "").trim();
+                const url = stringFlag(parsedArgs, "bg") ?? parsedArgs.positionals[0] ?? "";
                 if (!url) {
                     console.log(
                         chalk.red("  usage: /discover <url>") +
@@ -718,7 +907,24 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                     return;
                 }
                 try {
-                    await startBackgroundDiscover({ url, projectPath });
+                    if (booleanFlag(parsedArgs, "auth")) {
+                        const { authCommand } = await import("./auth");
+                        const authCode = await withThrowExit(() =>
+                            authCommand({ url, createManualSaveWatcher }),
+                        );
+                        if (authCode !== 0) {
+                            console.log(dim(`  (auth exited with code ${authCode})`));
+                            return;
+                        }
+                    }
+                    await startBackgroundDiscover({
+                        url,
+                        projectPath,
+                        maxPages: positiveIntegerFlag(parsedArgs, "maxPages"),
+                        maxDepth: positiveIntegerFlag(parsedArgs, "maxDepth"),
+                        timeout: positiveIntegerFlag(parsedArgs, "timeout"),
+                        skipAuth: booleanFlag(parsedArgs, "skipAuth"),
+                    });
                 } catch (err) {
                     console.log(chalk.red(`  ✗ ${err instanceof Error ? err.message : err}`));
                 }
@@ -726,38 +932,91 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
             }
             case "doctor": {
                 const { doctorCommand } = await import("./doctor");
-                await runParity("doctor", () => doctorCommand({}));
+                await runParity("doctor", () =>
+                    doctorCommand({
+                        dir: stringFlag(parsedArgs, "dir"),
+                        failOn: stringFlag(parsedArgs, "failOn"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "context": {
                 const { contextCommand } = await import("./context");
-                await runParity("context", () => contextCommand({}));
+                await runParity("context", () =>
+                    contextCommand({
+                        output: stringFlag(parsedArgs, "output"),
+                        maxRows: stringFlag(parsedArgs, "maxRows"),
+                        impact: !booleanFlag(parsedArgs, "noImpact"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "ci": {
                 const { ciCommand } = await import("./ci");
-                await runParity("ci", () => ciCommand({}));
+                await runParity("ci", () =>
+                    ciCommand({
+                        base: stringFlag(parsedArgs, "base"),
+                        head: stringFlag(parsedArgs, "head"),
+                        staged: booleanFlag(parsedArgs, "staged"),
+                        outputDir: stringFlag(parsedArgs, "outputDir"),
+                        format: stringFlag(parsedArgs, "format"),
+                        confidence: stringFlag(parsedArgs, "confidence"),
+                        maxTests: stringFlag(parsedArgs, "maxTests"),
+                        timeout: stringFlag(parsedArgs, "timeout"),
+                        skipRun: booleanFlag(parsedArgs, "skipRun"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "cover": {
-                if (!arg) return void console.log(chalk.red("  usage: /cover <target>"));
+                const target = parsedArgs.positionals.join(" ");
+                if (!target) return void console.log(chalk.red("  usage: /cover <target>"));
                 const { coverCommand } = await import("./cover");
-                await runParity("cover", () => coverCommand(arg, {}));
+                await runParity("cover", () =>
+                    coverCommand(target, {
+                        ticket: stringFlag(parsedArgs, "ticket", "t"),
+                        output: stringFlag(parsedArgs, "output", "o"),
+                        dir: stringFlag(parsedArgs, "dir"),
+                        dryRun: booleanFlag(parsedArgs, "dryRun"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "trace": {
                 const { traceCommand } = await import("./trace");
-                await runParity("trace", () => traceCommand(arg || undefined, {}));
+                await runParity("trace", () =>
+                    traceCommand(parsedArgs.positionals.join(" ") || undefined, {
+                        file: stringFlag(parsedArgs, "file", "f"),
+                        minConfidence: stringFlag(parsedArgs, "minConfidence"),
+                        limit: stringFlag(parsedArgs, "limit"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "sync": {
                 const { syncCommand } = await import("./sync");
-                await runParity("sync", () => syncCommand({}));
+                await runParity("sync", () =>
+                    syncCommand({ ticket: stringFlag(parsedArgs, "ticket", "t") }),
+                );
                 return;
             }
             case "auth": {
                 const { authCommand } = await import("./auth");
-                await runParity("auth", () => authCommand(arg ? { url: arg } : {}));
+                await runParity("auth", () =>
+                    authCommand({
+                        url: stringFlag(parsedArgs, "url") ?? parsedArgs.positionals[0],
+                        cookie: stringFlag(parsedArgs, "cookie"),
+                        domain: stringFlag(parsedArgs, "domain"),
+                        storage: stringFlags(parsedArgs, "storage"),
+                        fromStateFile: stringFlag(parsedArgs, "fromStateFile"),
+                        createManualSaveWatcher,
+                    }),
+                );
                 return;
             }
             case "tests": {
@@ -768,108 +1027,137 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                 return;
             }
             case "test": {
-                console.log(dim(`  Running tests${arg ? ` for ${arg}` : ""}...`));
-                const result = (await caller.runTests(arg ? { testFile: arg } : {})) as {
-                    success: boolean;
-                    stderr?: string;
-                    results?: {
-                        stats?: { expected?: number; unexpected?: number; skipped?: number };
-                    } | null;
-                };
-                const stats = result.results?.stats;
-                const passed = stats?.expected ?? 0;
-                const failed = stats?.unexpected ?? 0;
-                console.log(
-                    `  ${result.success ? chalk.green("✓ passed") : chalk.red("✗ failed")}` +
-                        dim(`  (${passed} passed, ${failed} failed)`),
+                const { testCommand } = await import("./test");
+                await runParity("test", () =>
+                    testCommand(parsedArgs.positionals[0], {
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
                 );
-                if (!result.success && result.stderr) {
-                    console.log(dim(result.stderr.split("\n").slice(0, 5).join("\n")));
-                }
                 return;
             }
             case "report": {
-                console.log(dim(`  Running tests${arg ? ` for ${arg}` : ""} and building report…`));
-                const run = (await caller.runTests(arg ? { testFile: arg } : {})) as {
-                    success: boolean;
-                    stdout?: string;
-                    stderr?: string;
-                    results?: unknown;
-                };
-                if (!run.results) {
-                    console.log(chalk.red("  ✗ No parseable report was produced."));
-                    if (run.stderr) console.log(dim(run.stderr.split("\n").slice(0, 5).join("\n")));
-                    return;
-                }
-                const rep = (await caller.generateTestReport({
-                    report: run.results,
-                    rawOutput: run.stdout,
-                    testFile: arg || undefined,
-                    formats: ["html", "json"],
-                })) as { htmlPath?: string; files: string[]; screenshotsEmbedded: number };
-                console.log(
-                    chalk.green(`  Report: ${rep.htmlPath ?? rep.files[0]}`) +
-                        dim(`  (${rep.screenshotsEmbedded} screenshot(s) embedded)`),
+                const { reportCommand } = await import("./report");
+                await runParity("report", () =>
+                    reportCommand(parsedArgs.positionals[0], {
+                        from: stringFlag(parsedArgs, "from"),
+                        format: stringFlag(parsedArgs, "format"),
+                        output: stringFlag(parsedArgs, "output"),
+                        open: booleanFlag(parsedArgs, "open"),
+                        json: booleanFlag(parsedArgs, "json"),
+                        embedScreenshots: booleanFlag(parsedArgs, "noEmbedScreenshots")
+                            ? false
+                            : undefined,
+                    }),
                 );
                 return;
             }
             case "status": {
                 const { statusCommand } = await import("./status");
-                await runParity("status", () => statusCommand({}));
+                await runParity("status", () =>
+                    statusCommand({ json: booleanFlag(parsedArgs, "json") }),
+                );
                 return;
             }
-            case "knowledge":
-            case "kb": {
-                const [ksub, ...krest] = arg.split(/\s+/).filter(Boolean);
+            case "knowledge": {
+                const [ksub, ...krest] = parsedArgs.positionals;
                 const { knowledgeCommand } = await import("./knowledge");
                 await runParity("knowledge", () =>
-                    knowledgeCommand(ksub || undefined, krest.join(" ") || undefined, {}),
+                    knowledgeCommand(ksub, krest.join(" ") || undefined, {
+                        limit: stringFlag(parsedArgs, "limit"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
                 );
                 return;
             }
             case "search": {
-                if (!arg) return void console.log(chalk.red("  usage: /search <query>"));
+                const query = parsedArgs.positionals.join(" ");
+                if (!query) return void console.log(chalk.red("  usage: /search <query>"));
                 const { searchCommand } = await import("./search");
-                await runParity("search", () => searchCommand(arg, {}));
+                await runParity("search", () =>
+                    searchCommand(query, {
+                        limit: stringFlag(parsedArgs, "limit"),
+                        type: stringFlag(parsedArgs, "type"),
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "memory": {
                 const { memoryCommand } = await import("./memory");
-                await runParity("memory", () => memoryCommand(arg || undefined, {}));
+                await runParity("memory", () =>
+                    memoryCommand(parsedArgs.positionals[0], {
+                        json: booleanFlag(parsedArgs, "json"),
+                    }),
+                );
                 return;
             }
             case "index": {
                 const { indexCommand } = await import("./indexer");
                 await runParity("index", () =>
-                    indexCommand({ embeddings: /embeddings/.test(arg) }),
+                    indexCommand({
+                        embeddings:
+                            booleanFlag(parsedArgs, "embeddings") ||
+                            parsedArgs.positionals.includes("embeddings"),
+                        force: booleanFlag(parsedArgs, "force"),
+                    }),
+                );
+                return;
+            }
+            case "organize": {
+                const { organizeCommand } = await import("./organize");
+                await runParity("organize", () =>
+                    organizeCommand({
+                        yes: booleanFlag(parsedArgs, "yes", "y"),
+                        testsOnly: booleanFlag(parsedArgs, "testsOnly"),
+                        configOnly: booleanFlag(parsedArgs, "configOnly"),
+                        json: booleanFlag(parsedArgs, "json"),
+                        // Use the REPL's own readline for the confirmation —
+                        // inquirer's prompt would open a second readline on
+                        // stdin (double echo, raw-mode desync on teardown).
+                        confirm: async (message) => {
+                            const answer = (await ask(`${message} (y/N) `)).trim().toLowerCase();
+                            return answer === "y" || answer === "yes";
+                        },
+                    }),
+                );
+                return;
+            }
+            case "hooks": {
+                const [sub] = parsedArgs.positionals;
+                const hooksType = stringFlag(parsedArgs, "type");
+                if (sub === "install") {
+                    const { hooksInstallCommand } = await import("./hooks");
+                    await runParity("hooks install", () =>
+                        hooksInstallCommand({
+                            type: hooksType,
+                            skipRun: booleanFlag(parsedArgs, "skipRun"),
+                            husky: booleanFlag(parsedArgs, "husky"),
+                        }),
+                    );
+                    return;
+                }
+                if (sub === "uninstall") {
+                    const { hooksUninstallCommand } = await import("./hooks");
+                    await runParity("hooks uninstall", () =>
+                        hooksUninstallCommand({ type: hooksType }),
+                    );
+                    return;
+                }
+                if (!sub || sub === "status") {
+                    const { hooksStatusCommand } = await import("./hooks");
+                    await runParity("hooks status", () => hooksStatusCommand());
+                    return;
+                }
+                console.log(
+                    chalk.red(`  Unknown hooks subcommand: ${sub}`) +
+                        dim("  — install | uninstall | status"),
                 );
                 return;
             }
             default: {
-                const known = [
-                    "discover",
-                    "doctor",
-                    "context",
-                    "ci",
-                    "cover",
-                    "trace",
-                    "sync",
-                    "auth",
-                    "tests",
-                    "test",
-                    "status",
-                    "knowledge",
-                    "search",
-                    "memory",
-                    "index",
-                    "mode",
-                    "plan",
-                    "verbose",
-                    "sessions",
-                    "save",
-                    "resume",
-                ];
-                const suggestions = known.filter((k) => k.startsWith(cmd)).slice(0, 5);
+                const suggestions = matchSlashCommands(cmd)
+                    .map((command) => command.name)
+                    .slice(0, 5);
                 const hint =
                     suggestions.length > 0
                         ? dim(`  — did you mean ${suggestions.map((s) => `/${s}`).join(", ")}?`)
@@ -884,7 +1172,7 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         // Drain anything typed during the previous turn before prompting.
         let line: string | null = inputQueue.dequeue() ?? null;
         if (line) {
-            console.log(accent("\nraiken › ") + line);
+            console.log(`\n${accent("›")} ${line}`);
         } else {
             try {
                 line = await readUserInput();
@@ -924,6 +1212,13 @@ function printPlaywrightInstallHint(): void {
     );
 }
 
+function positiveIntegerFlag(parsed: ParsedCommandArgs, name: string): number | undefined {
+    const raw = stringFlag(parsed, name);
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
 function splitAssign(arg: string): [string, string | undefined] {
     const spaced = arg.indexOf(" = ");
     if (spaced !== -1) {
@@ -939,51 +1234,32 @@ function splitAssign(arg: string): [string, string | undefined] {
 function printHelp(): void {
     const row = (c: string, d: string) => console.log(`  ${accent(c.padEnd(24))} ${dim(d)}`);
     console.log(accent("\n  Commands"));
-    console.log(dim("  ─ Agent ─"));
     console.log(dim('  Just type a request in plain English (e.g. "test the login flow").'));
     console.log(dim("  End a line with \\ to continue multiline input."));
     console.log(dim("  Type while a run is in progress to queue the next turn."));
     console.log(dim("  !cmd runs a local shell command (e.g. !git status)."));
-    console.log(dim("  ─ Browser / DOM ─"));
-    row("/goto <url>", "navigate to a URL");
-    row("/click <selector>", "click an element");
-    row("/fill <sel> = <value>", "fill an input");
-    row("/type <sel> = <text>", "type into an element");
-    row("/press <key>", "press a key (e.g. Enter)");
-    row("/snapshot", "print the current page's DOM");
-    row("/url", "show the current URL");
-    row("/back  /reload", "history back / reload");
-    row("/screenshot", "save a PNG of the page");
-    console.log(dim("  ─ Knowledge ─"));
-    row("/status", "project setup at a glance");
-    row("/discover [url]", "crawl in background (keep chatting)");
-    row("/discover status", "show crawl progress / last session");
-    row("/discover --continue", "resume a paused crawl in background");
-    row("/knowledge [section]", "inspect discovered pages/links/blockers");
-    row("/search <query>", "semantic code search");
-    row("/index [embeddings]", "(re)build code graph / search index");
-    row("/memory [clear]", "inspect what the agent has learned");
-    console.log(dim("  ─ Testing workflow ─"));
-    row("/tests", "list discovered test files");
-    row("/test [file]", "run tests");
-    row("/report [file]", "run tests + write HTML report with screenshots");
-    row("/cover <target>", "scaffold a spec for a target");
-    row("/ci", "run impact analysis + affected tests");
-    row("/doctor", "lint the test suite for anti-patterns");
-    row("/trace [stack]", "map a stack trace to tests");
-    row("/context", "write project context file");
-    row("/sync", "sync the current ticket");
-    row("/auth [url]", "capture auth/login state");
-    console.log(dim("  ─ Session ─"));
-    row("/mode [name]", "cycle or set permissions (ask|auto-save|auto-run|yolo)");
-    row("/plan [on|off]", "preview steps/routes before the agent runs");
-    row("/verbose", "toggle collapsed vs full tool-call detail");
-    row("/save <name>", "snapshot this conversation");
-    row("/sessions", "list saved sessions");
-    row("/resume [name]", "reload a saved session (or the latest)");
-    row("/clear", "clear conversation context");
-    row("/help", "show this help");
-    row("/exit", "quit");
+    const groups: SlashCommandGroup[] = [
+        "Agent",
+        "Browser / DOM",
+        "Knowledge",
+        "Testing",
+        "Session",
+    ];
+    for (const group of groups) {
+        console.log(dim(`  ─ ${group} ─`));
+        for (const command of SLASH_COMMAND_REGISTRY.filter((item) => item.group === group)) {
+            const usage = `/${command.name}${command.argsHint ? ` ${command.argsHint}` : ""}`;
+            const aliases = command.aliases?.length
+                ? ` (alias: ${command.aliases.map((alias) => `/${alias}`).join(", ")})`
+                : "";
+            row(usage, `${command.description}${aliases}`);
+        }
+    }
+    console.log(dim("  ─ Standalone terminal commands ─"));
+    row("raiken init", "initialize Raiken in a project");
+    row("raiken start", "start the dashboard and API server");
+    row('raiken -p "..."', "run one non-interactive agent request");
+    row("raiken --help", "show every standalone option and flag");
     console.log(dim("\n  Ctrl+C  stop run → cancel prompt → press again to exit"));
     console.log(dim("  Tab completes /commands  ·  raiken resume [name]\n"));
 }

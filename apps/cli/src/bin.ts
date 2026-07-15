@@ -24,32 +24,32 @@ if (result.error) {
 }
 
 /**
- * 8-bit `[ R ]` brand mark, scaled down to a 5-line / 13-col ASCII glyph
- * so it fits comfortably above a terminal prompt without dominating the
- * screen. The leading `█` blocks render in chalk magenta to mirror the
- * dashboard's purple accent (#a78bfa); the brackets stay default fg so
- * the mark reads as `[ R ]` even on light-themed terminals.
- *
- * Drawn once on `raiken start` so testers immediately recognise the brand
- * matches the dashboard favicon they're about to open.
+ * Claude Code-style welcome box: a single rounded card with the brand mark,
+ * a one-line pitch, and the handful of things a new user actually needs
+ * (help, resume, cwd) instead of a wall of shortcuts.
  */
-function printBanner(version: string): void {
+async function printBanner(version: string): Promise<void> {
+    const { renderBox, boxWidth } = await import("./repl/box");
     const p = chalk.hex("#a78bfa");
     const dim = chalk.gray;
+    const width = boxWidth();
+
     const lines = [
-        `${dim("[")}  ${p("█████")}  ${dim("]")}`,
-        `${dim("[")}  ${p("█")}   ${p("█")}  ${dim("]")}`,
-        `${dim("[")}  ${p("█████")}  ${dim("]")}`,
-        `${dim("[")}  ${p("█")}  ${p("█")}   ${dim("]")}`,
-        `${dim("[")}  ${p("█")}   ${p("█")}  ${dim("]")}`,
+        `${p("✻")} ${chalk.bold("Welcome to Raiken")} ${dim(`v${version}`)}`,
+        dim("AI QA agent for developers"),
+        "",
+        `${dim("/help")} for commands  ${dim("·")}  ${dim("raiken resume")} to pick up a saved thread`,
+        dim(`cwd: ${shortenPath(process.cwd(), width - 9)}`),
     ];
+
     console.log("");
-    for (const line of lines) console.log(`  ${line}`);
+    console.log(renderBox(lines, width));
     console.log("");
-    console.log(
-        `  ${chalk.bold("raiken")} ${dim(`v${version}`)}  ${dim("·")}  ${dim("AI QA agent for developers")}`,
-    );
-    console.log("");
+}
+
+function shortenPath(p: string, max: number): string {
+    if (p.length <= max) return p;
+    return `…${p.slice(p.length - max + 1)}`;
 }
 
 /**
@@ -122,7 +122,7 @@ program
             );
             process.exit(1);
         }
-        printBanner(resolveVersion());
+        await printBanner(resolveVersion());
         await checkApiKey();
         console.log(chalk.cyan("Initializing Raiken..."));
         try {
@@ -140,7 +140,7 @@ program
 // Default action: bare `raiken` launches the interactive testing agent (live
 // browser). One-shot (`raiken -p`) is intercepted before commander parses.
 program.action(async () => {
-    printBanner(resolveVersion());
+    await printBanner(resolveVersion());
     await checkApiKey();
     try {
         const { chatCommand } = await import("./commands/chat");
@@ -158,7 +158,7 @@ program
     .command("resume [name]")
     .description("Resume a saved interactive session (latest if name omitted)")
     .action(async (name: string | undefined) => {
-        printBanner(resolveVersion());
+        await printBanner(resolveVersion());
         await checkApiKey();
         try {
             const { chatCommand } = await import("./commands/chat");
@@ -295,6 +295,57 @@ program
         } catch (error) {
             console.error(
                 chalk.red("\n ✗ raiken doctor failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("organize")
+    .description(
+        "Propose (and, on confirmation, apply) an AI-assisted reorganization of the test " +
+            "directory into feature/suite folders, plus a raiken.config.json cleanup",
+    )
+    .option("-y, --yes", "Apply without prompting for confirmation", false)
+    .option("--tests-only", "Only propose test-file reorganization, skip config cleanup", false)
+    .option("--config-only", "Only propose raiken.config.json cleanup, skip test files", false)
+    .option("--json", "Emit the plan (and, if applied, the result) as JSON", false)
+    .action(async (options) => {
+        try {
+            const { organizeCommand } = await import("./commands/organize");
+            await organizeCommand(options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken organize failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
+        }
+    });
+
+program
+    .command("eval")
+    .description(
+        "Run agent eval scenarios: 'playground' (fixture ground-truth suite, from the raiken " +
+            "repo) or 'flakiness <testFile>' (run a spec N times, score stability)",
+    )
+    .argument("<suite>", "Eval suite: playground | flakiness")
+    .argument("[target]", "Suite argument (flakiness: the spec file to exercise)")
+    .option("--repeat <n>", "Attempts per scenario", "1")
+    .option("--filter <substring>", "Only run scenarios whose id contains this")
+    .option("--runs <n>", "flakiness: consecutive runs to compare", "3")
+    .option("--dir <path>", "playground: directory containing the fixture apps")
+    .option("--out <path>", "Also write the JSON report to this file")
+    .option("--json", "Emit the report as JSON on stdout", false)
+    .option("--keep-work-dirs", "Keep per-attempt temp directories for debugging", false)
+    .action(async (suite, target, options) => {
+        try {
+            const { evalCommand } = await import("./commands/eval");
+            await evalCommand(suite, target, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken eval failed:"),
                 error instanceof Error ? error.message : error,
             );
             process.exit(2);
@@ -534,11 +585,15 @@ program
 program
     .command("report [file]")
     .description("Run tests and write a detailed HTML report with screenshots")
-    .option("--from <json>", "Build from an existing Playwright results JSON (skip running)")
+    .option(
+        "--from <json>",
+        "Build from an existing Playwright OR `raiken ci` results JSON (skip running)",
+    )
     .option("--format <formats>", "Comma-separated: html,markdown,json (default html,json)")
     .option("--output <dir>", "Output directory (default test-reports)")
     .option("--open", "Open the HTML report when done", false)
     .option("--json", "Emit the report result as JSON", false)
+    .option("--no-embed-screenshots", "Link screenshots by path instead of embedding as data URIs")
     .action(async (file, options) => {
         try {
             const { reportCommand } = await import("./commands/report");

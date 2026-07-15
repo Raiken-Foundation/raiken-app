@@ -11,10 +11,15 @@
             "**",
             "!**/node_modules",
             "!**/dist",
+            "!**/tmp",
             "!**/.nx",
             "!**/.raiken",
             "!**/coverage",
-            "!**/test-results"
+            "!**/test-results",
+            "!**/playwright-report",
+            "!tools/playground",
+            "!tools/playground-auth",
+            "!.claude"
         ]
     },
     "linter": {
@@ -30,5 +35,17 @@
     },
     "json": {
         "formatter": {}
-    }
+    },
+    "overrides": [
+        {
+            "includes": ["libs/core/**", "libs/shared/**"],
+            "linter": {
+                "rules": {
+                    "complexity": {
+                        "useLiteralKeys": "off"
+                    }
+                }
+            }
+        }
+    ]
 }

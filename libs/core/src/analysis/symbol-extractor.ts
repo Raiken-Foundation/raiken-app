@@ -458,7 +458,7 @@ function nextRoutePathFromFile(norm: string): string {
     // Strip everything before pages/ or app/ and the extension; collapse index/route segments.
     const m = norm.match(/\/(?:pages|app)\/(.+)$/);
     if (!m) return norm;
-    let route = "/" + m[1].replace(/\.[^/.]+$/, "");
+    let route = `/${m[1].replace(/\.[^/.]+$/, "")}`;
     route = route.replace(/\/(index|page|route)$/i, "");
     if (!route) route = "/";
     return route;

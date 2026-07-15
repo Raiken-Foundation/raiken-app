@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ChatOpenAI } from "@langchain/openai";
+import { LLM_MAX_RETRIES, LLM_REQUEST_TIMEOUT_MS } from "../agent/ai-providers";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
@@ -300,11 +301,16 @@ async function callLLM(
         model,
         temperature: 0.4,
         maxTokens: 1500,
+        // `raiken cover` runs headless (CI PR-comment workflow included) with
+        // no human watching — a hung/rate-limited provider must fail fast
+        // rather than block the workflow run forever.
+        timeout: LLM_REQUEST_TIMEOUT_MS,
+        maxRetries: LLM_MAX_RETRIES,
         configuration: { baseURL: ai.baseURL || "https://openrouter.ai/api/v1" },
     });
 
     const prompt = buildCoverPrompt(resolved);
-    const response = await llm.invoke(prompt);
+    const response = await llm.invoke(prompt, { timeout: LLM_REQUEST_TIMEOUT_MS });
     const text =
         typeof response.content === "string"
             ? response.content

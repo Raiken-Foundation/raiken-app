@@ -7,6 +7,11 @@
  * detailed report without re-walking the raw reporter shape.
  */
 
+import type { TestRunResult } from "./runner";
+// (type-only import — `runner.ts` also imports `ReportAttachment` from this
+// file, but since both imports are type-only they're erased before bundling
+// and never form a runtime circular dependency.)
+
 export interface ReportAttachment {
     name: string;
     contentType: string;
@@ -133,10 +138,16 @@ export function parsePlaywrightReport(json: unknown): ParsedPlaywrightRun {
                         if (!result) continue;
                         testId++;
 
+                        // "timedOut" and "interrupted" are failures — a spec
+                        // that times out on every run must never read as
+                        // skipped (and downstream as "passed"). Only genuine
+                        // skips map to "skipped".
                         const status: ReportTestCase["status"] =
                             result.status === "passed"
                                 ? "passed"
-                                : result.status === "failed"
+                                : result.status === "failed" ||
+                                    result.status === "timedOut" ||
+                                    result.status === "interrupted"
                                   ? "failed"
                                   : "skipped";
 
@@ -206,4 +217,91 @@ export function parsePlaywrightReport(json: unknown): ParsedPlaywrightRun {
     }
 
     return { tests, summary };
+}
+
+// ---------------------------------------------------------------------------
+// CI run report bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural shape of `raiken ci`'s `results.json` (see `CiRunReport` in
+ * `libs/core/src/ci/types.ts`). Defined locally rather than imported so
+ * `testing/` doesn't depend on `ci/` (which already depends on `testing/`
+ * for {@link TestRunResult}) — any object satisfying this shape (including
+ * the real `CiRunReport`) is accepted structurally.
+ */
+export interface CiRunReportLike {
+    tests: TestRunResult[];
+    summary: { total: number; passed: number; failed: number; timedOut: number; errored: number };
+    durationMs: number;
+}
+
+/**
+ * Distinguish a `raiken ci` results payload from a raw Playwright JSON
+ * reporter payload, so a single entry point (`raiken report --from` /
+ * `generateTestReport`) can accept either without the caller having to know
+ * which one it's looking at.
+ */
+export function isCiRunReportShape(value: unknown): value is CiRunReportLike {
+    if (!value || typeof value !== "object") return false;
+    const v = value as Record<string, unknown>;
+    if ("suites" in v) return false; // raw Playwright reporter shape
+    if (!Array.isArray(v["tests"])) return false;
+    const summary = v["summary"];
+    return (
+        typeof summary === "object" &&
+        summary !== null &&
+        "total" in (summary as Record<string, unknown>)
+    );
+}
+
+/**
+ * Adapt a `raiken ci` run report (already-flat `TestRunResult[]`, no nested
+ * suites) into the same {@link ParsedPlaywrightRun} shape the HTML/Markdown/
+ * JSON report writer consumes — so CI runs get an identical shareable report
+ * to `raiken report`, and `raiken report --from <ci-results.json>` works.
+ */
+export function parseCiRunReport(report: CiRunReportLike): ParsedPlaywrightRun {
+    const tests: ReportTestCase[] = report.tests.map((t, index) => {
+        const status: ReportTestCase["status"] =
+            t.status === "passed" ? "passed" : t.status === "skipped" ? "skipped" : "failed";
+        const testCase: ReportTestCase = {
+            id: `${t.testFile}#${index}`,
+            name: t.testName,
+            suite: t.testFile,
+            status,
+            duration: t.duration,
+        };
+        if (t.error) {
+            testCase.error = {
+                message: t.error.selector
+                    ? `${t.error.message}\n\nFailing selector: ${t.error.selector}`
+                    : t.error.message,
+            };
+        }
+        if (t.attachments && t.attachments.length > 0) {
+            testCase.attachments = t.attachments;
+        }
+        return testCase;
+    });
+
+    const suiteNames = new Set(tests.map((t) => t.suite));
+    const failed = report.summary.failed + report.summary.timedOut + report.summary.errored;
+
+    return {
+        tests,
+        summary: {
+            suites: {
+                total: suiteNames.size,
+                failed: failed > 0 ? 1 : 0,
+                passed: failed > 0 ? Math.max(0, suiteNames.size - 1) : suiteNames.size,
+            },
+            tests: {
+                passed: report.summary.passed,
+                failed,
+                total: report.summary.total,
+            },
+            timeSeconds: report.durationMs / 1000,
+        },
+    };
 }

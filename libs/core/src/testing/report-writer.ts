@@ -79,8 +79,14 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
     const toDataUri = async (att: ReportAttachment): Promise<string | null> => {
         try {
             if (att.body) {
-                // Playwright inlined it already (base64).
-                return `data:${att.contentType || "image/png"};base64,${att.body}`;
+                // Playwright inlined it already (base64). Defensive validation:
+                // `contentType`/`body` originate from JSON that may come from
+                // `--from <file>` (arbitrary user-supplied JSON, not just live
+                // Playwright output), so a malformed value could otherwise break
+                // out of the `src="..."` attribute it's embedded into below.
+                const mime = isSafeMimeType(att.contentType) ? att.contentType : "image/png";
+                const body = isLikelyBase64(att.body) ? att.body : null;
+                return body ? `data:${mime};base64,${body}` : null;
             }
             if (!att.path) return null;
             const resolved = path.resolve(projectPath, att.path);
@@ -161,6 +167,19 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
     };
 }
 
+// `contentType`/`body` land straight in a `data:` URI inside `src="..."` in
+// the generated HTML. Both fields can originate from arbitrary user-supplied
+// JSON (`--from <file>`), so validate their shape before trusting them rather
+// than relying solely on `esc()` at the call site.
+const SAFE_MIME_RE = /^[a-z0-9]+\/[a-z0-9.+-]+$/i;
+function isSafeMimeType(value: string | undefined): value is string {
+    return typeof value === "string" && SAFE_MIME_RE.test(value);
+}
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function isLikelyBase64(value: string): boolean {
+    return value.length > 0 && value.length % 4 === 0 && BASE64_RE.test(value);
+}
+
 function guessImageMime(p: string): string {
     const ext = path.extname(p).toLowerCase();
     if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
@@ -185,6 +204,27 @@ function esc(s: string | undefined): string {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+}
+
+// Markdown-safe escaping for values that land in prose (titles, suite/test
+// names, paths) rather than inside fenced code blocks. Neutralizes raw HTML
+// (renderers embedded in GitHub/IDEs treat Markdown as HTML-permissive) and
+// backslash-escapes characters that would otherwise reinterpret a test/suite
+// name as Markdown structure (e.g. a test named "* not a bullet").
+const MD_STRUCTURAL_RE = /[<>&*_`[\]|]/g;
+const MD_ESCAPES: Record<string, string> = {
+    "<": "&lt;",
+    ">": "&gt;",
+    "&": "&amp;",
+    "*": "\\*",
+    _: "\\_",
+    "`": "\\`",
+    "[": "\\[",
+    "]": "\\]",
+    "|": "\\|",
+};
+function escMd(s: string | undefined): string {
+    return stripAnsi(s).replace(MD_STRUCTURAL_RE, (ch) => MD_ESCAPES[ch] ?? ch);
 }
 
 function fmtDuration(ms?: number): string {
@@ -225,26 +265,25 @@ async function renderHtml(args: {
     const failed = summary.tests.failed;
     const total = summary.tests.total || tests.length;
     const skipped = Math.max(0, total - passed - failed);
-    const passPct = total > 0 ? Math.round((passed / total) * 100) : 0;
 
     const suiteBlocks: string[] = [];
     for (const [suite, cases] of groupBySuite(tests)) {
         const rows: string[] = [];
         for (const t of cases) {
-            const badge =
+            const sev =
                 t.status === "passed"
-                    ? `<span class="badge pass">PASS</span>`
+                    ? `<span class="sev sev--pass">PASS</span>`
                     : t.status === "failed"
-                      ? `<span class="badge fail">FAIL</span>`
-                      : `<span class="badge skip">SKIP</span>`;
+                      ? `<span class="sev sev--fail">FAIL</span>`
+                      : `<span class="sev sev--skip">SKIP</span>`;
 
             let details = "";
             if (t.error) {
                 const loc = t.error.location
-                    ? `<div class="loc">${esc(t.error.location.file)}:${t.error.location.line}</div>`
+                    ? `<div class="t-loc">${esc(t.error.location.file)}:${t.error.location.line}</div>`
                     : "";
-                details += `<div class="error">${loc}<pre>${esc(t.error.message)}</pre>${
-                    t.error.snippet ? `<pre class="snippet">${esc(t.error.snippet)}</pre>` : ""
+                details += `<div class="t-error">${loc}<pre>${esc(t.error.message)}</pre>${
+                    t.error.snippet ? `<pre class="t-snippet">${esc(t.error.snippet)}</pre>` : ""
                 }</div>`;
             }
 
@@ -256,34 +295,48 @@ async function renderHtml(args: {
                     if (uri) {
                         embedded++;
                         shots.push(
-                            `<figure><img loading="lazy" src="${uri}" alt="${esc(att.name)}"/><figcaption>${esc(att.name)}</figcaption></figure>`,
+                            `<figure><img loading="lazy" src="${esc(uri)}" alt="${esc(att.name)}"/><figcaption>${esc(att.name)}</figcaption></figure>`,
                         );
                         continue;
                     }
                 }
                 if (att.path) {
                     const rel = path.relative(outDir, path.resolve(args.projectPath, att.path));
-                    const kind = isVideo(att) ? "video" : isTrace(att) ? "trace" : att.name || "file";
-                    links.push(`<a href="${esc(rel)}">${esc(kind)}</a>`);
+                    const kind = isVideo(att)
+                        ? "video"
+                        : isTrace(att)
+                          ? "trace"
+                          : att.name || "file";
+                    links.push(`<a class="t-link" href="${esc(rel)}">${esc(kind)}</a>`);
                 }
             }
-            if (shots.length > 0) details += `<div class="shots">${shots.join("")}</div>`;
-            if (links.length > 0) details += `<div class="links">Artifacts: ${links.join(" · ")}</div>`;
+            if (shots.length > 0) details += `<div class="t-shots">${shots.join("")}</div>`;
+            if (links.length > 0)
+                details += `<div class="t-artifacts">artifacts: ${links.join(" · ")}</div>`;
 
             rows.push(
-                `<div class="test ${t.status}"><div class="test-head">${badge}<span class="tname">${esc(
+                `<div class="t-row t-row--${t.status}"><div class="t-row-head">${sev}<span class="t-name">${esc(
                     t.name,
-                )}</span><span class="tdur">${fmtDuration(t.duration)}</span></div>${details}</div>`,
+                )}</span><span class="t-dur">${fmtDuration(t.duration)}</span></div>${details}</div>`,
             );
         }
-        suiteBlocks.push(`<section class="suite"><h2>${esc(suite)}</h2>${rows.join("")}</section>`);
+        suiteBlocks.push(
+            `<section class="suite"><h2 class="suite-head">${esc(suite)}</h2>${rows.join("")}</section>`,
+        );
     }
 
     const rawBlock = args.rawOutput
-        ? `<details class="raw"><summary>Raw Playwright output</summary><pre>${esc(
+        ? `<details class="raw"><summary>raw playwright output</summary><pre>${esc(
               args.rawOutput.slice(-20000),
           )}</pre></details>`
         : "";
+
+    // Tri-color proportional segment bar (pass/fail/skip), matching the
+    // dashboard's flat hairline-bordered progress indicators — no rounded
+    // pill, no single fail-colored track with a pass overlay.
+    const passSegPct = total > 0 ? (passed / total) * 100 : 0;
+    const failSegPct = total > 0 ? (failed / total) * 100 : 0;
+    const skipSegPct = total > 0 ? (skipped / total) * 100 : 0;
 
     const html = `<!doctype html>
 <html lang="en">
@@ -292,59 +345,97 @@ async function renderHtml(args: {
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>${esc(args.title)}</title>
 <style>
-  :root { color-scheme: light dark; --bg:#0b0f14; --card:#131a22; --fg:#e6edf3; --muted:#8b99a6;
-    --pass:#2ea043; --fail:#f85149; --skip:#9e6a03; --line:#20293380; --accent:#2f81f7; }
-  @media (prefers-color-scheme: light){ :root{ --bg:#f6f8fa; --card:#fff; --fg:#1f2328; --muted:#59636e; --line:#d0d7de; } }
+  :root {
+    color-scheme: dark;
+    --bg:#0a0a0a; --bg-elev:#111111; --bg-bar:#0d0d0d; --bg-hover:#181818;
+    --hair:#1c1c1c; --hair-strong:#2a2a2a;
+    --ink:#d4d4d4; --ink-strong:#f0f0f0; --ink-dim:#8a8a8a; --ink-faint:#5a5a5a;
+    --accent:#a78bfa; --accent-dim:rgba(167,139,250,.18); --accent-soft:rgba(167,139,250,.09);
+    --pass:#6fb86f; --warn:#d9a441; --fail:#d75c5c;
+    --pass-soft:rgba(111,184,111,.1); --warn-soft:rgba(217,164,65,.1); --fail-soft:rgba(215,92,92,.1);
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f7f7f7; --bg-elev:#ffffff; --bg-bar:#f0f0f0; --bg-hover:#ececec;
+      --hair:#dddddd; --hair-strong:#c4c4c4;
+      --ink:#26262a; --ink-strong:#0a0a0a; --ink-dim:#6b6b6b; --ink-faint:#9a9a9a;
+    }
+  }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  .wrap { max-width:980px; margin:0 auto; padding:32px 20px 80px; }
-  header h1 { margin:0 0 4px; font-size:22px; }
-  .meta { color:var(--muted); font-size:13px; margin-bottom:20px; }
-  .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
-  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-  .stat .n { font-size:24px; font-weight:700; }
-  .stat .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  .stat.pass .n { color:var(--pass); } .stat.fail .n { color:var(--fail); } .stat.skip .n { color:var(--skip); }
-  .bar { height:8px; border-radius:99px; background:var(--fail); overflow:hidden; margin-bottom:28px; border:1px solid var(--line); }
-  .bar > i { display:block; height:100%; width:${passPct}%; background:var(--pass); }
-  .suite { margin-bottom:26px; }
-  .suite h2 { font-size:15px; margin:0 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line); color:var(--muted); }
-  .test { background:var(--card); border:1px solid var(--line); border-left-width:4px; border-radius:8px; padding:12px 14px; margin-bottom:8px; }
-  .test.passed { border-left-color:var(--pass); } .test.failed { border-left-color:var(--fail); } .test.skipped { border-left-color:var(--skip); }
-  .test-head { display:flex; align-items:center; gap:10px; }
-  .tname { flex:1; font-weight:600; } .tdur { color:var(--muted); font-variant-numeric:tabular-nums; }
-  .badge { font-size:11px; font-weight:700; padding:2px 7px; border-radius:5px; letter-spacing:.03em; }
-  .badge.pass { background:#2ea04322; color:var(--pass); } .badge.fail { background:#f8514922; color:var(--fail); } .badge.skip { background:#9e6a0322; color:var(--skip); }
-  .error { margin-top:10px; }
-  .error .loc { color:var(--muted); font-size:12px; margin-bottom:4px; }
-  pre { background:#00000022; border:1px solid var(--line); border-radius:6px; padding:10px 12px; overflow:auto; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-word; margin:0 0 8px; }
-  pre.snippet { color:var(--muted); }
-  .shots { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; margin-top:10px; }
-  figure { margin:0; } figure img { width:100%; border:1px solid var(--line); border-radius:6px; cursor:zoom-in; display:block; }
-  figcaption { color:var(--muted); font-size:11px; margin-top:4px; }
-  .links { margin-top:8px; font-size:13px; } .links a, .loc a { color:var(--accent); }
-  details.raw { margin-top:24px; } details.raw summary { cursor:pointer; color:var(--muted); }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.6 var(--sans); }
+  .wrap { max-width:920px; margin:0 auto; padding:2.5rem 1.25rem 5rem; }
+  header { display:flex; align-items:center; gap:.75rem; margin-bottom:.375rem; }
+  .brand-mark { flex-shrink:0; image-rendering:pixelated; display:block; }
+  h1 { margin:0; font-family:var(--mono); font-size:16px; font-weight:500; color:var(--ink-strong); letter-spacing:-.01em; }
+  .meta { color:var(--ink-faint); font-family:var(--mono); font-size:11px; margin:.375rem 0 1.25rem; letter-spacing:.02em; }
+  .stat-strip { display:flex; flex-wrap:wrap; margin:0 0 .875rem; border-top:1px solid var(--hair); border-bottom:1px solid var(--hair); font-family:var(--mono); font-size:11px; }
+  .stat-item { display:inline-flex; align-items:baseline; gap:.375rem; padding:.4375rem .75rem; border-right:1px solid var(--hair); font-variant-numeric:tabular-nums; }
+  .stat-val { color:var(--ink); font-weight:500; font-size:14px; } .stat-label { color:var(--ink-faint); text-transform:lowercase; }
+  .stat-item--pass .stat-val { color:var(--pass); } .stat-item--fail .stat-val { color:var(--fail); } .stat-item--skip .stat-val { color:var(--ink-dim); }
+  .seg-bar { display:flex; height:6px; border:1px solid var(--hair); overflow:hidden; margin:0 0 1.75rem; background:var(--bg-elev); }
+  .seg-bar > i { display:block; height:100%; }
+  .seg-bar .seg-pass { background:var(--pass); width:${passSegPct}%; }
+  .seg-bar .seg-fail { background:var(--fail); width:${failSegPct}%; }
+  .seg-bar .seg-skip { background:var(--ink-faint); width:${skipSegPct}%; }
+  .suite { margin-bottom:1.5rem; }
+  .suite-head { font-family:var(--mono); font-size:11px; font-weight:500; margin:0 0 .625rem; padding-bottom:.375rem; border-bottom:1px solid var(--hair); color:var(--ink-faint); letter-spacing:.04em; text-transform:lowercase; }
+  .suite-head::before { content:"─ "; color:var(--ink-faint); }
+  .t-row { background:var(--bg-elev); border:1px solid var(--hair); border-left-width:3px; padding:.625rem .75rem; margin-bottom:.5rem; }
+  .t-row--passed { border-left-color:var(--pass); } .t-row--failed { border-left-color:var(--fail); } .t-row--skipped { border-left-color:var(--ink-faint); }
+  .t-row-head { display:flex; align-items:center; gap:.625rem; }
+  .t-name { flex:1; font-family:var(--mono); font-size:12.5px; color:var(--ink); }
+  .t-dur { color:var(--ink-faint); font-family:var(--mono); font-size:11px; font-variant-numeric:tabular-nums; }
+  .sev { font-family:var(--mono); font-size:10px; font-weight:700; letter-spacing:.08em; padding:1px 5px; line-height:1.4; flex-shrink:0; }
+  .sev--pass { color:var(--pass); background:var(--pass-soft); }
+  .sev--fail { color:var(--fail); background:var(--fail-soft); }
+  .sev--skip { color:var(--ink-dim); background:var(--bg-bar); }
+  .t-error { margin-top:.625rem; }
+  .t-loc { color:var(--ink-faint); font-family:var(--mono); font-size:11px; margin-bottom:.25rem; }
+  pre { background:var(--bg-bar); border:1px solid var(--hair); padding:.625rem .75rem; overflow:auto; font:11.5px/1.55 var(--mono); white-space:pre-wrap; word-break:break-word; margin:0 0 .5rem; color:var(--ink); }
+  pre.t-snippet { color:var(--ink-dim); }
+  .t-shots { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:.625rem; margin-top:.625rem; }
+  figure { margin:0; } figure img { width:100%; border:1px solid var(--hair); cursor:zoom-in; display:block; }
+  figcaption { color:var(--ink-faint); font-family:var(--mono); font-size:10.5px; margin-top:.25rem; }
+  .t-artifacts { margin-top:.5rem; font-family:var(--mono); font-size:11.5px; color:var(--ink-faint); }
+  .t-link, a.q-link, .t-loc a { color:var(--accent); text-decoration:none; }
+  .t-link:hover { text-decoration:underline; }
+  details.raw { margin-top:2rem; border:1px solid var(--hair); background:var(--bg-elev); }
+  details.raw summary { cursor:pointer; color:var(--ink-faint); font-family:var(--mono); font-size:11px; padding:.5rem .75rem; letter-spacing:.02em; }
+  details.raw pre { margin:0; border:0; border-top:1px solid var(--hair); }
+  .empty { color:var(--ink-faint); font-family:var(--mono); font-size:12px; }
   /* Lightbox */
-  #lb { position:fixed; inset:0; background:#000c; display:none; align-items:center; justify-content:center; padding:24px; z-index:50; }
-  #lb.on { display:flex; } #lb img { max-width:100%; max-height:100%; border-radius:8px; }
+  #lb { position:fixed; inset:0; background:#000c; display:none; align-items:center; justify-content:center; padding:1.5rem; z-index:50; }
+  #lb.on { display:flex; } #lb img { max-width:100%; max-height:100%; border:1px solid var(--hair-strong); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
+    <svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="24" height="24" role="img" aria-label="Raiken">
+      <rect width="64" height="64" fill="#a78bfa"/>
+      <g fill="#0a0a0a">
+        <rect x="4" y="4" width="8" height="4"/><rect x="4" y="8" width="4" height="28"/><rect x="4" y="36" width="8" height="4"/>
+        <rect x="40" y="4" width="8" height="4"/><rect x="44" y="8" width="4" height="28"/><rect x="40" y="36" width="8" height="4"/>
+        <rect x="16" y="12" width="20" height="4"/><rect x="16" y="16" width="4" height="4"/><rect x="32" y="16" width="4" height="4"/>
+        <rect x="16" y="20" width="20" height="4"/><rect x="16" y="24" width="4" height="4"/><rect x="28" y="24" width="4" height="4"/>
+        <rect x="16" y="28" width="4" height="4"/><rect x="32" y="28" width="4" height="4"/>
+      </g>
+    </svg>
     <h1>${esc(args.title)}</h1>
-    <div class="meta">Generated ${new Date().toLocaleString()}${
-        args.testFile ? ` · ${esc(args.testFile)}` : ""
-    } · ${fmtDuration(summary.timeSeconds * 1000)} total</div>
   </header>
-  <div class="cards">
-    <div class="stat"><div class="n">${total}</div><div class="l">Total</div></div>
-    <div class="stat pass"><div class="n">${passed}</div><div class="l">Passed</div></div>
-    <div class="stat fail"><div class="n">${failed}</div><div class="l">Failed</div></div>
-    <div class="stat skip"><div class="n">${skipped}</div><div class="l">Skipped</div></div>
+  <div class="meta">generated ${new Date().toLocaleString()}${
+      args.testFile ? ` · ${esc(args.testFile)}` : ""
+  } · ${fmtDuration(summary.timeSeconds * 1000)} total</div>
+  <div class="stat-strip">
+    <div class="stat-item"><span class="stat-val">${total}</span><span class="stat-label">total</span></div>
+    <div class="stat-item stat-item--pass"><span class="stat-val">${passed}</span><span class="stat-label">passed</span></div>
+    <div class="stat-item stat-item--fail"><span class="stat-val">${failed}</span><span class="stat-label">failed</span></div>
+    <div class="stat-item stat-item--skip"><span class="stat-val">${skipped}</span><span class="stat-label">skipped</span></div>
   </div>
-  <div class="bar"><i></i></div>
-  ${suiteBlocks.join("\n") || '<p class="meta">No tests found in this run.</p>'}
+  <div class="seg-bar"><i class="seg-pass"></i><i class="seg-fail"></i><i class="seg-skip"></i></div>
+  ${suiteBlocks.join("\n") || '<p class="empty">no tests found in this run.</p>'}
   ${rawBlock}
 </div>
 <div id="lb"><img alt=""/></div>
@@ -383,20 +474,30 @@ function renderMarkdown(args: {
     const skipped = Math.max(0, total - passed - failed);
 
     const lines: string[] = [];
-    lines.push(`# ${args.title}`);
+    lines.push(`# ${escMd(args.title)}`);
     lines.push("");
-    lines.push(`_Generated ${new Date().toISOString()}${args.testFile ? ` · ${args.testFile}` : ""}_`);
+    lines.push(
+        `_Generated ${new Date().toISOString()}${
+            args.testFile ? ` · ${escMd(args.testFile)}` : ""
+        }_`,
+    );
     lines.push("");
-    lines.push(`**${passed}/${total} passed** · ${failed} failed · ${skipped} skipped · ${fmtDuration(summary.timeSeconds * 1000)} total`);
+    lines.push(
+        `**${passed}/${total} passed** · ${failed} failed · ${skipped} skipped · ${fmtDuration(summary.timeSeconds * 1000)} total`,
+    );
     lines.push("");
 
     for (const [suite, cases] of groupBySuite(tests)) {
-        lines.push(`## ${suite}`);
+        lines.push(`## ${escMd(suite)}`);
         lines.push("");
         for (const t of cases) {
             const icon = t.status === "passed" ? "✅" : t.status === "failed" ? "❌" : "⚪️";
-            lines.push(`- ${icon} **${t.name}** _(${fmtDuration(t.duration)})_`);
+            lines.push(`- ${icon} **${escMd(t.name)}** _(${fmtDuration(t.duration)})_`);
             if (t.error?.message) {
+                // Fenced code blocks are literal — no Markdown escaping needed
+                // inside, only ANSI stripping (a stray ``` in the message could
+                // still break the fence, but that's pre-existing Playwright
+                // output we don't control and is exceedingly rare in practice).
                 const first = stripAnsi(t.error.message).split("\n").slice(0, 4).join("\n");
                 lines.push("");
                 lines.push("  ```");
@@ -406,8 +507,9 @@ function renderMarkdown(args: {
             for (const att of t.attachments ?? []) {
                 if (!att.path) continue;
                 const rel = path.relative(outDir, path.resolve(args.projectPath, att.path));
-                if (isImage(att)) lines.push(`  ![${att.name}](${rel})`);
-                else lines.push(`  - [${att.name || "artifact"}](${rel})`);
+                const name = escMd(att.name);
+                if (isImage(att)) lines.push(`  ![${name}](${rel})`);
+                else lines.push(`  - [${name || "artifact"}](${rel})`);
             }
             lines.push("");
         }

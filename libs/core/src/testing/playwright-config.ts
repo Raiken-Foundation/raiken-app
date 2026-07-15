@@ -97,6 +97,43 @@ export default defineConfig({
     return config;
 }
 
+/** Config filenames Playwright itself will auto-discover, in resolution order. */
+const PLAYWRIGHT_CONFIG_CANDIDATES = [
+    "playwright.config.ts",
+    "playwright.config.js",
+    "playwright.config.mts",
+    "playwright.config.mjs",
+    "playwright.config.cjs",
+];
+
+/**
+ * Find the first existing Playwright config file in a project, so callers
+ * can pass an explicit `--config <path>` to the CLI instead of relying on
+ * Playwright's own cwd-based auto-discovery — which silently no-ops (falls
+ * back to defaults) for monorepos where the config lives in a package
+ * subdirectory rather than at `projectPath`.
+ *
+ * Shared by every code path that shells out to `npx playwright test`
+ * (dashboard `runTests`, the agent's `TestRunner`) so they resolve the same
+ * config the same way instead of drifting.
+ */
+export async function findPlaywrightConfigPath(projectPath: string): Promise<string | null> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+
+    for (const name of PLAYWRIGHT_CONFIG_CANDIDATES) {
+        const fullPath = path.join(projectPath, name);
+        try {
+            await fs.access(fullPath);
+            return fullPath;
+        } catch {
+            // continue
+        }
+    }
+
+    return null;
+}
+
 /**
  * Check if a playwright config already exists
  */
@@ -174,6 +211,43 @@ export async function readPlaywrightBaseURL(projectPath: string): Promise<string
         const match = content.match(/baseURL\s*:\s*(["'`])([^"'`\n\r]+)\1/);
         if (match?.[2]) {
             const value = match[2].trim();
+            if (value.length > 0) return value;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Best-effort extraction of `testDir` from an existing Playwright config,
+ * mirroring {@link readPlaywrightBaseURL}'s conservative static-string-only
+ * approach (never executes the config). Used to detect drift against
+ * `raiken.config.json`'s `testDirectory`, which is edited independently and
+ * can silently fall out of sync with the config Playwright actually runs.
+ */
+export async function readPlaywrightTestDir(projectPath: string): Promise<string | null> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+
+    const candidates = [
+        "playwright.config.ts",
+        "playwright.config.mts",
+        "playwright.config.js",
+        "playwright.config.mjs",
+        "playwright.config.cjs",
+    ];
+
+    for (const candidate of candidates) {
+        let content: string;
+        try {
+            content = await fs.readFile(path.join(projectPath, candidate), "utf-8");
+        } catch {
+            continue;
+        }
+
+        const match = content.match(/testDir\s*:\s*(["'`])\.?\/?([^"'`\n\r]+)\1/);
+        if (match?.[2]) {
+            const value = match[2].trim().replace(/\/+$/, "");
             if (value.length > 0) return value;
         }
     }

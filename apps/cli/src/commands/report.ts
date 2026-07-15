@@ -19,6 +19,8 @@ interface ReportOptions {
     output?: string;
     open?: boolean;
     json?: boolean;
+    /** Commander negates `--no-embed-screenshots` into this boolean itself. */
+    embedScreenshots?: boolean;
 }
 
 interface RunTestsResult {
@@ -60,7 +62,11 @@ function openFile(filePath: string): void {
               ? "start"
               : "xdg-open";
     try {
-        spawn(cmd, [filePath], { detached: true, stdio: "ignore", shell: process.platform === "win32" }).unref();
+        spawn(cmd, [filePath], {
+            detached: true,
+            stdio: "ignore",
+            shell: process.platform === "win32",
+        }).unref();
     } catch {
         /* best-effort */
     }
@@ -122,12 +128,21 @@ export async function reportCommand(
         testFile: file,
         formats,
         outputDir: options.output,
+        embedScreenshots: options.embedScreenshots,
     })) as GenerateReportResult;
+
+    // `--from` never ran tests itself, so `testSuccess` (which only reflects
+    // a live run) can't tell us pass/fail — derive it from the report's own
+    // summary instead. Previously `--from` always exited 0 regardless of
+    // whether the report showed failures, which broke CI gates piping a
+    // prior run's results.json through `raiken report --from`.
+    const reportFailed = result.summary.tests.failed > 0;
+    const exitCode = options.from ? (reportFailed ? 1 : 0) : testSuccess ? 0 : 1;
 
     if (options.json) {
         restore?.();
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        cliExit(options.from ? 0 : testSuccess ? 0 : 1);
+        cliExit(exitCode);
         return;
     }
 
@@ -143,9 +158,17 @@ export async function reportCommand(
     }
     console.log("");
 
-    if (options.open && result.htmlPath) {
-        openFile(path.resolve(projectPath, result.htmlPath));
+    if (options.open) {
+        if (result.htmlPath) {
+            openFile(path.resolve(projectPath, result.htmlPath));
+        } else {
+            console.log(
+                chalk.yellow(
+                    '  ⚠ --open had nothing to open: no HTML report was generated (include "html" in --format).\n',
+                ),
+            );
+        }
     }
 
-    cliExit(options.from ? 0 : testSuccess ? 0 : 1);
+    cliExit(exitCode);
 }

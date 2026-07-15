@@ -138,22 +138,41 @@ export class EmbeddingsGenerator {
      * Generate embeddings for multiple texts in batch
      * More efficient than individual calls
      *
+     * One bad text (pathological unicode, a tokenizer edge case, etc) must
+     * not sink the other 31 items in its sub-batch — each item is isolated
+     * via `Promise.allSettled`. Failures are returned as `null` at the same
+     * index as their input text (so callers can still line results up
+     * against their originating chunk) and logged with the failure reason.
+     *
      * @param texts - Array of texts to embed
-     * @returns Array of embedding vectors
+     * @returns Array of embedding vectors, or `null` for texts that failed
      */
-    async generateEmbeddingsBatch(texts: string[]): Promise<number[][]> {
+    async generateEmbeddingsBatch(texts: string[]): Promise<Array<number[] | null>> {
         if (!this.model) {
             await this.initialize();
         }
 
-        const embeddings: number[][] = [];
+        const embeddings: Array<number[] | null> = [];
 
         // Process in chunks to avoid memory issues
         const batchSize = 32;
         for (let i = 0; i < texts.length; i += batchSize) {
             const batch = texts.slice(i, i + batchSize);
-            const results = await Promise.all(batch.map((text) => this.generateEmbedding(text)));
-            embeddings.push(...results);
+            const results = await Promise.allSettled(
+                batch.map((text) => this.generateEmbedding(text)),
+            );
+            for (const [batchIndex, result] of results.entries()) {
+                if (result.status === "fulfilled") {
+                    embeddings.push(result.value);
+                } else {
+                    console.warn(
+                        `[EmbeddingsGenerator] Failed to embed text at index ${i + batchIndex}: ${
+                            result.reason instanceof Error ? result.reason.message : result.reason
+                        }`,
+                    );
+                    embeddings.push(null);
+                }
+            }
 
             // Log progress for large batches
             if (texts.length > 100 && (i + batchSize) % 100 === 0) {

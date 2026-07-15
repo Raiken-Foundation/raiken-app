@@ -34,6 +34,26 @@ interface RunSummary {
 }
 
 /**
+ * The agent responding without throwing does NOT mean the run did what was
+ * asked: a requested save can fail, and a requested run can fail its tests.
+ * `ok` (and the exit code) must reflect BOTH — not just "the LLM call
+ * completed" — so a machine consumer checking only `ok`, or a script
+ * checking only the exit code, never sees success reported for a run that
+ * silently failed to save or that ran tests which failed.
+ *
+ * Extracted as a pure function so this contract is unit-testable without
+ * driving the full orchestrator/browser stack.
+ */
+export function computeOneShotOutcome(
+    saveError: string | null,
+    runSummary: RunSummary | null,
+): { ok: boolean; exitCode: number } {
+    const runFailed = !!(runSummary && !runSummary.success);
+    const ok = !saveError && !runFailed;
+    return { ok, exitCode: ok ? 0 : 1 };
+}
+
+/**
  * Read the prompt from piped stdin. Only ever called when NO prompt argument was
  * given, because reading stdin blocks until EOF — and a non-TTY stdin that is an
  * inherited/open pipe (common under CI runners, editor integrations, or a shell
@@ -91,10 +111,20 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         );
     }
 
-    await bootstrapProject(projectPath, {
+    const bootResult = await bootstrapProject(projectPath, {
         watch: false,
         verbose: !json && !streamJson,
     });
+    // Code understanding is best-effort here — a browser-only task can still
+    // succeed without it — but the caller should know context was degraded.
+    if (!bootResult.ok && streamJson) {
+        events.emit({
+            type: "progress",
+            label: "Code understanding unavailable",
+            detail: "Search, impact analysis, and context lookups will be empty for this run.",
+            ts: nowTs(),
+        });
+    }
 
     const caller = appRouter.createCaller({ projectPath });
 
@@ -177,6 +207,13 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         process.off("SIGINT", onSigint);
     }
 
+    // Tracks WHY a requested save/run didn't succeed, independent of the
+    // human-readable stderr messages below (which are suppressed in
+    // json/streamJson modes). Both the final `ok` flag and the exit code must
+    // reflect this — a machine consumer checking only `ok` must never see
+    // `true` after a save or run it explicitly asked for actually failed.
+    let saveError: string | null = null;
+
     let savedTest: string | null = null;
     if (pendingHITL && options.save) {
         const testCode = typeof pendingHITL.testCode === "string" ? pendingHITL.testCode : "";
@@ -198,14 +235,14 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                     process.stderr.write(chalk.green(`\n  ✓ Saved ${savedTest}\n`));
                 }
             } catch (err) {
+                saveError = err instanceof Error ? err.message : String(err);
                 if (!json && !streamJson) {
-                    process.stderr.write(
-                        chalk.red(
-                            `\n  ✗ Save failed: ${err instanceof Error ? err.message : err}\n`,
-                        ),
-                    );
+                    process.stderr.write(chalk.red(`\n  ✗ Save failed: ${saveError}\n`));
                 }
             }
+        } else {
+            saveError =
+                "Agent proposed a test but the approval payload was missing test code or a save path.";
         }
     }
 
@@ -250,12 +287,15 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         /* already closed */
     }
 
+    const { ok, exitCode } = computeOneShotOutcome(saveError, runSummary);
+
     if (streamJson) {
         events.emit({
             type: "done",
-            ok: true,
+            ok,
             response: assistant.trim(),
             savedTest,
+            saveError,
             run: runSummary,
             ts: nowTs(),
         });
@@ -266,11 +306,12 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             process.stdout.write(
                 `${JSON.stringify(
                     {
-                        ok: true,
+                        ok,
                         prompt,
                         response: assistant.trim(),
                         toolCalls,
                         savedTest,
+                        saveError,
                         run: runSummary,
                     },
                     null,
@@ -280,6 +321,5 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         }
     }
 
-    const exitCode = runSummary && !runSummary.success ? 1 : 0;
     process.exit(exitCode);
 }

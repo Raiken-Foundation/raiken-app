@@ -1,6 +1,6 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import fg from "fast-glob";
-import * as fs from "fs";
-import * as path from "path";
 import type { EntryPointResult, NextConfig, PackageJson } from "../types";
 
 type EntryPointDetectorOptions = {

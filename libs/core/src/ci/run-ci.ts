@@ -11,6 +11,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AffectedTestEvidence, GraphQueryService } from "../analysis/graph-query";
+import { parseCiRunReport } from "../testing/report-parser";
+import { writeTestRunReport } from "../testing/report-writer";
 import { TestRunner, type TestRunResult } from "../testing/runner";
 import {
     filterSourceFiles,
@@ -135,7 +137,7 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
           });
 
     // ---- 4. Write reports
-    const reportFiles = writeReports(outputDir, format, impact, run);
+    const reportFiles = await writeReports(projectPath, outputDir, format, impact, run);
     emit({ type: "reports_written", files: reportFiles });
 
     // ---- 5. Exit code
@@ -218,12 +220,13 @@ function summariseResults(results: TestRunResult[]): CiRunReport["summary"] {
     return summary;
 }
 
-function writeReports(
+async function writeReports(
+    projectPath: string,
     outputDir: string,
     format: CiOptions["format"],
     impact: CiImpactReport,
     run: CiRunReport,
-): string[] {
+): Promise<string[]> {
     fs.mkdirSync(outputDir, { recursive: true });
     const written: string[] = [];
 
@@ -244,6 +247,33 @@ function writeReports(
         const junitPath = path.join(outputDir, "results.xml");
         fs.writeFileSync(junitPath, renderJUnitXml(run), "utf-8");
         written.push(junitPath);
+    }
+
+    // Give CI runs the same shareable HTML/Markdown report `raiken report`
+    // produces — previously CI attachments (screenshots) were captured on
+    // `TestRunResult` but never made it into anything a human could open.
+    if (run.ran && run.tests.length > 0) {
+        try {
+            const parsedRun = parseCiRunReport(run);
+            const outputDirRel = path.relative(projectPath, outputDir) || ".";
+            const htmlWritten = await writeTestRunReport({
+                projectPath,
+                run: parsedRun,
+                title: "Raiken CI Report",
+                formats: ["html", "markdown"],
+                outputDir: outputDirRel,
+            });
+            written.push(...htmlWritten.files);
+        } catch (err) {
+            // Best-effort — a report-writer failure shouldn't fail the whole
+            // CI run when JUnit/JSON (the machine-readable, CI-critical
+            // outputs) already wrote successfully above.
+            console.warn(
+                `raiken ci: failed to write HTML/Markdown report: ${
+                    err instanceof Error ? err.message : String(err)
+                }`,
+            );
+        }
     }
 
     return written;

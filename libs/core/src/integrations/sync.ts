@@ -79,7 +79,7 @@ export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResul
 
         // Fallback: check if current branch has an open PR with linked issues
         if (!ticket && provider.name === "github") {
-            const prTicket = await tryFindPRForBranch(provider as GitHubProvider, branchName);
+            const prTicket = await tryFindPRForBranch(provider as GitHubProvider);
             if (prTicket) {
                 ticket = prTicket;
                 source = "pr";
@@ -182,16 +182,13 @@ function createProvider(
 // PR Fallback
 // =========================================================================
 
-async function tryFindPRForBranch(
-    provider: GitHubProvider,
-    branchName: string,
-): Promise<TicketInfo | null> {
+async function tryFindPRForBranch(provider: GitHubProvider): Promise<TicketInfo | null> {
     try {
         const myTickets = await provider.getMyTickets();
-        // Find a PR whose head branch matches the current branch
-        // GitHub issues don't have branch info, so we look for PRs
-        // that are likely from this branch by matching the ticket against
-        // the user's open items
+        // Best-effort only: GitHub issues/PRs returned by getMyTickets() carry no
+        // head-branch info, so we can't actually match against the current branch
+        // name. Fall back to the caller's own open items, preferring one with
+        // changed files (i.e. a PR, not a plain issue).
         for (const t of myTickets) {
             if (t.changedFiles && t.changedFiles.length > 0) {
                 return t;

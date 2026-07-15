@@ -794,10 +794,14 @@ export class CodeGraphDB {
         nodes: Map<string, CodeNode>,
         entryPoints: Array<{ file: string; framework?: string; role: string; type: string }>,
         indexedVia: "scan" | "watch" = "scan",
-    ): void {
+    ): { skippedFiles: Array<{ path: string; reason: string }> } {
+        const skippedFiles: Array<{ path: string; reason: string }> = [];
         this.runWithRetry(() => {
             const transaction = this.db.transaction(() => {
                 const now = Date.now();
+                // Reset in case this is a retry attempt (SQLITE_BUSY) re-running
+                // the whole transaction from scratch — avoid double-counting.
+                skippedFiles.length = 0;
 
                 // ✅ Only clear data that matches the indexing method
                 if (indexedVia === "scan") {
@@ -830,58 +834,95 @@ export class CodeGraphDB {
                 let totalClasses = 0;
                 let totalTypes = 0;
 
-                // Insert files with full AST data
+                // Insert files with full AST data. Each file is isolated in
+                // its own try/catch — a single pathological file (oversized
+                // AST that blows V8's string length limit, an unexpected
+                // constraint violation, etc) must skip that file, not roll
+                // back the entire scan via the enclosing transaction.
                 for (const [filePath, node] of nodes.entries()) {
-                    // ✅ Calculate stats in same loop
-                    totalSize += node.size;
-                    totalLines += node.lines;
-                    totalFunctions += node.parsed.functions.length;
-                    totalClasses += node.parsed.classes.length;
-                    totalTypes += node.parsed.types.length;
+                    try {
+                        // ✅ Serialize full AST data
+                        let parsedAst: string;
+                        let ast: string | null;
+                        try {
+                            parsedAst = JSON.stringify(node.parsed);
+                            ast = node.ast ? JSON.stringify(node.ast) : null;
+                        } catch (serializeError) {
+                            // Fall back to storing the file without its AST
+                            // rather than losing it (and everything after it
+                            // in iteration order) entirely.
+                            console.warn(
+                                `[CodeGraphDB] Could not serialize AST for "${node.relativePath}" — storing without AST: ${
+                                    serializeError instanceof Error
+                                        ? serializeError.message
+                                        : String(serializeError)
+                                }`,
+                            );
+                            parsedAst = JSON.stringify({
+                                functions: [],
+                                classes: [],
+                                imports: [],
+                                exports: [],
+                                types: [],
+                            });
+                            ast = null;
+                        }
 
-                    // ✅ Serialize full AST data
-                    const parsedAst = JSON.stringify(node.parsed);
-                    const ast = node.ast ? JSON.stringify(node.ast) : null;
+                        insertFile.run(
+                            this.projectPath,
+                            filePath,
+                            node.relativePath,
+                            node.hash,
+                            node.treeHash,
+                            node.size,
+                            node.lines,
+                            node.depth,
+                            now,
+                            node.parsed.functions.length,
+                            node.parsed.classes.length,
+                            node.parsed.types.length,
+                            node.imports.length,
+                            node.parsed.exports.length,
+                            parsedAst,
+                            ast,
+                            indexedVia,
+                        );
 
-                    insertFile.run(
-                        this.projectPath,
-                        filePath,
-                        node.relativePath,
-                        node.hash,
-                        node.treeHash,
-                        node.size,
-                        node.lines,
-                        node.depth,
-                        now,
-                        node.parsed.functions.length,
-                        node.parsed.classes.length,
-                        node.parsed.types.length,
-                        node.imports.length,
-                        node.parsed.exports.length,
-                        parsedAst,
-                        ast,
-                        indexedVia,
-                    );
+                        // Insert dependencies with type classification
+                        for (const targetFile of node.imports) {
+                            // Determine import type from parsed data
+                            const importInfo = node.parsed.imports.find((imp) => {
+                                // Match by source path (approximate - would need resolution)
+                                return targetFile.includes(imp.source.replace(/^\.\//, ""));
+                            });
+                            const importType = importInfo?.isTypeOnly ? "type-only" : "static";
 
-                    // Insert dependencies with type classification
-                    for (const targetFile of node.imports) {
-                        // Determine import type from parsed data
-                        const importInfo = node.parsed.imports.find((imp) => {
-                            // Match by source path (approximate - would need resolution)
-                            return targetFile.includes(imp.source.replace(/^\.\//, ""));
-                        });
-                        const importType = importInfo?.isTypeOnly ? "type-only" : "static";
+                            insertDep.run(this.projectPath, filePath, targetFile, importType, now);
+                        }
 
-                        insertDep.run(this.projectPath, filePath, targetFile, importType, now);
-                    }
+                        // Persist symbol-level data and unified edges for this file.
+                        if (node.symbols && node.symbols.length > 0) {
+                            this.replaceFileSymbolsInTransaction(filePath, node.symbols, now);
+                        }
+                        const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
+                        if (edges.length > 0) {
+                            this.replaceFileEdgesInTransaction(filePath, edges, now);
+                        }
 
-                    // Persist symbol-level data and unified edges for this file.
-                    if (node.symbols && node.symbols.length > 0) {
-                        this.replaceFileSymbolsInTransaction(filePath, node.symbols, now);
-                    }
-                    const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
-                    if (edges.length > 0) {
-                        this.replaceFileEdgesInTransaction(filePath, edges, now);
+                        // ✅ Calculate stats in same loop, only for files that
+                        // actually made it into the DB.
+                        totalSize += node.size;
+                        totalLines += node.lines;
+                        totalFunctions += node.parsed.functions.length;
+                        totalClasses += node.parsed.classes.length;
+                        totalTypes += node.parsed.types.length;
+                    } catch (fileError) {
+                        const reason =
+                            fileError instanceof Error ? fileError.message : String(fileError);
+                        skippedFiles.push({ path: node.relativePath, reason });
+                        console.warn(
+                            `[CodeGraphDB] Skipping "${node.relativePath}" — failed to save to the code graph: ${reason}`,
+                        );
                     }
                 }
 
@@ -907,7 +948,7 @@ export class CodeGraphDB {
         `)
                     .run(
                         this.projectPath,
-                        nodes.size,
+                        nodes.size - skippedFiles.length,
                         totalSize,
                         totalLines,
                         totalFunctions,
@@ -920,6 +961,8 @@ export class CodeGraphDB {
 
             transaction();
         });
+
+        return { skippedFiles };
     }
 
     /**
@@ -2008,9 +2051,50 @@ export class CodeGraphDB {
         }));
     }
 
+    /**
+     * Aggregate selector_history by type to find the strategy with the most
+     * recorded successes project-wide. Returns null when there isn't enough
+     * signal yet (no rows, or the leading type never actually won more than
+     * it lost).
+     */
+    getDominantSelectorType(): { type: string; successCount: number } | null {
+        const rows = this.db
+            .prepare(`
+      SELECT selector_type, SUM(success_count) as total_success, SUM(failure_count) as total_failure
+      FROM selector_history
+      WHERE project_path = ?
+      GROUP BY selector_type
+      ORDER BY total_success DESC
+      LIMIT 1
+    `)
+            .all(this.projectPath) as Array<{
+            selector_type: string;
+            total_success: number;
+            total_failure: number;
+        }>;
+
+        const top = rows[0];
+        if (!top || top.total_success <= top.total_failure) return null;
+        return { type: top.selector_type, successCount: top.total_success };
+    }
+
     // ==========================================================================
     // Test Outcomes Operations
     // ==========================================================================
+
+    /**
+     * Canonical form for `test_file` keys in `test_outcomes` /
+     * `test_source_map`: POSIX separators, no leading "./", no duplicate
+     * slashes. Writers arrive with `path.relative()` output (backslashes on
+     * Windows) and readers with template-joined paths ("./e2e//x.spec.ts"
+     * when testDirectory in raiken.config.json is non-canonical) — without
+     * one canonical form the lookups silently miss and badges/learning
+     * quietly stop working.
+     */
+    private normalizeTestFileKey(testFile: string): string {
+        const posix = path.posix.normalize(testFile.split("\\").join("/"));
+        return posix.startsWith("./") ? posix.slice(2) : posix;
+    }
 
     /**
      * Record a newly generated test.
@@ -2027,7 +2111,14 @@ export class CodeGraphDB {
         INSERT INTO test_outcomes (project_path, test_file, test_name, source_prompt, generated_code, status, created_at)
         VALUES (?, ?, ?, ?, ?, 'pending', ?)
       `)
-                .run(this.projectPath, testFile, testName, sourcePrompt, generatedCode, Date.now());
+                .run(
+                    this.projectPath,
+                    this.normalizeTestFileKey(testFile),
+                    testName,
+                    sourcePrompt,
+                    generatedCode,
+                    Date.now(),
+                );
         });
         return Number(result.lastInsertRowid);
     }
@@ -2142,6 +2233,90 @@ export class CodeGraphDB {
     }
 
     /**
+     * Get the ID of the most recently generated outcome row for a test file.
+     * Used to attach a later `recordTestResult` call to the generation that
+     * produced the file currently on disk, without threading a testId through
+     * every save→run call site.
+     */
+    getLatestTestOutcomeId(testFile: string): number | null {
+        // Order by id (not created_at) as the tiebreaker: two generations of
+        // the same file within the same millisecond must still resolve to the
+        // one inserted last, and autoincrement id is monotonic where a
+        // millisecond timestamp isn't.
+        const row = this.db
+            .prepare(`
+      SELECT id FROM test_outcomes
+      WHERE project_path = ? AND test_file = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `)
+            .get(this.projectPath, this.normalizeTestFileKey(testFile)) as
+            | { id: number }
+            | undefined;
+        return row ? row.id : null;
+    }
+
+    /**
+     * Get the most recent outcome (status + timestamps) for every test file
+     * that has at least one recorded generation/run, keyed by test file path.
+     * Used to derive fresh/stale/broken status in the files panel without a
+     * per-file round trip.
+     */
+    getLatestOutcomesPerFile(): Map<
+        string,
+        { status: string; lastRun: number | null; createdAt: number }
+    > {
+        const rows = this.db
+            .prepare(`
+      SELECT test_file, status, last_run, created_at
+      FROM test_outcomes
+      WHERE project_path = ?
+      ORDER BY test_file, created_at DESC, id DESC
+    `)
+            .all(this.projectPath) as Array<{
+            test_file: string;
+            status: string;
+            last_run: number | null;
+            created_at: number;
+        }>;
+
+        const result = new Map<
+            string,
+            { status: string; lastRun: number | null; createdAt: number }
+        >();
+        for (const row of rows) {
+            // Normalize on the way out too: rows written before key
+            // normalization existed may carry native separators.
+            const key = this.normalizeTestFileKey(row.test_file);
+            // First row per test_file wins (ORDER BY puts the newest first).
+            if (result.has(key)) continue;
+            result.set(key, {
+                status: row.status,
+                lastRun: row.last_run,
+                createdAt: row.created_at,
+            });
+        }
+        return result;
+    }
+
+    /**
+     * Get the source files a generated test is mapped to (reverse of
+     * `getAffectedTests`), used to detect staleness when a source file
+     * changed more recently than the test's last recorded run.
+     */
+    getSourceFilesForTest(testFile: string): string[] {
+        const rows = this.db
+            .prepare(`
+      SELECT source_file FROM test_source_map
+      WHERE project_path = ? AND test_file = ?
+    `)
+            .all(this.projectPath, this.normalizeTestFileKey(testFile)) as Array<{
+            source_file: string;
+        }>;
+        return rows.map((r) => r.source_file);
+    }
+
+    /**
      * Record which source files a generated test covers.
      */
     recordTestSourceFiles(testFile: string, sourceFiles: string[]): void {
@@ -2153,8 +2328,52 @@ export class CodeGraphDB {
           VALUES (?, ?, ?, ?)
         `);
                 for (const src of sourceFiles) {
-                    stmt.run(this.projectPath, testFile, src, now);
+                    stmt.run(this.projectPath, this.normalizeTestFileKey(testFile), src, now);
                 }
+            });
+            transaction();
+        });
+    }
+
+    /**
+     * Repoint persisted records at a test file's new path after a move/rename
+     * (used by `raiken organize`). Keeps `test_source_map` and `test_outcomes`
+     * — and therefore stale/fresh status and impact analysis — accurate
+     * without losing the file's generation/run history across the move.
+     */
+    renameTestRecords(rawOldTestFile: string, rawNewTestFile: string): void {
+        const oldTestFile = this.normalizeTestFileKey(rawOldTestFile);
+        const newTestFile = this.normalizeTestFileKey(rawNewTestFile);
+        if (oldTestFile === newTestFile) return;
+        this.runWithRetry(() => {
+            const transaction = this.db.transaction(() => {
+                this.db
+                    .prepare(
+                        "UPDATE test_outcomes SET test_file = ? WHERE project_path = ? AND test_file = ?",
+                    )
+                    .run(newTestFile, this.projectPath, oldTestFile);
+                // test_source_map has a UNIQUE(project_path, test_file, source_file)
+                // constraint; if the destination already has an (identical) mapping
+                // row, the plain UPDATE would violate it. INSERT OR IGNORE the
+                // renamed rows first, then drop the stale originals.
+                const rows = this.db
+                    .prepare(
+                        "SELECT source_file, created_at FROM test_source_map WHERE project_path = ? AND test_file = ?",
+                    )
+                    .all(this.projectPath, oldTestFile) as Array<{
+                    source_file: string;
+                    created_at: number;
+                }>;
+                const insert = this.db.prepare(`
+          INSERT OR IGNORE INTO test_source_map (project_path, test_file, source_file, created_at)
+          VALUES (?, ?, ?, ?)
+        `);
+                for (const row of rows) {
+                    insert.run(this.projectPath, newTestFile, row.source_file, row.created_at);
+                }
+                this.db
+                    .prepare("DELETE FROM test_source_map WHERE project_path = ? AND test_file = ?")
+                    .run(this.projectPath, oldTestFile);
             });
             transaction();
         });
@@ -2167,14 +2386,15 @@ export class CodeGraphDB {
      * path used when the mapping was recorded.
      */
     deleteTestRecords(testFile: string): void {
+        const key = this.normalizeTestFileKey(testFile);
         this.runWithRetry(() => {
             const transaction = this.db.transaction(() => {
                 this.db
                     .prepare("DELETE FROM test_source_map WHERE project_path = ? AND test_file = ?")
-                    .run(this.projectPath, testFile);
+                    .run(this.projectPath, key);
                 this.db
                     .prepare("DELETE FROM test_outcomes WHERE project_path = ? AND test_file = ?")
-                    .run(this.projectPath, testFile);
+                    .run(this.projectPath, key);
             });
             transaction();
         });
@@ -2307,8 +2527,8 @@ export class CodeGraphDB {
                 s.isAsync ? 1 : 0,
                 s.parent ?? null,
                 s.signature ?? null,
-                s.callees && s.callees.length ? JSON.stringify(s.callees) : null,
-                s.rendered && s.rendered.length ? JSON.stringify(s.rendered) : null,
+                s.callees?.length ? JSON.stringify(s.callees) : null,
+                s.rendered?.length ? JSON.stringify(s.rendered) : null,
                 s.routeMeta ? JSON.stringify(s.routeMeta) : null,
                 now,
             );

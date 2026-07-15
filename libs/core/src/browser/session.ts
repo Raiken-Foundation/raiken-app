@@ -14,6 +14,12 @@ import type {
     PagePerformance,
 } from "./dom-capture";
 
+// Playwright doesn't export a standalone `AriaRole` type, only the inline
+// union on `Page.getByRole`. Extracted here so runtime-parsed role strings
+// (from AI-generated selectors like `getByRole('button')`) can be cast to a
+// real, signature-derived type instead of `any`.
+type AriaRole = Parameters<Page["getByRole"]>[0];
+
 export class BrowserActionError extends Error {
     readonly action: string;
     readonly target: string;
@@ -152,7 +158,13 @@ export class BrowserSession {
     private context: BrowserContext | null = null;
     private page: Page | null = null;
     private projectPath: string;
-    private options: BrowserSessionOptions;
+    // `headless`/`viewportWidth`/`viewportHeight`/`timeout` are always filled in
+    // by the constructor's defaults below, so they're narrowed to required here
+    // rather than re-asserted with `!` at every call site that reads them.
+    private options: BrowserSessionOptions &
+        Required<
+            Pick<BrowserSessionOptions, "headless" | "viewportWidth" | "viewportHeight" | "timeout">
+        >;
     private selectorMemory: SelectorMemory | null = null;
     // In-flight launch guard: two concurrent tool calls (e.g. capture + navigate)
     // must not both call chromium.launch() and orphan a Chromium process.
@@ -173,6 +185,34 @@ export class BrowserSession {
             timeout: 30000,
             ...options,
         };
+    }
+
+    /**
+     * Active page, guaranteed non-null. Every caller below already assumes a
+     * launched session; this throws a clear error instead of a bare
+     * null-assertion so a not-yet-launched session fails legibly.
+     */
+    private getActivePage(): Page {
+        if (!this.page) {
+            throw new BrowserActionError(
+                "access page",
+                "session",
+                new Error("Browser session has not been launched yet (call launch() first)"),
+            );
+        }
+        return this.page;
+    }
+
+    /** Active browser context, guaranteed non-null. See `getActivePage`. */
+    private getActiveContext(): BrowserContext {
+        if (!this.context) {
+            throw new BrowserActionError(
+                "access context",
+                "session",
+                new Error("Browser session has not been launched yet (call launch() first)"),
+            );
+        }
+        return this.context;
     }
 
     /**
@@ -280,7 +320,7 @@ export class BrowserSession {
 
         try {
             const contextOptions: Parameters<Browser["newContext"]>[0] = {
-                viewport: { width: opts.viewportWidth!, height: opts.viewportHeight! },
+                viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
             };
 
             // Load auth state if provided
@@ -297,7 +337,7 @@ export class BrowserSession {
 
             this.context = await this.browser.newContext(contextOptions);
             this.page = await this.context.newPage();
-            this.page.setDefaultTimeout(opts.timeout!);
+            this.page.setDefaultTimeout(opts.timeout);
         } catch (error) {
             // Context/page creation failed — don't leave a launched-but-unusable
             // Chromium process (and inconsistent handles) behind.
@@ -370,7 +410,7 @@ export class BrowserSession {
 
         try {
             try {
-                await this.page!.goto(url, {
+                await this.getActivePage().goto(url, {
                     waitUntil: "domcontentloaded",
                     timeout: this.options.timeout,
                 });
@@ -381,7 +421,7 @@ export class BrowserSession {
                     await this.close();
                     await this.start(this.options);
                     stopCollecting = this.collectResponseTimings();
-                    await this.page!.goto(url, {
+                    await this.getActivePage().goto(url, {
                         waitUntil: "domcontentloaded",
                         timeout: this.options.timeout,
                     });
@@ -413,12 +453,12 @@ export class BrowserSession {
         const navStart = Date.now();
         const stopCollecting = this.collectResponseTimings();
         try {
-            await this.page!.reload({ waitUntil: "domcontentloaded" });
+            await this.getActivePage().reload({ waitUntil: "domcontentloaded" });
             this.lastNetworkIdle = await this.waitForIdle();
             await this.waitForContent();
             this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
-            throw new BrowserActionError("reload", this.page!.url(), error);
+            throw new BrowserActionError("reload", this.getActivePage().url(), error);
         } finally {
             this.lastSlowResponses = stopCollecting();
         }
@@ -435,7 +475,7 @@ export class BrowserSession {
         const navStart = Date.now();
         const stopCollecting = this.collectResponseTimings();
         try {
-            const response = await this.page!.goBack({ waitUntil: "domcontentloaded" });
+            const response = await this.getActivePage().goBack({ waitUntil: "domcontentloaded" });
             if (!response) {
                 return null;
             }
@@ -445,7 +485,7 @@ export class BrowserSession {
             await this.waitForContent();
             this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
-            throw new BrowserActionError("goBack", this.page!.url(), error);
+            throw new BrowserActionError("goBack", this.getActivePage().url(), error);
         } finally {
             this.lastSlowResponses = stopCollecting();
         }
@@ -461,7 +501,9 @@ export class BrowserSession {
         const navStart = Date.now();
         const stopCollecting = this.collectResponseTimings();
         try {
-            const response = await this.page!.goForward({ waitUntil: "domcontentloaded" });
+            const response = await this.getActivePage().goForward({
+                waitUntil: "domcontentloaded",
+            });
             if (!response) {
                 return null;
             }
@@ -469,7 +511,7 @@ export class BrowserSession {
             await this.waitForContent();
             this.lastNavigationMs = Date.now() - navStart;
         } catch (error) {
-            throw new BrowserActionError("goForward", this.page!.url(), error);
+            throw new BrowserActionError("goForward", this.getActivePage().url(), error);
         } finally {
             this.lastSlowResponses = stopCollecting();
         }
@@ -481,7 +523,7 @@ export class BrowserSession {
      */
     getCurrentUrl(): string {
         this.ensureActive();
-        return this.page!.url();
+        return this.getActivePage().url();
     }
 
     // =========================================================================
@@ -513,12 +555,17 @@ export class BrowserSession {
     /**
      * Fill an input using DOM-derived selectors.
      * Each selector was built from a real attribute observed on the page.
-     * Falls back to `selectOption` when the target is a native <select> (which
+     * Tries the non-native ARIA combobox flow first (custom dropdowns built
+     * from a div/input + popup listbox, e.g. React-Select, MUI Autocomplete,
+     * Radix, Headless UI) since `.fill()` on those either throws or silently
+     * writes into the trigger without ever registering a selection. Falls
+     * back to `selectOption` when the target is a native <select> (which
      * cannot be `fill()`-ed) so combobox/dropdown auth fields don't silently
      * fail.
      */
     async fill(selectors: string | string[], value: string): Promise<void> {
         await this.runWithSelectors("fill", selectors, async (loc) => {
+            if (await this.tryAriaComboboxSelect(loc, value)) return;
             try {
                 await loc.fill(value, { timeout: this.actionTimeoutMs() });
             } catch (error) {
@@ -543,7 +590,7 @@ export class BrowserSession {
      */
     private resolveLocator(
         selector: string,
-        scope: import("playwright").Page | import("playwright").Frame = this.page!,
+        scope: import("playwright").Page | import("playwright").Frame = this.getActivePage(),
     ): import("playwright").Locator {
         const page = scope;
 
@@ -574,11 +621,11 @@ export class BrowserSession {
             if (role === null) return page.locator(selector);
             const nameMatch = selector.match(/name:\s*['"](.+?)['"]\s*\}/);
             if (nameMatch) {
-                return page.getByRole(role as any, {
+                return page.getByRole(role as AriaRole, {
                     name: nameMatch[1].replace(/\\'/g, "'").replace(/\\"/g, '"'),
                 });
             }
-            return page.getByRole(role as any);
+            return page.getByRole(role as AriaRole);
         }
 
         // getByTestId('...')
@@ -600,7 +647,7 @@ export class BrowserSession {
         // role=button[name="Submit"] (legacy format from earlier versions)
         const roleMatch = selector.match(/^role=(\w+)\[name="(.+?)"\]/);
         if (roleMatch) {
-            return page.getByRole(roleMatch[1] as any, { name: roleMatch[2] });
+            return page.getByRole(roleMatch[1] as AriaRole, { name: roleMatch[2] });
         }
 
         // text=... / label=... / placeholder=... (legacy shorthand)
@@ -613,15 +660,201 @@ export class BrowserSession {
     }
 
     /**
+     * Escape a value for interpolation into a CSS id selector. `CSS.escape`
+     * is a browser global, unavailable in this Node-side helper.
+     */
+    private escapeCssId(s: string): string {
+        return s.replace(/([ "\\#.:>~+*[\](){}!,'^$|=@%&?/;])/g, "\\$1");
+    }
+
+    /**
+     * Detect and drive a non-native ARIA combobox: a trigger element
+     * (`role="combobox"`, `aria-haspopup="listbox"`, `aria-autocomplete`, or a
+     * button-like element with `aria-expanded` + `aria-controls`) that opens a
+     * `role="listbox"` popup of `role="option"` items rather than being a real
+     * `<select>`. Returns `false` (without side effects beyond the initial
+     * click) when the element isn't recognized as this pattern, so the caller
+     * falls through to plain `fill()`/`selectOption()`.
+     */
+    private async tryAriaComboboxSelect(
+        loc: import("playwright").Locator,
+        value: string,
+    ): Promise<boolean> {
+        const meta = await loc
+            .evaluate((el) => {
+                const e = el as HTMLElement;
+                return {
+                    tag: e.tagName.toLowerCase(),
+                    role: e.getAttribute("role"),
+                    haspopup: e.getAttribute("aria-haspopup"),
+                    autocomplete: e.getAttribute("aria-autocomplete"),
+                    controls: e.getAttribute("aria-controls") || e.getAttribute("aria-owns"),
+                    expanded: e.getAttribute("aria-expanded"),
+                    isContentEditable: e.isContentEditable,
+                };
+            })
+            .catch(() => null);
+        if (!meta || meta.tag === "select") return false;
+
+        // `aria-autocomplete="none"` explicitly means "no autocomplete" and
+        // `aria-haspopup="true"` means a *menu* popup, not a listbox — both
+        // would misclassify plain inputs/menu buttons as comboboxes and cost
+        // a click plus a 2s popup poll on every interaction with them.
+        const isCombobox =
+            meta.role === "combobox" ||
+            meta.haspopup === "listbox" ||
+            (!!meta.autocomplete && meta.autocomplete !== "none") ||
+            (!!meta.controls && meta.expanded !== null);
+        if (!isCombobox) return false;
+
+        // Snapshot BEFORE the click so the no-`aria-controls` fallback can
+        // tell a popup that just opened apart from a listbox that was already
+        // sitting on the page (an unrelated multi-select, a previously-opened
+        // combobox).
+        const preOpenListboxes = await this.countVisibleListboxes();
+
+        try {
+            await loc.click({ timeout: this.actionTimeoutMs() });
+        } catch {
+            // Some triggers open their popup on focus rather than click.
+            await loc.focus().catch(() => {});
+        }
+
+        const popup = await this.locateComboboxPopup(meta.controls, preOpenListboxes);
+        if (!popup) return false;
+
+        // Typing narrows the option list in most ARIA-combobox implementations
+        // (React-Select, MUI Autocomplete, Radix, Headless UI). Only for
+        // editable triggers: typing at a focused non-editable `<button>`
+        // trigger fires default key activation — a Space in the value clicks
+        // the button and toggles the popup shut.
+        if (meta.tag === "input" || meta.tag === "textarea" || meta.isContentEditable) {
+            await loc.pressSequentially(value, { timeout: this.actionTimeoutMs() }).catch(() => {});
+        }
+
+        const option = await this.findComboboxOption(popup, value);
+        if (!option) return false;
+
+        try {
+            await option.click({ timeout: this.actionTimeoutMs() });
+        } catch {
+            // Option detached/obscured mid-click (popup re-render, overlay).
+            // Report "not a combobox we could drive" so the caller falls back
+            // instead of treating a working selector as failed.
+            return false;
+        }
+        return true;
+    }
+
+    /** Number of currently visible `role="listbox"` elements on the page. */
+    private async countVisibleListboxes(): Promise<number> {
+        const listbox = this.getActivePage().locator('[role="listbox"]');
+        const count = await listbox.count().catch(() => 0);
+        let visible = 0;
+        for (let i = 0; i < count; i++) {
+            if (
+                await listbox
+                    .nth(i)
+                    .isVisible()
+                    .catch(() => false)
+            )
+                visible++;
+        }
+        return visible;
+    }
+
+    /**
+     * Locate the popup a combobox trigger opened. Prefers the element named by
+     * `aria-controls`/`aria-owns` (the spec-correct link between trigger and
+     * popup); falls back to the first visible `role="listbox"` on the page,
+     * since many component libraries omit that attribute in practice.
+     */
+    private async locateComboboxPopup(
+        controlsId: string | null,
+        preOpenVisibleListboxes = 0,
+    ): Promise<import("playwright").Locator | null> {
+        const page = this.getActivePage();
+        const firstId = controlsId?.split(/\s+/).find((id) => id.length > 0) ?? null;
+
+        // Prefer the element the trigger actually names, so a stale/hidden
+        // popup elsewhere on the page (e.g. from a previously-used combobox)
+        // never gets waited on instead of the one that just opened.
+        if (firstId) {
+            const byId = page.locator(`#${this.escapeCssId(firstId)}`);
+            if (await byId.count().catch(() => 0)) {
+                try {
+                    await byId.first().waitFor({ state: "visible", timeout: 2000 });
+                    return byId.first();
+                } catch {
+                    return null;
+                }
+            }
+        }
+
+        // No (resolvable) aria-controls target: poll for a visible
+        // role="listbox" that appeared *after* the click. When listboxes were
+        // already visible pre-click we require the count to grow and pick the
+        // newest (portals/popups append to the end of the DOM) — otherwise an
+        // unrelated always-visible listbox would be driven and a partial text
+        // match in it would be reported as success.
+        const deadline = Date.now() + 2000;
+        do {
+            const listbox = page.locator('[role="listbox"]');
+            const count = await listbox.count().catch(() => 0);
+            const visible: import("playwright").Locator[] = [];
+            for (let i = 0; i < count; i++) {
+                const candidate = listbox.nth(i);
+                if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+            }
+            if (visible.length > preOpenVisibleListboxes) {
+                return visible[visible.length - 1];
+            }
+            await this.wait(100);
+        } while (Date.now() < deadline);
+        return null;
+    }
+
+    /**
+     * Find the option inside an open combobox popup whose accessible name or
+     * visible text matches `value`. `getByRole('option', { name })` matches
+     * case-insensitively and by substring by default, the same way a human
+     * would scan visible text for a partial match (e.g. "Massachusetts"
+     * inside "Massachusetts (MA)").
+     */
+    private async findComboboxOption(
+        popup: import("playwright").Locator,
+        value: string,
+    ): Promise<import("playwright").Locator | null> {
+        // Exact accessible-name match first, so "Male" never picks "Female"
+        // via the substring pass below.
+        const exact = popup.getByRole("option", { name: value, exact: true });
+        if (await exact.count().catch(() => 0)) return exact.first();
+
+        const byRole = popup.getByRole("option", { name: value });
+        if (await byRole.count().catch(() => 0)) return byRole.first();
+
+        // Some component libraries put role="option" on a wrapper while the
+        // visible text lives on an inner node Playwright's accessible-name
+        // computation doesn't pick up — fall back to a plain text scan scoped
+        // to the popup.
+        const byText = popup.getByText(value, { exact: false });
+        if (await byText.count().catch(() => 0)) return byText.first();
+
+        return null;
+    }
+
+    /**
      * All scopes an interaction may target: the main frame first, then every
      * child frame. Capture is frame-aware, so interaction must be too —
      * otherwise a field/button inside an iframe is shown to the agent but can
      * never be filled or clicked (a silent "it didn't enter the input").
      */
     private interactionScopes(): Array<import("playwright").Page | import("playwright").Frame> {
-        const main = this.page!.mainFrame();
-        const children = this.page!.frames().filter((f) => f !== main);
-        return [this.page!, ...children];
+        const main = this.getActivePage().mainFrame();
+        const children = this.getActivePage()
+            .frames()
+            .filter((f) => f !== main);
+        return [this.getActivePage(), ...children];
     }
 
     /**
@@ -717,7 +950,10 @@ export class BrowserSession {
             // on the main frame so its natural wait/error surfaces meaningfully.
             if (!attemptedSomewhere) {
                 try {
-                    await this.runActionWithStrictRetry(this.resolveLocator(sel, this.page!), fn);
+                    await this.runActionWithStrictRetry(
+                        this.resolveLocator(sel, this.getActivePage()),
+                        fn,
+                    );
                     for (const bad of failed) {
                         this.reportSelectorFailure(element, bad);
                     }
@@ -750,17 +986,20 @@ export class BrowserSession {
     async press(key: string): Promise<void> {
         this.ensureActive();
         try {
-            await this.page!.keyboard.press(key);
+            await this.getActivePage().keyboard.press(key);
         } catch (error) {
             throw new BrowserActionError("press", key, error);
         }
     }
 
     /**
-     * Select option from dropdown
+     * Select option from dropdown. Tries the non-native ARIA combobox flow
+     * first (see `fill()`); falls back to Playwright's native `selectOption`
+     * for real `<select>` elements.
      */
     async selectOption(selectors: string | string[], value: string): Promise<void> {
         await this.runWithSelectors("selectOption", selectors, async (loc) => {
+            if (await this.tryAriaComboboxSelect(loc, value)) return;
             await loc.selectOption(value, { timeout: this.actionTimeoutMs() });
         });
     }
@@ -851,7 +1090,7 @@ export class BrowserSession {
         // Nothing present yet: fall back to waiting on the main frame for the
         // first selector so "wait until it appears" still holds.
         try {
-            await this.resolveLocator(list[0], this.page!).first().waitFor({
+            await this.resolveLocator(list[0], this.getActivePage()).first().waitFor({
                 state: "visible",
                 timeout: effectiveTimeout,
             });
@@ -873,9 +1112,11 @@ export class BrowserSession {
     async waitForNavigation(timeout?: number): Promise<void> {
         this.ensureActive();
         try {
-            await this.page!.waitForNavigation({ timeout: timeout || this.options.timeout });
+            await this.getActivePage().waitForNavigation({
+                timeout: timeout || this.options.timeout,
+            });
         } catch (error) {
-            throw new BrowserActionError("waitForNavigation", this.page!.url(), error);
+            throw new BrowserActionError("waitForNavigation", this.getActivePage().url(), error);
         }
     }
 
@@ -884,7 +1125,7 @@ export class BrowserSession {
      */
     async waitForNetworkIdle(timeout?: number): Promise<void> {
         this.ensureActive();
-        await this.page!.waitForLoadState("networkidle", { timeout: timeout || 5000 });
+        await this.getActivePage().waitForLoadState("networkidle", { timeout: timeout || 5000 });
     }
 
     /**
@@ -944,8 +1185,8 @@ export class BrowserSession {
     }
 
     private async capturePageInternal(): Promise<DOMContext> {
-        const url = this.page!.url();
-        const title = await this.page!.title();
+        const url = this.getActivePage().url();
+        const title = await this.getActivePage().title();
 
         // One extraction pass across all frames, then derive both views in Node.
         const raw = await this.collectRawElements();
@@ -971,7 +1212,7 @@ export class BrowserSession {
      */
     async screenshot(): Promise<Buffer> {
         this.ensureActive();
-        return this.page!.screenshot();
+        return this.getActivePage().screenshot();
     }
 
     /**
@@ -991,7 +1232,7 @@ export class BrowserSession {
     > {
         this.ensureActive();
 
-        const currentUrl = new URL(this.page!.url());
+        const currentUrl = new URL(this.getActivePage().url());
         const currentOrigin = currentUrl.origin;
         const discovered: Array<{
             text: string;
@@ -1027,7 +1268,7 @@ export class BrowserSession {
         };
 
         // 1. Standard <a href> links
-        const anchorLinks = await this.page!.locator("a[href]").all();
+        const anchorLinks = await this.getActivePage().locator("a[href]").all();
         for (const link of anchorLinks.slice(0, 100)) {
             try {
                 const href = await link.getAttribute("href");
@@ -1047,7 +1288,7 @@ export class BrowserSession {
 
         // 2. SPA-aware: elements with role="link" that aren't <a> tags
         //    (custom components rendered as divs/spans with link semantics)
-        const roleLinks = await this.page!.locator('[role="link"]:not(a)').all();
+        const roleLinks = await this.getActivePage().locator('[role="link"]:not(a)').all();
         for (const el of roleLinks.slice(0, 30)) {
             try {
                 if (!(await this.isUsableElement(el))) continue;
@@ -1072,9 +1313,9 @@ export class BrowserSession {
 
         // 3. SPA-aware: clickable navigation elements inside <nav>
         //    Many SPAs use <button> or <div> inside <nav> for client-side routing
-        const navClickables = await this.page!.locator(
-            'nav button, nav [role="button"], nav [role="tab"], nav [role="menuitem"]',
-        ).all();
+        const navClickables = await this.getActivePage()
+            .locator('nav button, nav [role="button"], nav [role="tab"], nav [role="menuitem"]')
+            .all();
         for (const el of navClickables.slice(0, 30)) {
             try {
                 if (!(await this.isUsableElement(el))) continue;
@@ -1111,7 +1352,7 @@ export class BrowserSession {
      */
     async saveAuthState(path: string): Promise<void> {
         this.ensureActive();
-        await this.context!.storageState({ path });
+        await this.getActiveContext().storageState({ path });
     }
 
     /**
@@ -1128,12 +1369,12 @@ export class BrowserSession {
         }
 
         this.context = await this.browser.newContext({
-            viewport: { width: this.options.viewportWidth!, height: this.options.viewportHeight! },
+            viewport: { width: this.options.viewportWidth, height: this.options.viewportHeight },
             storageState: path,
         });
 
         this.page = await this.context.newPage();
-        this.page.setDefaultTimeout(this.options.timeout!);
+        this.page.setDefaultTimeout(this.options.timeout);
     }
 
     /**
@@ -1144,9 +1385,9 @@ export class BrowserSession {
     async hasBlockingOverlay(): Promise<boolean> {
         if (!this.isActive()) return false;
         try {
-            const count = await this.page!.locator(
-                '[aria-modal="true"], dialog[open], [role="dialog"], [role="alertdialog"]',
-            ).count();
+            const count = await this.getActivePage()
+                .locator('[aria-modal="true"], dialog[open], [role="dialog"], [role="alertdialog"]')
+                .count();
             return count > 0;
         } catch {
             return false;
@@ -1182,8 +1423,8 @@ export class BrowserSession {
     }
 
     private getAllFrames(): import("playwright").Frame[] {
-        const frames = this.page!.frames();
-        const main = this.page!.mainFrame();
+        const frames = this.getActivePage().frames();
+        const main = this.getActivePage().mainFrame();
         const ordered = [main, ...frames.filter((f) => f !== main)];
         const unique = new Set<import("playwright").Frame>();
         const deduped: import("playwright").Frame[] = [];
@@ -1463,7 +1704,7 @@ export class BrowserSession {
 
     private async waitForIdle(): Promise<boolean> {
         try {
-            await this.page!.waitForLoadState("networkidle", { timeout: 5000 });
+            await this.getActivePage().waitForLoadState("networkidle", { timeout: 5000 });
             return true;
         } catch {
             return false;
@@ -1480,7 +1721,7 @@ export class BrowserSession {
      */
     private async waitForContent(): Promise<void> {
         try {
-            await this.page!.waitForFunction(
+            await this.getActivePage().waitForFunction(
                 () => {
                     const sel =
                         'button, a[href], input:not([type="hidden"]), textarea, select, [role="button"], [role="link"], [contenteditable="true"]';
@@ -1544,7 +1785,7 @@ export class BrowserSession {
         const perf: PagePerformance = {};
 
         try {
-            const nav = await this.page!.evaluate(() => {
+            const nav = await this.getActivePage().evaluate(() => {
                 const entry = performance.getEntriesByType("navigation")[0] as
                     | PerformanceNavigationTiming
                     | undefined;

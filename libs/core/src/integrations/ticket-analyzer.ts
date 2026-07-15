@@ -13,6 +13,7 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
+import { LLM_MAX_RETRIES, LLM_REQUEST_TIMEOUT_MS } from "../agent/ai-providers";
 import { GraphQueryService } from "../analysis/graph-query";
 import { ProjectContext } from "../analysis/project-context";
 import { CodeGraphDB } from "../database/db";
@@ -186,6 +187,11 @@ export class TicketAnalyzer {
                 model: this.config.model || "anthropic/claude-sonnet-4.5",
                 temperature: 0.3,
                 maxTokens: 1000,
+                // Without these, a hung/rate-limited provider stalls ticket
+                // sync indefinitely (LangChain's un-timed default is 6 retries
+                // with exponential backoff and no request timeout at all).
+                timeout: LLM_REQUEST_TIMEOUT_MS,
+                maxRetries: LLM_MAX_RETRIES,
                 configuration: {
                     baseURL: this.config.baseURL || "https://openrouter.ai/api/v1",
                 },
@@ -212,10 +218,10 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
                 name: "analyze_ticket_impact",
             });
 
-            return await structured.invoke([
-                new SystemMessage(systemPrompt),
-                new HumanMessage(ticketText),
-            ]);
+            return await structured.invoke(
+                [new SystemMessage(systemPrompt), new HumanMessage(ticketText)],
+                { timeout: LLM_REQUEST_TIMEOUT_MS },
+            );
         } catch (err) {
             console.warn(
                 "[TicketAnalyzer] LLM analysis failed:",
@@ -283,10 +289,6 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
             analysis?.testImpact === "new_tests_needed" ||
             (sourceFiles.length > 0 && testFiles.length === 0)
         ) {
-            const featureName = ticket.title
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, "-")
-                .slice(0, 40);
             suggestions.push({
                 action: "create_test" as SuggestionAction,
                 reason: `No existing tests cover the files affected by #${ticket.id}`,
@@ -337,6 +339,6 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
             parts.push(analysis.reasoning);
         }
 
-        return parts.join(". ") + ".";
+        return `${parts.join(". ")}.`;
     }
 }

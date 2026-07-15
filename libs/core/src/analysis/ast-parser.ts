@@ -14,14 +14,6 @@ function isTypeScriptFile(filename: string): boolean {
 }
 
 /**
- * Determine if file uses JSX based on extension.
- */
-function isJsxFile(filename: string): boolean {
-    const ext = filename.split(".").pop()?.toLowerCase() || "";
-    return ["jsx", "tsx"].includes(ext);
-}
-
-/**
  * Get appropriate Babel parser plugins based on file type.
  */
 function getParserPlugins(filename: string): ParserPlugin[] {

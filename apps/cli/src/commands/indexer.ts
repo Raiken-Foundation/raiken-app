@@ -18,7 +18,18 @@ export async function indexCommand(options: IndexOptions): Promise<void> {
     const projectPath = process.cwd();
 
     console.log(chalk.cyan("\n  Building code graph…\n"));
-    await bootstrapProject(projectPath, { watch: false, verbose: true });
+    const result = await bootstrapProject(projectPath, { watch: false, verbose: true });
+
+    if (!result.ok) {
+        console.log(chalk.red("\n  ✗ Indexing failed — see error above.\n"));
+        process.exitCode = 1;
+        return;
+    }
+    if (result.warnings.length > 0) {
+        console.log(
+            chalk.yellow(`\n  ⚠ Indexing completed with ${result.warnings.length} warning(s).\n`),
+        );
+    }
 
     if (options.embeddings) {
         const caller = appRouter.createCaller({ projectPath });

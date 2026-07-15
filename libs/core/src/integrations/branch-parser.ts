@@ -98,7 +98,7 @@ export function parseTicketFromBranch(
             try {
                 const re = new RegExp(pattern);
                 const match = branchName.match(re);
-                if (match && match[1]) {
+                if (match?.[1]) {
                     return {
                         ticketId: match[1],
                         provider: provider || inferProvider(match[1]),

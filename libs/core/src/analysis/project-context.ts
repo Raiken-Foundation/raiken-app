@@ -1,4 +1,4 @@
-import * as path from "path";
+import * as path from "node:path";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
 import type { CodeNode, UpdateEvent } from "../types";
@@ -554,10 +554,16 @@ export class ProjectContext {
         embGen
             .generateEmbeddingsBatch(chunks.map((c) => c.text))
             .then((embeddings) => {
-                const withEmbeddings = chunks.map((chunk, i) => ({
-                    ...chunk,
-                    embedding: embeddings[i],
-                }));
+                const withEmbeddings = chunks
+                    .map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }))
+                    .filter(
+                        (chunk): chunk is typeof chunk & { embedding: number[] } =>
+                            chunk.embedding !== null && chunk.embedding !== undefined,
+                    );
+                if (withEmbeddings.length === 0) {
+                    console.warn(`[ProjectContext] Embedding generation failed for ${filePath}`);
+                    return;
+                }
                 const freshDb = new CodeGraphDB(this.projectPath);
                 try {
                     freshDb.saveEmbeddings(fileId, withEmbeddings);

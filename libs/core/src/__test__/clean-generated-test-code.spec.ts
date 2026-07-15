@@ -45,7 +45,8 @@ describe("cleanGeneratedTestCode", () => {
     });
 
     it("hardens navigation waits when cleaning", () => {
-        const raw = "```ts\nawait page.goto('/overview');\nawait page.waitForLoadState('networkidle');\n```";
+        const raw =
+            "```ts\nawait page.goto('/overview');\nawait page.waitForLoadState('networkidle');\n```";
         const cleaned = cleanGeneratedTestCode(raw);
         expect(cleaned).toContain(`page.goto('/overview', { waitUntil: "domcontentloaded" })`);
         expect(cleaned).toContain(`waitForLoadState("domcontentloaded")`);
@@ -72,9 +73,9 @@ describe("hardenNavigationWaits", () => {
         expect(hardenNavigationWaits(`page.waitForLoadState("networkidle")`)).toBe(
             `page.waitForLoadState("domcontentloaded")`,
         );
-        expect(
-            hardenNavigationWaits(`page.goto("/x", { waitUntil: 'networkidle' })`),
-        ).toContain(`waitUntil: "domcontentloaded"`);
+        expect(hardenNavigationWaits(`page.goto("/x", { waitUntil: 'networkidle' })`)).toContain(
+            `waitUntil: "domcontentloaded"`,
+        );
     });
 
     it("does not touch non-networkidle load states", () => {

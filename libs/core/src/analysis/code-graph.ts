@@ -1,8 +1,8 @@
+import { readFileSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
-import { readFileSync } from "fs";
-import * as fs from "fs/promises";
 import ignore, { type Ignore } from "ignore";
-import * as path from "path";
 import type {
     CodeGraphOptions,
     CodeNode,
@@ -40,6 +40,13 @@ export class CodeGraph {
         this.rootPath = path.resolve(rootPath);
         this.options = {
             maxDepth: options.maxDepth ?? 10,
+            // NOTE: .vue/.svelte are intentionally excluded — the parser
+            // below is Babel (JS/TS only), so SFC files (with <template>/
+            // <script>/<style> blocks) always fail to parse. They're still
+            // walked and tracked as graph nodes (path/size/lines), just
+            // never handed to the JS/TS parser, which would otherwise throw
+            // on every single one and produce a misleadingly "indexed" file
+            // with an empty AST.
             extensions: options.extensions ?? [
                 ".ts",
                 ".tsx",
@@ -49,14 +56,13 @@ export class CodeGraph {
                 ".cjs",
                 ".mts",
                 ".cts",
-                ".vue",
-                ".svelte",
             ],
             excludeDirs: options.excludeDirs,
             includeTests: options.includeTests ?? true,
             useGitignore: options.useGitignore ?? true,
             enableWatch: options.enableWatch ?? false,
             onUpdate: options.onUpdate,
+            maxFileSizeBytes: options.maxFileSizeBytes ?? 2 * 1024 * 1024,
         };
 
         this.loadPathAliases();
@@ -164,16 +170,14 @@ export class CodeGraph {
         // Pattern 1: Object literal aliases
         // alias: { '@': './src', '@components': './src/components' }
         const objectAliasRegex = /alias\s*:\s*\{([^}]+)\}/g;
-        let match;
 
-        while ((match = objectAliasRegex.exec(cleaned)) !== null) {
+        for (const match of cleaned.matchAll(objectAliasRegex)) {
             const aliasBlock = match[1];
 
             // Extract key-value pairs: '@': './src' or "@": "./src"
             const entryRegex = /['"]([^'"]+)['"]\s*:\s*['"]([^'"]+)['"]/g;
-            let entryMatch;
 
-            while ((entryMatch = entryRegex.exec(aliasBlock)) !== null) {
+            for (const entryMatch of aliasBlock.matchAll(entryRegex)) {
                 const key = entryMatch[1];
                 const value = entryMatch[2];
 
@@ -188,25 +192,15 @@ export class CodeGraph {
         // alias: [{ find: '@', replacement: './src' }]
         const arrayAliasRegex = /alias\s*:\s*\[([^\]]+)\]/g;
 
-        while ((match = arrayAliasRegex.exec(cleaned)) !== null) {
+        for (const match of cleaned.matchAll(arrayAliasRegex)) {
             const arrayBlock = match[1];
 
             // Extract find/replacement pairs
             const findRegex = /find\s*:\s*['"]([^'"]+)['"]/g;
             const replacementRegex = /replacement\s*:\s*['"]([^'"]+)['"]/g;
 
-            const finds: string[] = [];
-            const replacements: string[] = [];
-
-            let findMatch;
-            while ((findMatch = findRegex.exec(arrayBlock)) !== null) {
-                finds.push(findMatch[1]);
-            }
-
-            let replaceMatch;
-            while ((replaceMatch = replacementRegex.exec(arrayBlock)) !== null) {
-                replacements.push(replaceMatch[1]);
-            }
+            const finds = [...arrayBlock.matchAll(findRegex)].map((m) => m[1]);
+            const replacements = [...arrayBlock.matchAll(replacementRegex)].map((m) => m[1]);
 
             // Match finds with replacements
             for (let i = 0; i < Math.min(finds.length, replacements.length); i++) {
@@ -624,12 +618,18 @@ export class CodeGraph {
         this.invalidateCachesForFile(resolvedPath);
 
         if (!node) {
-            return {
+            // Not in the in-memory graph (e.g. never indexed, or already
+            // removed) — still notify so callers whose source of truth is
+            // the DB (ProjectContext.handleWatchEvent) get a chance to clean
+            // up a stale row keyed by this path.
+            const event: UpdateEvent = {
                 type: "remove",
                 filePath: resolvedPath,
                 affectedFiles: [],
                 timestamp: new Date(),
             };
+            this.notifyUpdate(event);
+            return event;
         }
 
         // Remove from all importedBy lists
@@ -650,12 +650,18 @@ export class CodeGraph {
 
         this.nodes.delete(resolvedPath);
 
-        return {
+        // Without this, chokidar's `unlink` handler in startWatching() deletes
+        // the in-memory node but never reaches ProjectContext.handleWatchEvent
+        // (the onUpdate callback) — the DB row, symbols, edges, and embeddings
+        // for a deleted file used to live on forever.
+        const event: UpdateEvent = {
             type: "remove",
             filePath: resolvedPath,
             affectedFiles: [resolvedPath],
             timestamp: new Date(),
         };
+        this.notifyUpdate(event);
+        return event;
     }
 
     private async addFile(
@@ -690,6 +696,17 @@ export class CodeGraph {
     private async parseFile(filePath: string, depth: number): Promise<CodeNode | null> {
         try {
             const stats = await fs.stat(filePath);
+
+            if (stats.size > this.options.maxFileSizeBytes) {
+                const rel = path.relative(this.rootPath, filePath);
+                console.warn(
+                    `[CodeGraph] Skipping "${rel}" (${Math.round(stats.size / 1024)}KB) — exceeds the ${Math.round(
+                        this.options.maxFileSizeBytes / 1024,
+                    )}KB size limit for indexing. This avoids OOMs/hangs on huge generated files; it will not appear in search or impact analysis.`,
+                );
+                return null;
+            }
+
             if (await isBinaryFile(filePath)) {
                 return null;
             }
@@ -729,22 +746,19 @@ export class CodeGraph {
                         symbols = extracted.symbols;
                         intraFileEdges = extracted.intraFileEdges;
                     } catch (symErr) {
-                        if (process.env["DEBUG"]) {
-                            const rel = path.relative(this.rootPath, filePath);
-                            console.warn(
-                                `[CodeGraph] Symbol extraction failed for ${rel}:`,
-                                (symErr as Error).message,
-                            );
-                        }
-                    }
-                } catch (error) {
-                    if (process.env["DEBUG"]) {
+                        // Always warn (not just under DEBUG) — a file silently
+                        // ending up with zero symbols looks identical to a
+                        // legitimately empty file otherwise, and the agent has
+                        // no way to know its context for this file is missing.
                         const rel = path.relative(this.rootPath, filePath);
                         console.warn(
-                            `[CodeGraph] Parse failed for ${rel}:`,
-                            (error as Error).message,
+                            `[CodeGraph] Symbol extraction failed for ${rel}:`,
+                            (symErr as Error).message,
                         );
                     }
+                } catch (error) {
+                    const rel = path.relative(this.rootPath, filePath);
+                    console.warn(`[CodeGraph] Parse failed for ${rel}:`, (error as Error).message);
                     parsed = emptyParsed;
                     ast = undefined;
                     resolvedImports = [];
@@ -783,10 +797,8 @@ export class CodeGraph {
 
             return node;
         } catch (error) {
-            if (process.env["DEBUG"]) {
-                const rel = path.relative(this.rootPath, filePath);
-                console.warn(`[CodeGraph] Could not process ${rel}:`, (error as Error).message);
-            }
+            const rel = path.relative(this.rootPath, filePath);
+            console.warn(`[CodeGraph] Could not process ${rel}:`, (error as Error).message);
             return null;
         }
     }
@@ -875,7 +887,7 @@ export class CodeGraph {
 
     private isAliasImport(source: string): boolean {
         for (const alias of this.pathAliases.keys()) {
-            if (source === alias || source.startsWith(alias + "/")) {
+            if (source === alias || source.startsWith(`${alias}/`)) {
                 return true;
             }
         }
@@ -884,7 +896,7 @@ export class CodeGraph {
 
     private resolveAlias(source: string): string | null {
         for (const [alias, target] of this.pathAliases.entries()) {
-            if (source === alias || source.startsWith(alias + "/")) {
+            if (source === alias || source.startsWith(`${alias}/`)) {
                 const remainder = source.slice(alias.length);
                 return target + remainder;
             }
@@ -951,7 +963,7 @@ export class CodeGraph {
     private invalidateCachesForFile(filePath: string): void {
         // Invalidate import cache entries involving this file
         for (const key of this.importCache.keys()) {
-            if (key.startsWith(filePath + "|") || key.includes("|" + filePath)) {
+            if (key.startsWith(`${filePath}|`) || key.includes(`|${filePath}`)) {
                 this.importCache.delete(key);
             }
         }
@@ -1013,14 +1025,7 @@ export class CodeGraph {
                     eventType: "add" | "change" | "unlink",
                 ) => {
                     if (shouldIgnorePath(filePath)) return;
-                    if (await isBinaryFile(filePath)) return;
-
-                    if (eventType === "unlink") {
-                        void this.removeFile(filePath);
-                        return;
-                    }
-
-                    this.debounceUpdate(filePath);
+                    await this.handleWatcherFileEvent(filePath, eventType);
                 };
 
                 this.watcher = chokidar.watch(this.rootPath, {
@@ -1037,6 +1042,29 @@ export class CodeGraph {
             .catch((error) => {
                 console.warn("[CodeGraph] Watch mode disabled:", error);
             });
+    }
+
+    /**
+     * Decide what an "add"/"change"/"unlink" filesystem event means for the
+     * graph. Extracted from startWatching() so the ordering invariant below
+     * is directly unit-testable rather than only reachable through a live
+     * chokidar watcher.
+     */
+    private async handleWatcherFileEvent(
+        filePath: string,
+        eventType: "add" | "change" | "unlink",
+    ): Promise<void> {
+        // Deletions must be handled before any content check — the file is
+        // already gone, so isBinaryFile() can only fail to open it. Checking
+        // content here would (with a safe "treat I/O errors as skip" policy)
+        // wrongly skip the removal entirely and leave a ghost DB row forever.
+        if (eventType === "unlink") {
+            await this.removeFile(filePath);
+            return;
+        }
+
+        if (await isBinaryFile(filePath)) return;
+        this.debounceUpdate(filePath);
     }
 
     private debounceUpdate(filePath: string): void {
@@ -1124,7 +1152,7 @@ export class CodeGraph {
         dependencyHashes.sort();
 
         // Combine own hash + dependency hashes
-        const combinedHash = node.hash + "|" + dependencyHashes.join("|");
+        const combinedHash = `${node.hash}|${dependencyHashes.join("|")}`;
         node.treeHash = this.hashContent(combinedHash);
 
         computed.add(filePath);
@@ -1375,7 +1403,7 @@ export class CodeGraph {
     buildKeywordIndex(): Map<string, string[]> {
         const index = new Map<string, string[]>();
 
-        for (const [filePath, node] of this.nodes) {
+        for (const node of this.nodes.values()) {
             const keywords = this.extractKeywordsFromPath(node.relativePath);
 
             // Add keywords from function/class names

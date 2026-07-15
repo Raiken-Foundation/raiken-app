@@ -86,10 +86,7 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
             console.error(chalk.red(`\n✗ ${err.message}`));
             cliExit(2);
         }
-        console.error(
-            chalk.red("\n✗ raiken ci failed:"),
-            err instanceof Error ? err.message : err,
-        );
+        console.error(chalk.red("\n✗ raiken ci failed:"), err instanceof Error ? err.message : err);
         cliExit(2);
     }
 

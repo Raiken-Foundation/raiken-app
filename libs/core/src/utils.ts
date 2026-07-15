@@ -187,8 +187,17 @@ export async function isBinaryFile(filePath: string, sampleSize = 8000): Promise
         } finally {
             await handle.close();
         }
-    } catch {
-        return false;
+    } catch (error) {
+        // An I/O error (permission denied, file vanished mid-read, etc) tells
+        // us nothing about whether the file is text — treating it as text
+        // would send unreadable bytes into a "utf-8" read and a parser next.
+        // Skip it like a binary file instead, and say why.
+        console.warn(
+            `[isBinaryFile] Could not inspect "${filePath}" — treating as unreadable/binary: ${
+                error instanceof Error ? error.message : String(error)
+            }`,
+        );
+        return true;
     }
 }
 

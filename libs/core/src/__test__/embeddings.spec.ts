@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { EmbeddingsGenerator } from "../database/embeddings";
 
 let modelAvailable = false;
@@ -155,7 +155,7 @@ describe("Embeddings Generator", () => {
             const embeddings = await generator.generateEmbeddingsBatch(texts);
 
             expect(embeddings).toHaveLength(50);
-            expect(embeddings.every((emb) => emb.length === 384)).toBe(true);
+            expect(embeddings.every((emb) => emb !== null && emb.length === 384)).toBe(true);
         });
 
         it("should handle empty batch", async ({ skip }) => {
@@ -169,6 +169,29 @@ describe("Embeddings Generator", () => {
             const embeddings = await generator.generateEmbeddingsBatch(["function test() {}"]);
             expect(embeddings).toHaveLength(1);
             expect(embeddings[0]).toHaveLength(384);
+        });
+
+        it("isolates a single failing item instead of failing the whole batch", async () => {
+            // Does not depend on the real model — verifies the fault-isolation
+            // contract of generateEmbeddingsBatch() directly by making the
+            // second of three calls reject.
+            const gen = EmbeddingsGenerator.getInstance();
+            const spy = vi
+                .spyOn(gen, "generateEmbedding")
+                .mockImplementation(async (text: string) => {
+                    if (text === "bad") throw new Error("simulated tokenizer failure");
+                    return [1, 2, 3];
+                });
+
+            try {
+                const embeddings = await gen.generateEmbeddingsBatch(["good-1", "bad", "good-2"]);
+                expect(embeddings).toHaveLength(3);
+                expect(embeddings[0]).toEqual([1, 2, 3]);
+                expect(embeddings[1]).toBeNull();
+                expect(embeddings[2]).toEqual([1, 2, 3]);
+            } finally {
+                spy.mockRestore();
+            }
         });
     });
 

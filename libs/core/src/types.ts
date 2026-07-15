@@ -145,6 +145,13 @@ export interface CodeGraphOptions {
     useGitignore?: boolean;
     enableWatch?: boolean;
     onUpdate?: (event: UpdateEvent) => void;
+    /**
+     * Files larger than this are skipped entirely (not read into memory or
+     * parsed) — protects indexing from OOMs/hangs on accidentally-included
+     * generated bundles, lockfiles, or other huge non-source files.
+     * Default 2MB, which comfortably covers real hand-written source files.
+     */
+    maxFileSizeBytes?: number;
 }
 
 // ============================================================================

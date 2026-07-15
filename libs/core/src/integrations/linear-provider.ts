@@ -74,7 +74,11 @@ export class LinearProvider implements TicketProvider {
             data = { issue: searchData.issues.nodes[0] };
         }
 
-        return this.mapIssue(data.issue!);
+        if (!data.issue) {
+            throw new Error(`Linear issue "${ticketId}" not found`);
+        }
+
+        return this.mapIssue(data.issue);
     }
 
     async getMyTickets(): Promise<TicketInfo[]> {

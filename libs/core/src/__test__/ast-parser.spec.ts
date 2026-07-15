@@ -535,8 +535,8 @@ describe("AST Parser", () => {
             const chunks = generateCodeChunks(ast, "src/service.ts");
 
             const classChunk = chunks.find((c) => c.type === "class");
-            expect(classChunk).toBeDefined();
-            const text = chunkToSearchableText(classChunk!);
+            if (!classChunk) throw new Error("expected a class chunk");
+            const text = chunkToSearchableText(classChunk);
             expect(text).toContain("class Service");
             expect(text).toContain("with 2 methods");
         });

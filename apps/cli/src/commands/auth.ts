@@ -21,12 +21,23 @@ import chalk from "chalk";
 import ora from "ora";
 import { cliExit } from "../repl/exit";
 
-interface AuthOptions {
+export interface ManualSaveWatcher {
+    promise: Promise<void>;
+    cancel: () => void;
+}
+
+export interface AuthOptions {
     url?: string;
     cookie?: string;
     domain?: string;
     storage?: string[];
     fromStateFile?: string;
+    /**
+     * REPL integration hook. Standalone auth creates its own readline watcher;
+     * the interactive shell supplies one backed by its existing interface so
+     * two readline instances never compete for stdin.
+     */
+    createManualSaveWatcher?: () => ManualSaveWatcher;
 }
 
 interface StorageBaseline {
@@ -149,7 +160,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     // (and unref stdin) when the auto-detector or browser-closed handler
     // wins the race — otherwise the CLI hangs after success because
     // readline keeps stdin referenced.
-    const enterWatcher = waitForEnterKey();
+    const enterWatcher = options.createManualSaveWatcher?.() ?? waitForEnterKey();
     const enterPromise = enterWatcher.promise.then(() => {
         savedReason = "manual";
     });

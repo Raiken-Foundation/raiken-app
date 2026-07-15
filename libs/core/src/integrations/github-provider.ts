@@ -50,7 +50,7 @@ export class GitHubProvider implements TicketProvider {
 
     async getTicket(ticketId: string): Promise<TicketInfo> {
         const numericId = parseInt(ticketId, 10);
-        if (isNaN(numericId)) {
+        if (Number.isNaN(numericId)) {
             throw new Error(`Invalid GitHub ticket ID: "${ticketId}". Must be a number.`);
         }
 
@@ -196,8 +196,7 @@ export class GitHubProvider implements TicketProvider {
         ];
 
         for (const pattern of patterns) {
-            let match: RegExpExecArray | null;
-            while ((match = pattern.exec(text)) !== null) {
+            for (const match of text.matchAll(pattern)) {
                 ids.add(match[1]);
             }
         }

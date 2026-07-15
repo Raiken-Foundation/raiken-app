@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import * as path from "node:path";
+import { findPlaywrightConfigPath } from "./playwright-config";
+import { killProcessTree } from "./process-tree";
+import type { ReportAttachment } from "./report-parser";
 import { TestStorage } from "./storage";
 
 /**
@@ -15,6 +18,12 @@ export interface TestRunResult {
         stack?: string;
         selector?: string;
     };
+    /**
+     * Screenshots/videos/traces Playwright attached to this attempt. Carried
+     * through so `raiken ci` results can feed the same report writer that
+     * `raiken report` uses, without CI runs silently losing artifacts.
+     */
+    attachments?: ReportAttachment[];
 }
 
 /** Minimal shape of the Playwright JSON reporter output we consume. */
@@ -22,6 +31,7 @@ interface PlaywrightJsonResult {
     status?: string;
     duration?: number;
     error?: { message?: string; stack?: string };
+    attachments?: Array<{ name?: string; contentType?: string; path?: string; body?: string }>;
 }
 interface PlaywrightJsonSpec {
     title: string;
@@ -146,6 +156,14 @@ export class TestRunner {
     async runTest(testFile: string, options: TestRunOptions = {}): Promise<TestRunResult[]> {
         const { timeout = 60000, headed = false } = options;
 
+        // Resolve the project's actual Playwright config explicitly instead
+        // of relying on Playwright's own cwd-based auto-discovery, which
+        // silently falls back to built-in defaults (wrong testDir/baseURL)
+        // for monorepos where the config lives in a package subdirectory
+        // rather than at `this.projectPath`. Shared with the dashboard's
+        // `runTests` tRPC procedure so both code paths resolve identically.
+        const configPath = await findPlaywrightConfigPath(this.projectPath);
+
         return new Promise((resolve) => {
             const results: TestRunResult[] = [];
             const startTime = Date.now();
@@ -167,14 +185,31 @@ export class TestRunner {
                 timeout.toString(),
             ];
 
+            if (configPath) {
+                args.push("--config", configPath);
+            }
+
             if (headed) {
                 args.push("--headed");
             }
 
+            // Guarantee the JSON reporter writes to stdout (which we parse
+            // below) instead of a file. If the parent process's environment
+            // has `PLAYWRIGHT_JSON_OUTPUT_NAME` set (some CI setups do this
+            // globally), Playwright silently redirects the JSON report to
+            // that file, stdout ends up empty, and we'd otherwise fall back
+            // to guessing pass/fail from the exit code alone.
+            const env = { ...process.env };
+            delete env["PLAYWRIGHT_JSON_OUTPUT_NAME"];
+
             const child = spawn("npx", args, {
                 cwd: this.projectPath,
                 shell: true,
-                env: { ...process.env },
+                // See killProcessTree() docs: shell:true means signals to
+                // `child` don't reach the real Playwright/browser tree, so we
+                // make it its own process group (POSIX) to enable group-kill.
+                detached: process.platform !== "win32",
+                env,
             });
 
             let stdout = "";
@@ -195,16 +230,13 @@ export class TestRunner {
 
             // Handle timeout
             const timeoutId = setTimeout(() => {
-                // Ask the process group to terminate; if it ignores SIGTERM
-                // (hung driver/browser), escalate to SIGKILL so we don't leave
-                // orphaned npx/Chromium processes accumulating across runs.
-                child.kill("SIGTERM");
+                // Ask the process TREE to terminate (not just the shell
+                // wrapper); if it ignores SIGTERM (hung driver/browser),
+                // escalate to SIGKILL so we don't leave orphaned
+                // npx/Chromium processes accumulating across runs.
+                if (child.pid) killProcessTree(child.pid, "SIGTERM");
                 killTimer = setTimeout(() => {
-                    try {
-                        child.kill("SIGKILL");
-                    } catch {
-                        // Already exited.
-                    }
+                    if (child.pid) killProcessTree(child.pid, "SIGKILL");
                 }, 5000);
                 if (settled) return;
                 settled = true;
@@ -234,13 +266,25 @@ export class TestRunner {
                     return;
                 }
 
-                // Fallback: parse text output
+                // No parsable JSON report. Even if Playwright exited 0, we have
+                // no actual evidence any test ran or passed — a config error,
+                // a redirected reporter, or a crash before the reporter flushed
+                // could all produce exit code 0 with empty/garbage stdout. Prior
+                // behavior blindly reported "passed" here, which is a false
+                // positive that can hide real breakage. Report "error" instead
+                // so callers surface it rather than silently trusting a green
+                // run with zero verifiable data.
                 if (code === 0) {
                     results.push({
                         testFile,
                         testName: this.extractTestName(testFile),
-                        status: "passed",
+                        status: "error",
                         duration,
+                        error: {
+                            message:
+                                "Playwright exited successfully but produced no parsable JSON report — cannot confirm the test actually ran. Check for a misconfigured reporter (e.g. PLAYWRIGHT_JSON_OUTPUT_NAME redirecting output to a file) or a crash before results were flushed.",
+                            stack: (stderr || stdout).slice(0, 2000),
+                        },
                     });
                 } else {
                     const error = this.parseError(stderr || stdout);
@@ -330,6 +374,18 @@ export class TestRunner {
                                     this.extractSelectorFromError(failure.error.message || "") ||
                                     undefined,
                             };
+                        }
+
+                        // Attachments live on the LAST attempt (retries reuse the
+                        // same artifact slots), matching the `result` we already
+                        // read status/duration from above.
+                        if (result.attachments && result.attachments.length > 0) {
+                            testResult.attachments = result.attachments.map((att) => ({
+                                name: att.name ?? "",
+                                contentType: att.contentType ?? "",
+                                path: att.path,
+                                body: att.body,
+                            }));
                         }
 
                         results.push(testResult);

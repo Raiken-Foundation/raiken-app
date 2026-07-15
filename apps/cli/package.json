@@ -1,6 +1,6 @@
 {
     "name": "raiken",
-    "version": "0.5.59",
+    "version": "0.6.0",
     "description": "AI-powered E2E test generation, execution, and repair CLI",
     "author": "Raiken Foundation",
     "license": "MIT",

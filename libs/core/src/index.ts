@@ -18,6 +18,8 @@ export * from "./cover/index";
 export * from "./database/index";
 // Doctor (test-suite anti-pattern lint)
 export * from "./doctor/index";
+// Evals (agent eval harness: scenarios, targets, scorers, runner)
+export * from "./evals/index";
 // Integrations module
 export * from "./integrations/index";
 // Orchestrator
@@ -26,6 +28,10 @@ export {
     type RunOrchestratorOptions,
     runOrchestrator,
 } from "./orchestrator/index";
+// Organize (AI-assisted test/config reorganization)
+export * from "./organize/index";
+// Run traces (JSONL agent-run trajectories under .raiken/traces/)
+export * from "./run-traces/index";
 // Site Discovery module
 export * from "./site-discovery/index";
 // Testing module

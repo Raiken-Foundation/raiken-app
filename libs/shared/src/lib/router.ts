@@ -3,7 +3,7 @@
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ReportFormat } from "@raiken/core";
+import type { ParsedPlaywrightRun, ReportFormat } from "@raiken/core";
 import {
     AgentMemory,
     AI_PROVIDER_IDS,
@@ -14,15 +14,20 @@ import {
     EmbeddingsGenerator,
     EntryPointDetector,
     extractReporterJson,
+    findPlaywrightConfigPath,
     formatBytes,
     fullAstToSearchableText,
     getCurrentBranch,
     getProvider,
     getQuickInterpretation,
     getTestRepair,
+    isCiRunReportShape,
+    killProcessTree,
     listProviderModels,
     listProviders,
+    loadAutonomySettings,
     ProjectContext,
+    parseCiRunReport,
     parsePlaywrightReport,
     parseTicketFromBranch,
     playwrightConfigExists,
@@ -50,28 +55,6 @@ import {
     resolveAuthStorageStateDestination,
     resolveAuthStorageStatePath,
 } from "./config";
-
-async function findPlaywrightConfigPath(projectPath: string): Promise<string | null> {
-    const candidates = [
-        "playwright.config.ts",
-        "playwright.config.js",
-        "playwright.config.mts",
-        "playwright.config.mjs",
-        "playwright.config.cjs",
-    ];
-
-    for (const name of candidates) {
-        const fullPath = path.join(projectPath, name);
-        try {
-            await fs.access(fullPath);
-            return fullPath;
-        } catch {
-            // continue
-        }
-    }
-
-    return null;
-}
 
 // Context type for tRPC procedures
 export interface Context {
@@ -149,6 +132,42 @@ async function sweepStaleTempSpecs(dirAbs: string, maxAgeMs = 10 * 60 * 1000): P
         }
     } catch {
         // Best-effort; directory may not exist yet.
+    }
+}
+
+/**
+ * Learning loop: attach a dashboard-triggered run to the outcome row created
+ * when the file was saved (via `saveGeneratedTest`), gated by
+ * `autonomy.autoLearn`. No-op for scratch/ad-hoc runs (no matching
+ * generation row exists) and for whole-suite runs (no single test file to
+ * attach the aggregate result to). Never throws — a memory-recording failure
+ * must not affect the run result returned to the UI.
+ */
+function recordDashboardRunOutcome(
+    projectPath: string,
+    testFile: string | undefined,
+    parsedRun: ParsedPlaywrightRun | null,
+): void {
+    if (!testFile || testFile.startsWith("scratch:") || !parsedRun) return;
+    if (parsedRun.tests.length === 0) return;
+    // An all-skipped run executed nothing — recording it would stamp the
+    // outcome row "passed" from a non-run.
+    if (parsedRun.tests.every((t) => t.status === "skipped")) return;
+    try {
+        const autonomy = loadAutonomySettings(projectPath);
+        if (autonomy.autoLearn === "off") return;
+
+        const durationMs = parsedRun.tests.reduce((sum, t) => sum + (t.duration || 0), 0);
+        const firstFailure = parsedRun.tests.find((t) => t.status === "failed");
+        const status: "passed" | "failed" = firstFailure ? "failed" : "passed";
+
+        AgentMemory.getInstance(projectPath).recordRunOutcome(testFile, {
+            status,
+            durationMs,
+            errorMessage: firstFailure?.error?.message,
+        });
+    } catch (err) {
+        console.warn("Failed to record test run outcome:", err);
     }
 }
 
@@ -365,9 +384,7 @@ async function hydrateDiscoveryState(projectPath: string): Promise<DiscoveryRunt
         if (!discoveryJobStore.has(projectPath) && current.phase !== "running") {
             const recovered = queryService.recoverStaleSessions();
             if (recovered > 0) {
-                console.log(
-                    `Recovered ${recovered} stale discovery session(s) for ${projectPath}`,
-                );
+                console.log(`Recovered ${recovered} stale discovery session(s) for ${projectPath}`);
             }
         }
 
@@ -627,12 +644,25 @@ function attachDiscoveryRuntimeListeners(projectPath: string, discovery: SiteDis
     // `auth_blocked` is dual-emitted by the crawler for one release; ignore
     // it here so we don't double-count the same blocker twice.
 
-    discovery.on("session_paused", () => {
+    discovery.on("session_paused", (event: unknown) => {
+        const payload = (event ?? {}) as { data?: { reason?: "wall_clock_cap" } };
         const state = getDiscoveryState(projectPath);
         patchDiscoveryState(projectPath, {
             phase: "paused",
             blockedAtUrl: state.currentUrl ?? state.blockedAtUrl,
         });
+        // Blocker-driven pauses (auth, manual, etc.) already timeline
+        // themselves via `handleBlockerEvent`/`pauseDiscovery`. The
+        // wall-clock cap is the one pause path with no blocker row, so
+        // without this it would show as an unexplained "paused" with an
+        // empty blocker panel — nothing telling the user it'll pick back
+        // up right where it left off on `--continue`/Resume.
+        if (payload.data?.reason === "wall_clock_cap") {
+            pushDiscoveryEvent(projectPath, {
+                type: "warning",
+                message: "Discovery paused: reached its time limit. Resume to continue crawling.",
+            });
+        }
     });
 
     discovery.on("session_resumed", () => {
@@ -1088,21 +1118,25 @@ export const appRouter = t.router({
             const totalLines = allFiles.reduce((sum, node) => sum + node.lines, 0);
 
             // Persist to database if requested
+            let skippedFiles: Array<{ path: string; reason: string }> = [];
             if (input.persist) {
                 const db = new CodeGraphDB(projectPath);
-                const nodes = new Map();
-                for (const node of allFiles) {
-                    nodes.set(node.filePath, node);
+                try {
+                    const nodes = new Map();
+                    for (const node of allFiles) {
+                        nodes.set(node.filePath, node);
+                    }
+                    // Map entry points to database format
+                    const dbEntryPoints = entryPoints.map((ep) => ({
+                        file: ep.file,
+                        framework: ep.framework,
+                        role: ep.role || "main",
+                        type: ep.type,
+                    }));
+                    skippedFiles = db.saveGraph(nodes, dbEntryPoints).skippedFiles;
+                } finally {
+                    db.close();
                 }
-                // Map entry points to database format
-                const dbEntryPoints = entryPoints.map((ep) => ({
-                    file: ep.file,
-                    framework: ep.framework,
-                    role: ep.role || "main",
-                    type: ep.type,
-                }));
-                db.saveGraph(nodes, dbEntryPoints);
-                db.close();
             }
 
             // Return graph structure with linkages
@@ -1118,6 +1152,7 @@ export const appRouter = t.router({
                 totalSize,
                 totalLines,
                 totalSizeFormatted: formatBytes(totalSize),
+                skippedFiles,
                 files: allFiles.map((node) => ({
                     path: node.relativePath,
                     depth: node.depth,
@@ -1278,96 +1313,127 @@ export const appRouter = t.router({
             const db = new CodeGraphDB(projectPath);
             const embGen = EmbeddingsGenerator.getInstance();
 
+            // Tracked outside the try so a fatal error partway through (or a
+            // clean finish) both report accurate partial progress instead of
+            // the old behavior of collapsing everything to 0 on any failure.
+            let totalChunks = 0;
+            let filesProcessed = 0;
+            let totalFiles = 0;
+            const skipped: Array<{ path: string; reason: string }> = [];
+
             try {
                 // Initialize model
                 await embGen.initialize();
 
                 // Get all files from database
                 const files = db.getFiles();
-                let totalChunks = 0;
-                let filesProcessed = 0;
+                totalFiles = files.length;
 
                 console.log(`Generating embeddings for ${files.length} files...`);
 
                 for (const file of files) {
-                    // Skip if embeddings already exist and not forcing regeneration
-                    if (!input.forceRegenerate && db.hasEmbeddings(file.id)) {
-                        continue;
-                    }
-
-                    // Use full AST for richer embeddings (needed for test generation)
-                    if (!file.ast) {
-                        console.warn(`No AST data for ${file.relative_path}, skipping`);
-                        continue;
-                    }
-
-                    // Parse stored full AST
-                    let ast: unknown;
+                    // Each file is isolated — one bad AST or embedding failure
+                    // must not abort the entire run and lose progress already made.
                     try {
-                        ast = JSON.parse(file.ast);
-                    } catch {
-                        console.warn(`Failed to parse AST for ${file.relative_path}, skipping`);
-                        continue;
-                    }
+                        // Skip if embeddings already exist and not forcing regeneration
+                        if (!input.forceRegenerate && db.hasEmbeddings(file.id)) {
+                            continue;
+                        }
 
-                    // Convert full AST to rich searchable text
-                    const searchableText = fullAstToSearchableText(ast, file.relative_path);
+                        // Use full AST for richer embeddings (needed for test generation)
+                        if (!file.ast) {
+                            skipped.push({ path: file.relative_path, reason: "no AST data" });
+                            continue;
+                        }
 
-                    // Skip if no content
-                    if (!searchableText || searchableText.trim().length === 0) {
-                        continue;
-                    }
+                        // Parse stored full AST
+                        let ast: unknown;
+                        try {
+                            ast = JSON.parse(file.ast);
+                        } catch {
+                            skipped.push({
+                                path: file.relative_path,
+                                reason: "failed to parse stored AST",
+                            });
+                            continue;
+                        }
 
-                    // For now, embed the entire file as one chunk
-                    // Future: Can split into semantic chunks based on AST nodes
-                    const chunks = [
-                        {
-                            type: "file" as const,
-                            name: file.relative_path,
-                            text: searchableText,
-                        },
-                    ];
+                        // Convert full AST to rich searchable text
+                        const searchableText = fullAstToSearchableText(ast, file.relative_path);
 
-                    // Generate embeddings
-                    const texts = chunks.map((c) => c.text);
-                    const embeddings = await embGen.generateEmbeddingsBatch(texts);
+                        // Skip if no content
+                        if (!searchableText || searchableText.trim().length === 0) {
+                            continue;
+                        }
 
-                    // Store in database
-                    const chunksWithEmbeddings = chunks.map((chunk, i) => ({
-                        ...chunk,
-                        embedding: embeddings[i],
-                    }));
+                        // For now, embed the entire file as one chunk
+                        // Future: Can split into semantic chunks based on AST nodes
+                        const chunks = [
+                            {
+                                type: "file" as const,
+                                name: file.relative_path,
+                                text: searchableText,
+                            },
+                        ];
 
-                    db.saveEmbeddings(file.id, chunksWithEmbeddings);
-                    totalChunks += chunks.length;
-                    filesProcessed++;
+                        // Generate embeddings
+                        const texts = chunks.map((c) => c.text);
+                        const embeddings = await embGen.generateEmbeddingsBatch(texts);
 
-                    if (filesProcessed % 10 === 0) {
-                        console.log(`  Progress: ${filesProcessed}/${files.length} files`);
+                        // Store in database — drop any chunk whose embedding
+                        // generation failed rather than persisting a null vector.
+                        const chunksWithEmbeddings = chunks
+                            .map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }))
+                            .filter(
+                                (chunk): chunk is typeof chunk & { embedding: number[] } =>
+                                    chunk.embedding !== null && chunk.embedding !== undefined,
+                            );
+
+                        if (chunksWithEmbeddings.length === 0) {
+                            skipped.push({
+                                path: file.relative_path,
+                                reason: "embedding generation failed",
+                            });
+                            continue;
+                        }
+
+                        db.saveEmbeddings(file.id, chunksWithEmbeddings);
+                        totalChunks += chunksWithEmbeddings.length;
+                        filesProcessed++;
+
+                        if (filesProcessed % 10 === 0) {
+                            console.log(`  Progress: ${filesProcessed}/${files.length} files`);
+                        }
+                    } catch (fileError) {
+                        const reason =
+                            fileError instanceof Error ? fileError.message : String(fileError);
+                        skipped.push({ path: file.relative_path, reason });
+                        console.warn(`Skipping embeddings for ${file.relative_path}: ${reason}`);
                     }
                 }
-
-                db.close();
 
                 return {
                     success: true,
                     filesProcessed,
-                    totalFiles: files.length,
+                    totalFiles,
                     chunksGenerated: totalChunks,
+                    skipped,
                     modelUsed: "Xenova/all-MiniLM-L6-v2",
                     embeddingDimension: 384,
                     timestamp: new Date().toISOString(),
                 };
             } catch (error) {
-                db.close();
                 return {
                     success: false,
                     error: error instanceof Error ? error.message : "Unknown error",
-                    filesProcessed: 0,
-                    totalFiles: 0,
-                    chunksGenerated: 0,
+                    filesProcessed,
+                    totalFiles,
+                    chunksGenerated: totalChunks,
+                    skipped,
                     timestamp: new Date().toISOString(),
                 };
+            } finally {
+                db.close();
             }
         }),
 
@@ -1663,14 +1729,36 @@ export const appRouter = t.router({
 
             console.log(`✓ Saved generated test: ${path.relative(ctx.projectPath, filePath)}`);
 
+            const relativeFilePath = path.relative(ctx.projectPath, filePath);
             if (sourceFiles && sourceFiles.length > 0) {
                 try {
                     const db = new CodeGraphDB(ctx.projectPath);
-                    db.recordTestSourceFiles(path.relative(ctx.projectPath, filePath), sourceFiles);
+                    db.recordTestSourceFiles(relativeFilePath, sourceFiles);
                     db.close();
                 } catch (err) {
                     console.warn("Failed to record test source mapping:", err);
                 }
+            }
+
+            // Learning loop: this is the direct save path used by the editor's
+            // "Save" action and by HITL-approved saves from chat (the approval
+            // card round-trips here rather than resuming the agent graph), so
+            // it's the single place to record generations that didn't go
+            // through the fully-autonomous tools.ts save branch. Source-file
+            // mapping above is recorded unconditionally (it's a code index,
+            // not a learning signal), only the outcome row is gated.
+            try {
+                const autonomy = loadAutonomySettings(ctx.projectPath);
+                if (autonomy.autoLearn !== "off") {
+                    AgentMemory.getInstance(ctx.projectPath).recordTestGenerated(
+                        relativeFilePath,
+                        fileName,
+                        "",
+                        content,
+                    );
+                }
+            } catch (err) {
+                console.warn("Failed to record test generation:", err);
             }
 
             return {
@@ -1800,15 +1888,17 @@ export const appRouter = t.router({
             const newRel = path.relative(ctx.projectPath, target);
             console.log(`✎ Renamed test: ${oldRel} → ${newRel}`);
 
-            // The DB keys test records by path; drop the stale ones so impact
-            // analysis / remembered failures don't point at the old name. The
-            // file-watcher will re-index the new path.
+            // Preserve learning-loop history and source mappings under the new
+            // path instead of discarding them and waiting for a re-index.
             try {
                 const db = new CodeGraphDB(ctx.projectPath);
-                db.deleteTestRecords(oldRel);
-                db.close();
+                try {
+                    db.renameTestRecords(oldRel, newRel);
+                } finally {
+                    db.close();
+                }
             } catch (err) {
-                console.warn("Failed to clean test records after rename:", err);
+                console.warn("Failed to update test records after rename:", err);
             }
 
             return { success: true, filePath: newRel };
@@ -1835,7 +1925,12 @@ export const appRouter = t.router({
             }
 
             const testDirPath = path.join(ctx.projectPath, testDirectory);
-            const testFiles: Array<{ name: string; path: string; directory: string }> = [];
+            const testFiles: Array<{
+                name: string;
+                path: string;
+                directory: string;
+                status?: "fresh" | "stale" | "broken";
+            }> = [];
 
             // Check if test directory exists
             try {
@@ -1844,6 +1939,57 @@ export const appRouter = t.router({
                 // Directory doesn't exist, return empty array
                 return { files: testFiles, testDirectory };
             }
+
+            // Load recorded run outcomes once up front so per-file status
+            // derivation below is a pure in-memory lookup + stat() call,
+            // rather than a DB round trip per file.
+            let outcomesByFile: Map<
+                string,
+                { status: string; lastRun: number | null; createdAt: number }
+            > = new Map();
+            let statusDb: CodeGraphDB | null = null;
+            try {
+                statusDb = new CodeGraphDB(ctx.projectPath);
+                outcomesByFile = statusDb.getLatestOutcomesPerFile();
+            } catch (err) {
+                console.warn("Failed to load test outcome history for status badges:", err);
+            }
+
+            const deriveStatus = async (
+                relPath: string,
+                absPath: string,
+            ): Promise<"fresh" | "stale" | "broken" | undefined> => {
+                const outcome = outcomesByFile.get(relPath);
+                if (!outcome) return undefined;
+                if (
+                    outcome.status === "failed" ||
+                    outcome.status === "error" ||
+                    outcome.status === "timeout"
+                ) {
+                    return "broken";
+                }
+                if (outcome.status !== "passed") return undefined;
+
+                const referenceTime = outcome.lastRun ?? outcome.createdAt;
+                try {
+                    const stat = await fs.stat(absPath);
+                    if (stat.mtimeMs > referenceTime) return "stale";
+                } catch {
+                    return "stale";
+                }
+
+                const sourceFiles = statusDb?.getSourceFilesForTest(relPath) ?? [];
+                for (const src of sourceFiles) {
+                    try {
+                        const srcStat = await fs.stat(path.join(ctx.projectPath, src));
+                        if (srcStat.mtimeMs > referenceTime) return "stale";
+                    } catch {
+                        // Source file moved/deleted — not a staleness signal by itself.
+                    }
+                }
+
+                return "fresh";
+            };
 
             // Recursively scan for test files
             async function scanDir(dirPath: string, relativePath = "") {
@@ -1868,11 +2014,18 @@ export const appRouter = t.router({
                                 /\.(test|spec|e2e)\.(ts|tsx|js|jsx)$/.test(entry.name) &&
                                 !/\.raiken-run-\d+\.spec\.(ts|tsx|js|jsx)$/.test(entry.name)
                             ) {
+                                // Canonicalize so a non-canonical testDirectory
+                                // ("./e2e", "e2e/") still matches the DB's
+                                // normalized test_file keys.
+                                const relPath = path.posix
+                                    .normalize(`${testDirectory}/${entryRelPath}`)
+                                    .replace(/^\.\//, "");
                                 testFiles.push({
                                     name: entry.name,
-                                    path: `${testDirectory}/${entryRelPath}`,
+                                    path: relPath,
                                     directory:
                                         testDirectory + (relativePath ? `/${relativePath}` : ""),
+                                    status: await deriveStatus(relPath, entryPath),
                                 });
                             }
                         }
@@ -1882,7 +2035,11 @@ export const appRouter = t.router({
                 }
             }
 
-            await scanDir(testDirPath);
+            try {
+                await scanDir(testDirPath);
+            } finally {
+                statusDb?.close();
+            }
 
             return { files: testFiles, testDirectory };
         }),
@@ -2028,6 +2185,13 @@ export const appRouter = t.router({
                 const testProcess = spawn("npx", ["playwright", ...args], {
                     cwd: ctx.projectPath,
                     shell: true,
+                    // Cross-platform `npx` resolution requires shell:true,
+                    // which means `testProcess` is a shell wrapper — signals
+                    // sent to it are NOT forwarded to the real Playwright/
+                    // browser tree underneath. detached:true makes it its own
+                    // process group (POSIX) so killProcessTree() below can
+                    // signal the whole tree instead of leaving zombies.
+                    detached: process.platform !== "win32",
                     env: { ...process.env, FORCE_COLOR: "0" },
                 });
 
@@ -2053,17 +2217,18 @@ export const appRouter = t.router({
                     console.warn(
                         `Test run exceeded ${TEST_RUN_TIMEOUT_MS}ms — terminating process`,
                     );
-                    testProcess.kill("SIGTERM");
+                    if (testProcess.pid) killProcessTree(testProcess.pid, "SIGTERM");
                     killTimer = setTimeout(() => {
-                        try {
-                            testProcess.kill("SIGKILL");
-                        } catch {
-                            // Already exited.
-                        }
+                        if (testProcess.pid) killProcessTree(testProcess.pid, "SIGKILL");
                     }, 5000);
                     if (settled) return;
                     settled = true;
                     cleanupTemp();
+                    const timeoutResults = extractReporterJson(stdout);
+                    const timeoutParsedRun = timeoutResults
+                        ? parsePlaywrightReport(timeoutResults)
+                        : null;
+                    recordDashboardRunOutcome(ctx.projectPath, input.testFile, timeoutParsedRun);
                     resolve({
                         success: false,
                         exitCode: null,
@@ -2071,7 +2236,11 @@ export const appRouter = t.router({
                         stderr: `${stderr}\n[raiken] Test run timed out after ${Math.round(
                             TEST_RUN_TIMEOUT_MS / 1000,
                         )}s and was terminated.`,
-                        results: extractReporterJson(stdout),
+                        results: timeoutResults,
+                        // Pre-parsed via the canonical parser (also used by
+                        // `generateTestReport`) so the dashboard doesn't need
+                        // its own duplicate suite-walking logic.
+                        parsedRun: timeoutParsedRun,
                     });
                 }, TEST_RUN_TIMEOUT_MS);
 
@@ -2087,6 +2256,8 @@ export const appRouter = t.router({
                     // unrelated npm/npx output around the report doesn't corrupt
                     // the match the way a greedy `{...}` regex would.
                     const results = extractReporterJson(stdout);
+                    const parsedRun = results ? parsePlaywrightReport(results) : null;
+                    recordDashboardRunOutcome(ctx.projectPath, input.testFile, parsedRun);
 
                     resolve({
                         success: code === 0,
@@ -2094,6 +2265,7 @@ export const appRouter = t.router({
                         stdout,
                         stderr,
                         results,
+                        parsedRun,
                     });
                 });
 
@@ -2110,6 +2282,7 @@ export const appRouter = t.router({
                         stdout: "",
                         stderr: error.message,
                         results: null,
+                        parsedRun: null,
                     });
                 });
             });
@@ -2133,6 +2306,8 @@ export const appRouter = t.router({
                 title: z.string().optional(),
                 formats: z.array(z.enum(["html", "markdown", "json"])).optional(),
                 outputDir: z.string().optional(),
+                /** Embed screenshots inline in the HTML report. Default: true. */
+                embedScreenshots: z.boolean().optional(),
             }),
         )
         .mutation(async ({ input, ctx }) => {
@@ -2146,7 +2321,13 @@ export const appRouter = t.router({
                 );
             }
 
-            const run = parsePlaywrightReport(reportJson);
+            // Accept either a raw Playwright JSON reporter payload OR a
+            // `raiken ci` `results.json` (flat `TestRunResult[]`, no nested
+            // `suites`) — lets `raiken report --from <ci-results.json>` work
+            // without the caller having to know which shape it's looking at.
+            const run = isCiRunReportShape(reportJson)
+                ? parseCiRunReport(reportJson)
+                : parsePlaywrightReport(reportJson);
 
             // Keep the output directory inside the project (path-traversal guard).
             const outputDir = input.outputDir ?? "test-reports";
@@ -2166,6 +2347,7 @@ export const appRouter = t.router({
                 title: input.title,
                 formats: input.formats as ReportFormat[] | undefined,
                 outputDir,
+                embedScreenshots: input.embedScreenshots,
             });
 
             return {

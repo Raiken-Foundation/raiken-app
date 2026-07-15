@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import type { KeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { CodeEditor, type DiffReview, type TestFile } from "../components/code-editor";
 import { Header } from "../components/header";
@@ -16,169 +17,64 @@ const emptySummary: TestSummary = {
     time: 0,
 };
 
-// Parse an already-extracted Playwright JSON reporter object into TestResults.
-// Split out so we can feed it the SERVER's robustly-extracted `results` object
-// (balanced-brace scan) instead of re-running a greedy regex over raw stdout on
-// the client — the server parse is authoritative and immune to surrounding
-// npm/npx noise.
-function parsePlaywrightReport(
-    // The Playwright JSON reporter shape isn't typed here; the parser uses
-    // `any` throughout, matching the rest of this module.
-    // biome-ignore lint/suspicious/noExplicitAny: untyped reporter payload
-    jsonData: any,
-): { results: TestResult[]; summary: TestSummary } {
-    const results: TestResult[] = [];
-    const summary = {
-        suites: { ...emptySummary.suites },
-        tests: { ...emptySummary.tests },
-        time: emptySummary.time,
+// The server-side canonical parser (`parsePlaywrightReport` in
+// `libs/core/src/testing/report-parser.ts`, also used by `generateTestReport`
+// and `raiken report`) already walks the raw Playwright JSON for us — the
+// `runTests` mutation returns its output as `parsedRun`. This is a thin
+// reshape from that shape into the dashboard's local render types (just a
+// `timeSeconds` → `time` rename; everything else lines up field-for-field),
+// so suite-walking/retry-aggregation logic lives in exactly one place instead
+// of being duplicated here.
+interface ServerParsedRun {
+    tests: Array<{
+        id: string;
+        name: string;
+        suite: string;
+        status: "passed" | "failed" | "skipped";
+        duration?: number;
+        error?: {
+            message?: string;
+            snippet?: string;
+            location?: { file: string; line: number; column: number };
+        };
+        attachments?: Array<{ name: string; contentType: string; path?: string; body?: string }>;
+    }>;
+    summary: {
+        suites: { passed: number; failed: number; total: number };
+        tests: { passed: number; failed: number; total: number };
+        timeSeconds: number;
     };
-
-    try {
-        {
-            // Parse stats
-            if (jsonData.stats) {
-                summary.tests.passed = jsonData.stats.expected || 0;
-                summary.tests.failed = jsonData.stats.unexpected || 0;
-                summary.tests.total =
-                    summary.tests.passed + summary.tests.failed + (jsonData.stats.skipped || 0);
-                summary.time = (jsonData.stats.duration || 0) / 1000; // Convert ms to seconds
-            }
-
-            // Parse suites recursively
-            let testId = 0;
-            const parseSuites = (suites: any[], parentTitle = "") => {
-                for (const suite of suites) {
-                    const suiteName = parentTitle ? `${parentTitle} > ${suite.title}` : suite.title;
-
-                    // Parse specs (tests)
-                    if (suite.specs) {
-                        for (const spec of suite.specs) {
-                            if (spec.tests) {
-                                for (const test of spec.tests) {
-                                    // Use the FINAL attempt, not the first, so a
-                                    // test that fails then passes on retry reads
-                                    // as passed — matching TestRunner's
-                                    // last-attempt aggregation. Reading [0] made
-                                    // the dashboard disagree with the runner.
-                                    const testResult = test.results?.[test.results.length - 1];
-                                    if (testResult) {
-                                        testId++;
-                                        const status =
-                                            testResult.status === "passed"
-                                                ? "passed"
-                                                : testResult.status === "failed"
-                                                  ? "failed"
-                                                  : "skipped";
-
-                                        const result: TestResult = {
-                                            id: spec.id || String(testId),
-                                            name: spec.title,
-                                            suite: suiteName,
-                                            status,
-                                            duration: testResult.duration,
-                                        };
-
-                                        // Add error details for failed tests
-                                        if (testResult.error) {
-                                            result.error = {
-                                                message: testResult.error.message,
-                                                snippet: testResult.error.snippet,
-                                                location: testResult.error.location,
-                                            };
-                                        }
-
-                                        // Add attachments. The Playwright JSON
-                                        // reporter shape isn't typed in this
-                                        // file (the surrounding parser uses
-                                        // `any` throughout), but the attachment
-                                        // contract is narrow enough to pin
-                                        // locally without a wider refactor.
-                                        if (
-                                            testResult.attachments &&
-                                            testResult.attachments.length > 0
-                                        ) {
-                                            type RawAttachment = {
-                                                name?: string;
-                                                contentType?: string;
-                                                path?: string;
-                                            };
-                                            result.attachments = (
-                                                testResult.attachments as RawAttachment[]
-                                            ).map((att) => ({
-                                                name: att.name ?? "",
-                                                contentType: att.contentType ?? "",
-                                                path: att.path,
-                                            }));
-                                        }
-
-                                        results.push(result);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Recurse into nested suites
-                    if (suite.suites) {
-                        parseSuites(suite.suites, suiteName);
-                    }
-                }
-            };
-
-            if (jsonData.suites) {
-                parseSuites(jsonData.suites);
-            }
-
-            // Parse top-level errors (syntax errors, missing imports, etc.)
-            if (jsonData.errors && Array.isArray(jsonData.errors)) {
-                for (const err of jsonData.errors) {
-                    testId++;
-                    results.push({
-                        id: `error-${testId}`,
-                        name: err.location
-                            ? `Compilation Error in ${err.location.file?.split("/").pop() || "unknown"}`
-                            : "Compilation Error",
-                        suite: "Build Errors",
-                        status: "failed",
-                        error: {
-                            message: err.message,
-                            snippet: err.snippet,
-                            location: err.location,
-                        },
-                    });
-                    summary.tests.failed++;
-                    summary.tests.total++;
-                }
-            }
-
-            // Calculate suite stats
-            const suiteNames = new Set(results.map((r) => r.suite));
-            summary.suites.total = suiteNames.size;
-            summary.suites.failed = summary.tests.failed > 0 ? 1 : 0;
-            summary.suites.passed = summary.suites.total - summary.suites.failed;
-
-            return { results, summary };
-        }
-    } catch (e) {
-        console.warn("Failed to parse Playwright JSON report:", e);
-    }
-
-    return { results, summary };
 }
 
-// Parse raw Playwright stdout: prefer the embedded JSON reporter object,
-// falling back to line-based text scraping when no JSON is present.
-function parsePlaywrightOutput(output: string): { results: TestResult[]; summary: TestSummary } {
-    try {
-        const jsonMatch = output.match(/\{[\s\S]*"config"[\s\S]*"suites"[\s\S]*\}/);
-        if (jsonMatch) {
-            return parsePlaywrightReport(JSON.parse(jsonMatch[0]));
-        }
-    } catch (e) {
-        console.warn("Failed to parse Playwright JSON output:", e);
-    }
+function fromServerParsedRun(run: ServerParsedRun): {
+    results: TestResult[];
+    summary: TestSummary;
+} {
+    return {
+        results: run.tests.map((t) => ({
+            id: t.id,
+            name: t.name,
+            suite: t.suite,
+            status: t.status,
+            duration: t.duration,
+            error: t.error,
+            attachments: t.attachments,
+        })),
+        summary: {
+            suites: run.summary.suites,
+            tests: run.summary.tests,
+            time: run.summary.timeSeconds,
+        },
+    };
+}
 
+// Fallback ONLY for when the server couldn't produce a JSON report at all
+// (e.g. a crash before the Playwright reporter emitted anything) — scrapes
+// Playwright's human-readable console output line-by-line. This is
+// intentionally dumb text scraping, not a reimplementation of the JSON
+// suite-walker above, so it isn't "the second parser" the unification
+// removed.
+function parseTextOutput(output: string): { results: TestResult[]; summary: TestSummary } {
     const results: TestResult[] = [];
     const summary = {
         suites: { ...emptySummary.suites },
@@ -248,12 +144,21 @@ function normalizeSpecFileName(rawName: string, content?: string): string {
     if (/^[a-zA-Z0-9_-]+\.(spec|test)\.(ts|tsx|js|jsx)$/.test(base)) return base;
 
     // Strip any extension, then sanitize the stem.
-    let stem = base.replace(/\.(spec|test)\.(ts|tsx|js|jsx)$/i, "").replace(/\.(ts|tsx|js|jsx)$/i, "");
-    stem = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    let stem = base
+        .replace(/\.(spec|test)\.(ts|tsx|js|jsx)$/i, "")
+        .replace(/\.(ts|tsx|js|jsx)$/i, "");
+    stem = stem
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
     // Fall back to the test.describe title, then a generic name.
     if (!stem && content) {
         const m = content.match(/test\.describe\(\s*['"`](.+?)['"`]/);
-        if (m) stem = m[1].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+        if (m)
+            stem = m[1]
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "");
     }
     if (!stem) stem = "generated-test";
     base = `${stem}.spec.ts`;
@@ -267,6 +172,8 @@ interface TestingViewProps {
     pendingPrompt?: string;
     onPromptConsumed?: () => void;
     onNavigateRoute?: (route: import("../utils/slash-commands").DashboardRoute) => void;
+    /** Bubbled straight up from `Sidebar` — see its prop of the same name. */
+    onHitlPendingChange?: (pending: boolean) => void;
 }
 
 export function TestingView({
@@ -276,11 +183,13 @@ export function TestingView({
     pendingPrompt,
     onPromptConsumed,
     onNavigateRoute,
+    onHitlPendingChange,
 }: TestingViewProps) {
     const queryClient = useQueryClient();
     const [activeFileId, setActiveFileId] = useState<string>("");
     const [ticketPrompt, setTicketPrompt] = useState<string | undefined>();
     const [files, setFiles] = useState<TestFile[]>([]);
+    const filesRef = useRef<TestFile[]>([]);
     const [isBuilding, setIsBuilding] = useState(false);
     const [activeFilePath, setActiveFilePath] = useState<string>("");
     const [generatedTest, setGeneratedTest] = useState<string>("");
@@ -290,6 +199,12 @@ export function TestingView({
     const [testResults, setTestResults] = useState<TestResult[]>(emptyTestResults);
     const [testSummary, setTestSummary] = useState<TestSummary>(emptySummary);
     const [rawTestOutput, setRawTestOutput] = useState<string>("");
+    // The raw Playwright JSON report object from the last run, kept as a ref
+    // (not state — it's write-once-per-run and only read by the export
+    // handler, no need to trigger re-renders). Null when the last run
+    // produced no parseable JSON at all (text-scrape fallback only).
+    // biome-ignore lint/suspicious/noExplicitAny: untyped reporter payload
+    const lastReportJsonRef = useRef<any>(null);
     const [interpretation, setInterpretation] = useState<string>("");
     const [isInterpreting, setIsInterpreting] = useState(false);
     const [isFixing, setIsFixing] = useState(false);
@@ -304,6 +219,10 @@ export function TestingView({
     // (part of DiffReview) is where the fix will land when applied, and also ties
     // the diff to a single tab so the rest of the editor stays navigable.
     const [diffReview, setDiffReview] = useState<DiffReview | null>(null);
+
+    useEffect(() => {
+        filesRef.current = files;
+    }, [files]);
 
     // Snapshot of the file that was ACTUALLY run, captured at run-time so
     // the AI insights flow can't accidentally analyse stale-editor content.
@@ -653,6 +572,7 @@ export function TestingView({
                 busy?: boolean;
                 // biome-ignore lint/suspicious/noExplicitAny: untyped reporter payload
                 results?: any;
+                parsedRun?: ServerParsedRun | null;
             };
 
             // Server rejected the run because another run is already in flight
@@ -682,13 +602,20 @@ export function TestingView({
             // Store raw output
             setRawTestOutput(output);
 
-            // Prefer the server's robustly-extracted JSON report (balanced-brace
-            // scan). Only fall back to scraping stdout when the server couldn't
-            // produce one (e.g. a crash before the reporter emitted).
-            const parsed =
-                result.results && typeof result.results === "object"
-                    ? parsePlaywrightReport(result.results)
-                    : parsePlaywrightOutput(output);
+            // Keep the raw JSON report object (not just its stdout string) so
+            // "Export report" can send it straight back to `generateTestReport`
+            // without asking the server to re-extract it from stdout text —
+            // reliable even if stdout was truncated/interleaved with other output.
+            const hasJsonReport = result.results && typeof result.results === "object";
+            lastReportJsonRef.current = hasJsonReport ? result.results : null;
+
+            // Prefer the server's already-parsed run (canonical parser, shared
+            // with `generateTestReport`/`raiken report`). Only fall back to
+            // scraping stdout text when the server couldn't produce JSON at all
+            // (e.g. a crash before the reporter emitted).
+            const parsed = result.parsedRun
+                ? fromServerParsedRun(result.parsedRun)
+                : parseTextOutput(output);
             setTestResults(parsed.results);
             setTestSummary(parsed.summary);
 
@@ -721,6 +648,7 @@ export function TestingView({
             setRawTestOutput(`Error: ${error.message}`);
             setTestResults([]);
             setTestSummary(emptySummary);
+            lastReportJsonRef.current = null;
             if (erroredFileId) {
                 setFiles((prevFiles) =>
                     prevFiles.map((file) =>
@@ -810,7 +738,7 @@ export function TestingView({
             // Reuse a tab by PATH only. Name-based matching conflated distinct
             // files that share a basename (e.g. e2e/login.spec.ts vs
             // tests/login.spec.ts) into one tab.
-            const existing = files.find((f) => f.path === targetPath);
+            const existing = filesRef.current.find((f) => f.path === targetPath);
             if (existing) {
                 setFiles((prev) =>
                     prev.map((f) =>
@@ -839,7 +767,7 @@ export function TestingView({
 
         // No real path (scratch buffer / unsaved). Stash in a scratch tab so
         // the user can review, run, then Save-As to the right location.
-        const scratchName = (targetPath?.replace("scratch:", "") || "fixed-test") + "";
+        const scratchName = `${targetPath?.replace("scratch:", "") || "fixed-test"}`;
         const scratchPath = `scratch:${scratchName}`;
         sessionStorage.setItem(scratchPath, code);
         const scratchFile: TestFile = {
@@ -895,7 +823,7 @@ export function TestingView({
             // navigable). Focus that tab if it's open, otherwise the review would
             // be hidden behind whichever file happens to be active.
             if (target) {
-                const targetFile = files.find((f) => f.path === target);
+                const targetFile = filesRef.current.find((f) => f.path === target);
                 if (targetFile) {
                     setActiveFileId(targetFile.id);
                     setActiveFilePath(target);
@@ -922,18 +850,26 @@ export function TestingView({
         },
     });
 
-    const handleExportReport = () => {
-        if (isExporting || !rawTestOutput) return;
+    // Whether the last run produced a real JSON report we can export. Text-
+    // scrape-only runs (server crashed before the Playwright reporter
+    // emitted) have nothing structured to build a report from.
+    const canExportReport = lastReportJsonRef.current != null;
+
+    const handleExportReport = (
+        formats: Array<"html" | "markdown" | "json"> = ["html", "json"],
+    ) => {
+        if (isExporting || !canExportReport) return;
         setIsExporting(true);
         setExportedReportPath(null);
-        // The raw stdout carries Playwright's JSON reporter object; the server
-        // extracts it. Screenshots are read from disk (test-results/) and
-        // embedded into the HTML.
+        // Send the already-parsed JSON report object directly instead of
+        // asking the server to re-extract it from raw stdout — more
+        // reliable, since it doesn't depend on the JSON reporter's output
+        // surviving intact inside the stdout stream.
         generateReportMutation.mutate({
-            rawReportJson: rawTestOutput,
-            rawOutput: rawTestOutput,
+            report: lastReportJsonRef.current,
+            rawOutput: rawTestOutput || undefined,
             testFile: lastRunTestPath || activeFilePath || undefined,
-            formats: ["html", "json"],
+            formats,
         });
     };
 
@@ -1222,6 +1158,17 @@ export function TestingView({
         setIsResizing(true);
     };
 
+    const handleResizeKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+        const step = e.shiftKey ? 40 : 10;
+        if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            setSidebarWidth((w) => Math.max(280, w - step));
+        } else if (e.key === "ArrowRight") {
+            e.preventDefault();
+            setSidebarWidth((w) => Math.min(600, w + step));
+        }
+    };
+
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
             if (isResizing) {
@@ -1281,15 +1228,25 @@ export function TestingView({
                         collapsed={sidebarCollapsed}
                         onTabChange={onSidebarTabChange}
                         onNavigateRoute={onNavigateRoute}
+                        onHitlPendingChange={onHitlPendingChange}
                         initialPrompt={ticketPrompt || pendingPrompt}
                         onInitialPromptConsumed={() => {
                             if (ticketPrompt) setTicketPrompt(undefined);
                             onPromptConsumed?.();
                         }}
                     />
+                    {/* biome-ignore lint/a11y/useSemanticElements: this is the WAI-ARIA "window splitter" pattern (interactive, focusable, keyboard-resizable) — `<hr>` can't carry tabIndex/keyboard interaction the way this widget needs */}
                     <div
                         className={`resize-handle ${isResizing ? "resizing" : ""}`}
                         onMouseDown={handleMouseDown}
+                        onKeyDown={handleResizeKeyDown}
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label="Resize sidebar"
+                        aria-valuenow={sidebarWidth}
+                        aria-valuemin={280}
+                        aria-valuemax={600}
+                        tabIndex={0}
                     />
                 </div>
 
@@ -1343,6 +1300,7 @@ export function TestingView({
                 isFixing={isFixing}
                 fixError={fixError}
                 onExportReport={handleExportReport}
+                canExportReport={canExportReport}
                 isExporting={isExporting}
                 exportedReportPath={exportedReportPath}
             />

@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 
 // Helper function to strip ANSI codes from error messages
 function stripAnsiCodes(str: string): string {
-    // eslint-disable-next-line no-control-regex
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escape/control bytes is the point of this regex
     return str.replace(/\x1b\[[0-9;]*m/g, "").replace(/[\x00-\x1F\x7F]/g, "");
+}
+
+function safeMarkdownHref(href: string | undefined): string | null {
+    if (!href) return null;
+    try {
+        const parsed = new URL(href, "https://raiken.local");
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+        return parsed.origin === "https://raiken.local" ? href : parsed.href;
+    } catch {
+        return null;
+    }
 }
 
 export interface TestAttachment {
@@ -95,10 +106,18 @@ interface TestResultsProps {
     fixError?: string | null;
     /**
      * Fired when the user clicks "Export report". The parent writes a detailed
-     * HTML report (with embedded screenshots) from the last run and returns the
-     * saved path via `exportedReportPath`.
+     * report (HTML with embedded screenshots, plus whichever other formats
+     * are passed) from the last run and returns the saved path via
+     * `exportedReportPath`.
      */
-    onExportReport?: () => void;
+    onExportReport?: (formats: Array<"html" | "markdown" | "json">) => void;
+    /**
+     * Whether the last run produced a real JSON report to export from. When
+     * false (a text-scrape-only fallback happened, e.g. a crash before the
+     * Playwright reporter emitted), the Export button is disabled rather
+     * than sending a request the server can't fulfill.
+     */
+    canExportReport?: boolean;
     isExporting?: boolean;
     exportedReportPath?: string | null;
 }
@@ -118,6 +137,7 @@ export function TestResults({
     isFixing,
     fixError,
     onExportReport,
+    canExportReport = true,
     isExporting,
     exportedReportPath,
 }: TestResultsProps) {
@@ -127,10 +147,13 @@ export function TestResults({
     const [viewMode, setViewMode] = useState<"formatted" | "artifacts" | "raw" | "insights">(
         "formatted",
     );
+    // Additional export format alongside the always-included HTML+JSON.
+    const [exportMarkdown, setExportMarkdown] = useState(false);
 
     const failedTests = results.filter((r) => r.status === "failed");
     const passedTests = results.filter((r) => r.status === "passed");
     const hasResults = results.length > 0;
+    const resultStateKey = results.map((result) => `${result.id}:${result.status}`).join("|");
 
     // Expand the panel whenever a run produces results — pass OR fail — so the
     // outcome is always visible instead of the panel silently staying collapsed
@@ -138,11 +161,11 @@ export function TestResults({
     useEffect(() => {
         if (results.length > 0) {
             setIsExpanded(true);
-            if (failedTests.length > 0) {
-                setSelectedTest(failedTests[0].id);
-            }
+            setSelectedTest(failedTests[0]?.id ?? null);
+        } else {
+            setSelectedTest(null);
         }
-    }, [results.length]);
+    }, [resultStateKey]);
 
     // Expand as soon as a run starts so the user immediately sees "Running…"
     // (the panel used to stay collapsed, making it look like nothing happened).
@@ -174,9 +197,14 @@ export function TestResults({
     return (
         <div className={`test-results ${isExpanded ? "expanded" : "collapsed"}`}>
             {/* Header with Summary Badge */}
-            <button className="results-header" onClick={() => setIsExpanded(!isExpanded)}>
+            <button
+                type="button"
+                className="results-header"
+                onClick={() => setIsExpanded(!isExpanded)}
+            >
                 <div className="header-left">
                     <svg
+                        aria-hidden="true"
                         className={`expand-icon ${isExpanded ? "expanded" : ""}`}
                         viewBox="0 0 24 24"
                         fill="none"
@@ -220,6 +248,7 @@ export function TestResults({
                     {!isRunning && !hasResults && !rawOutput && (
                         <div className="empty-state">
                             <svg
+                                aria-hidden="true"
                                 className="empty-icon"
                                 viewBox="0 0 24 24"
                                 fill="none"
@@ -251,10 +280,12 @@ export function TestResults({
                         <div className="view-toggle">
                             <div className="toggle-group">
                                 <button
+                                    type="button"
                                     className={`toggle-btn ${viewMode === "formatted" ? "active" : ""}`}
                                     onClick={() => setViewMode("formatted")}
                                 >
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -265,10 +296,12 @@ export function TestResults({
                                     Results
                                 </button>
                                 <button
+                                    type="button"
                                     className={`toggle-btn ${viewMode === "insights" ? "active" : ""}`}
                                     onClick={() => setViewMode("insights")}
                                 >
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -279,10 +312,12 @@ export function TestResults({
                                     AI Insights
                                 </button>
                                 <button
+                                    type="button"
                                     className={`toggle-btn ${viewMode === "artifacts" ? "active" : ""}`}
                                     onClick={() => setViewMode("artifacts")}
                                 >
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -293,10 +328,12 @@ export function TestResults({
                                     Artifacts
                                 </button>
                                 <button
+                                    type="button"
                                     className={`toggle-btn ${viewMode === "raw" ? "active" : ""}`}
                                     onClick={() => setViewMode("raw")}
                                 >
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -308,34 +345,74 @@ export function TestResults({
                                 </button>
                             </div>
                             {hasResults && onExportReport && (
-                                <button
-                                    className="analyze-btn"
-                                    onClick={onExportReport}
-                                    disabled={isExporting}
-                                    title="Write a detailed HTML report with screenshots"
-                                >
-                                    {isExporting ? (
-                                        <>
-                                            <div className="btn-spinner"></div>
-                                            Exporting...
-                                        </>
-                                    ) : (
-                                        <>
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="2"
-                                            >
-                                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                                            </svg>
-                                            Export report
-                                        </>
+                                <>
+                                    <button
+                                        type="button"
+                                        className="analyze-btn"
+                                        onClick={() =>
+                                            onExportReport(
+                                                exportMarkdown
+                                                    ? ["html", "markdown", "json"]
+                                                    : ["html", "json"],
+                                            )
+                                        }
+                                        disabled={isExporting || !canExportReport}
+                                        title={
+                                            canExportReport
+                                                ? "Write a detailed HTML report with screenshots"
+                                                : "No structured report available for this run"
+                                        }
+                                    >
+                                        {isExporting ? (
+                                            <>
+                                                <div className="btn-spinner"></div>
+                                                Exporting...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <svg
+                                                    aria-hidden="true"
+                                                    viewBox="0 0 24 24"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth="2"
+                                                >
+                                                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                                                </svg>
+                                                Export report
+                                            </>
+                                        )}
+                                    </button>
+                                    {canExportReport && (
+                                        <label
+                                            className="export-md-toggle"
+                                            title="Also write a Markdown copy of the report"
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 4,
+                                                fontSize: 11,
+                                                color: "var(--text-secondary, #8b99a6)",
+                                                cursor: "pointer",
+                                                userSelect: "none",
+                                            }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={exportMarkdown}
+                                                onChange={(e) =>
+                                                    setExportMarkdown(e.target.checked)
+                                                }
+                                                disabled={isExporting}
+                                            />
+                                            + Markdown
+                                        </label>
                                     )}
-                                </button>
+                                </>
                             )}
                             {hasResults && testCode && onRequestInterpretation && (
                                 <button
+                                    type="button"
                                     className="analyze-btn"
                                     onClick={handleAnalyzeClick}
                                     disabled={isInterpreting}
@@ -348,6 +425,7 @@ export function TestResults({
                                     ) : (
                                         <>
                                             <svg
+                                                aria-hidden="true"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -408,6 +486,7 @@ export function TestResults({
                                     return (
                                         <div className="no-artifacts">
                                             <svg
+                                                aria-hidden="true"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -439,6 +518,7 @@ export function TestResults({
                                             <div className="artifact-section">
                                                 <h4>
                                                     <svg
+                                                        aria-hidden="true"
                                                         viewBox="0 0 24 24"
                                                         fill="none"
                                                         stroke="currentColor"
@@ -463,6 +543,7 @@ export function TestResults({
                                                                 ) : (
                                                                     <div className="placeholder-image">
                                                                         <svg
+                                                                            aria-hidden="true"
                                                                             viewBox="0 0 24 24"
                                                                             fill="none"
                                                                             stroke="currentColor"
@@ -492,6 +573,7 @@ export function TestResults({
                                             <div className="artifact-section">
                                                 <h4>
                                                     <svg
+                                                        aria-hidden="true"
                                                         viewBox="0 0 24 24"
                                                         fill="none"
                                                         stroke="currentColor"
@@ -508,6 +590,7 @@ export function TestResults({
                                                             className={`artifact-item video ${v.testStatus}`}
                                                         >
                                                             <svg
+                                                                aria-hidden="true"
                                                                 viewBox="0 0 24 24"
                                                                 fill="none"
                                                                 stroke="currentColor"
@@ -544,6 +627,7 @@ export function TestResults({
                                             <div className="artifact-section">
                                                 <h4>
                                                     <svg
+                                                        aria-hidden="true"
                                                         viewBox="0 0 24 24"
                                                         fill="none"
                                                         stroke="currentColor"
@@ -560,6 +644,7 @@ export function TestResults({
                                                             className={`artifact-item trace ${t.testStatus}`}
                                                         >
                                                             <svg
+                                                                aria-hidden="true"
                                                                 viewBox="0 0 24 24"
                                                                 fill="none"
                                                                 stroke="currentColor"
@@ -596,6 +681,7 @@ export function TestResults({
                                             <div className="artifact-section">
                                                 <h4>
                                                     <svg
+                                                        aria-hidden="true"
                                                         viewBox="0 0 24 24"
                                                         fill="none"
                                                         stroke="currentColor"
@@ -612,6 +698,7 @@ export function TestResults({
                                                             className={`artifact-item other ${o.testStatus}`}
                                                         >
                                                             <svg
+                                                                aria-hidden="true"
                                                                 viewBox="0 0 24 24"
                                                                 fill="none"
                                                                 stroke="currentColor"
@@ -665,6 +752,7 @@ export function TestResults({
                                 <div className="interpretation-content">
                                     <div className="interpretation-header">
                                         <svg
+                                            aria-hidden="true"
                                             viewBox="0 0 24 24"
                                             fill="none"
                                             stroke="currentColor"
@@ -726,24 +814,24 @@ export function TestResults({
                                                         </code>
                                                     );
                                                 },
-                                                pre: ({ children }) => {
-                                                    const preRef = useRef<HTMLPreElement>(null);
-                                                    return (
-                                                        <pre ref={preRef} className="int-pre">
+                                                pre: ({ children }) => (
+                                                    <pre className="int-pre">{children}</pre>
+                                                ),
+                                                a: ({ href, children }) => {
+                                                    const safeHref = safeMarkdownHref(href);
+                                                    return safeHref ? (
+                                                        <a
+                                                            href={safeHref}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="int-link"
+                                                        >
                                                             {children}
-                                                        </pre>
+                                                        </a>
+                                                    ) : (
+                                                        <span className="int-link">{children}</span>
                                                     );
                                                 },
-                                                a: ({ href, children }) => (
-                                                    <a
-                                                        href={href}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="int-link"
-                                                    >
-                                                        {children}
-                                                    </a>
-                                                ),
                                                 ul: ({ children }) => (
                                                     <ul className="int-list">{children}</ul>
                                                 ),
@@ -795,6 +883,7 @@ export function TestResults({
                                                 ) : (
                                                     <>
                                                         <svg
+                                                            aria-hidden="true"
                                                             viewBox="0 0 24 24"
                                                             fill="none"
                                                             stroke="currentColor"
@@ -821,6 +910,7 @@ export function TestResults({
                             ) : (
                                 <div className="no-insights">
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -836,10 +926,12 @@ export function TestResults({
                                     <div className="no-insights-actions">
                                         {testCode && onRequestInterpretation && (
                                             <button
+                                                type="button"
                                                 className="start-analysis-btn"
                                                 onClick={handleAnalyzeClick}
                                             >
                                                 <svg
+                                                    aria-hidden="true"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -869,6 +961,7 @@ export function TestResults({
                                                 ) : (
                                                     <>
                                                         <svg
+                                                            aria-hidden="true"
                                                             viewBox="0 0 24 24"
                                                             fill="none"
                                                             stroke="currentColor"
@@ -919,6 +1012,7 @@ export function TestResults({
                                                 ) : (
                                                     <>
                                                         <svg
+                                                            aria-hidden="true"
                                                             viewBox="0 0 24 24"
                                                             fill="none"
                                                             stroke="currentColor"
@@ -960,6 +1054,7 @@ export function TestResults({
                             <div className="test-list">
                                 {results.map((result) => (
                                     <button
+                                        type="button"
                                         key={result.id}
                                         className={`test-item ${result.status} ${selectedTest === result.id ? "selected" : ""}`}
                                         onClick={() =>
@@ -971,6 +1066,8 @@ export function TestResults({
                                         <span className="status-icon">
                                             {result.status === "passed" && (
                                                 <svg
+                                                    role="img"
+                                                    aria-label="Passed"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -981,6 +1078,8 @@ export function TestResults({
                                             )}
                                             {result.status === "failed" && (
                                                 <svg
+                                                    role="img"
+                                                    aria-label="Failed"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -991,6 +1090,8 @@ export function TestResults({
                                             )}
                                             {result.status === "skipped" && (
                                                 <svg
+                                                    role="img"
+                                                    aria-label="Skipped"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -1010,6 +1111,7 @@ export function TestResults({
                                             </span>
                                         )}
                                         <svg
+                                            aria-hidden="true"
                                             className="chevron"
                                             viewBox="0 0 24 24"
                                             fill="none"
@@ -1058,6 +1160,7 @@ export function TestResults({
                                             {selectedTestDetails.error.location && (
                                                 <div className="error-location">
                                                     <svg
+                                                        aria-hidden="true"
                                                         viewBox="0 0 24 24"
                                                         fill="none"
                                                         stroke="currentColor"
@@ -1088,6 +1191,7 @@ export function TestResults({
                                     {selectedTestDetails.status === "passed" && (
                                         <div className="success-message">
                                             <svg
+                                                aria-hidden="true"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -1112,6 +1216,7 @@ export function TestResults({
                                     </span>
                                     <span className="stat passed">
                                         <svg
+                                            aria-hidden="true"
                                             viewBox="0 0 24 24"
                                             fill="none"
                                             stroke="currentColor"
@@ -1124,6 +1229,7 @@ export function TestResults({
                                     {summary.tests.failed > 0 && (
                                         <span className="stat failed">
                                             <svg
+                                                aria-hidden="true"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -1137,6 +1243,7 @@ export function TestResults({
                                 </div>
                                 <span className="summary-time">
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"

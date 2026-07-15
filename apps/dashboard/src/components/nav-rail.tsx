@@ -3,12 +3,34 @@ import { Logo } from "./logo";
 type View = "testing" | "discovery" | "quality" | "settings";
 type SidebarTab = "chat" | "files";
 
+/**
+ * Attention flags surfaced as a small dot on the corresponding rail button —
+ * the nav-rail equivalent of the REPL's startup banner. Booleans (not
+ * counts) are intentional: the rail is 44px wide, there's no room for a
+ * number, and "does this need a look" is all the badge needs to answer.
+ */
+interface NavRailAttention {
+    /** A `save_approval`/`run_approval` card is awaiting a decision. */
+    chat?: boolean;
+    /** At least one test file's last recorded run failed/errored/timed out. */
+    files?: boolean;
+    /** Discovery is paused/failed, or has unresolved blockers. */
+    discovery?: boolean;
+}
+
 interface NavRailProps {
     activeView: View;
     activeSidebarTab: SidebarTab;
     sidebarCollapsed: boolean;
     onNavigate: (view: View, tab?: SidebarTab) => void;
     onToggleCollapse: () => void;
+    attention?: NavRailAttention;
+}
+
+/** Small dot rendered in the top-right corner of a rail button. */
+function AttentionDot({ show }: { show: boolean | undefined }) {
+    if (!show) return null;
+    return <span className="rail-dot" aria-hidden="true" />;
 }
 
 export function NavRail({
@@ -17,11 +39,12 @@ export function NavRail({
     sidebarCollapsed,
     onNavigate,
     onToggleCollapse,
+    attention,
 }: NavRailProps) {
     const isOnTesting = activeView === "testing";
 
     return (
-        <nav className="nav-rail" role="navigation" aria-label="Main navigation">
+        <nav className="nav-rail" aria-label="Main navigation">
             <div className="rail-brand" title="Raiken">
                 <Logo size={18} />
             </div>
@@ -29,8 +52,8 @@ export function NavRail({
                 type="button"
                 className={`rail-btn ${isOnTesting && activeSidebarTab === "chat" ? "active" : ""}`}
                 onClick={() => onNavigate("testing", "chat")}
-                title="chat"
-                aria-label="chat"
+                title={attention?.chat ? "chat — waiting on your approval" : "chat"}
+                aria-label={attention?.chat ? "chat, needs attention" : "chat"}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -42,13 +65,14 @@ export function NavRail({
                     <rect x="4" y="4" width="16" height="14" rx="3" />
                     <path d="M8 9h8M8 13h5" />
                 </svg>
+                <AttentionDot show={attention?.chat} />
             </button>
             <button
                 type="button"
                 className={`rail-btn ${isOnTesting && activeSidebarTab === "files" ? "active" : ""}`}
                 onClick={() => onNavigate("testing", "files")}
-                title="files"
-                aria-label="files"
+                title={attention?.files ? "files — a test is failing" : "files"}
+                aria-label={attention?.files ? "files, needs attention" : "files"}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -59,13 +83,14 @@ export function NavRail({
                 >
                     <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                 </svg>
+                <AttentionDot show={attention?.files} />
             </button>
             <button
                 type="button"
                 className={`rail-btn ${activeView === "discovery" ? "active" : ""}`}
                 onClick={() => onNavigate("discovery")}
-                title="discovery"
-                aria-label="discovery"
+                title={attention?.discovery ? "discovery — needs attention" : "discovery"}
+                aria-label={attention?.discovery ? "discovery, needs attention" : "discovery"}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -77,6 +102,7 @@ export function NavRail({
                     <circle cx="12" cy="12" r="9" />
                     <path d="M14.8 9.2l-2.1 5.6-3.5 1.2 1.2-3.5 4.4-3.3z" />
                 </svg>
+                <AttentionDot show={attention?.discovery} />
             </button>
             <button
                 type="button"
@@ -213,6 +239,17 @@ export function NavRail({
                 .rail-btn svg {
                     width: 16px;
                     height: 16px;
+                }
+
+                .rail-dot {
+                    position: absolute;
+                    top: 6px;
+                    right: 9px;
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 50%;
+                    background: var(--warn);
+                    box-shadow: 0 0 0 1.5px var(--bg-bar);
                 }
             `}</style>
         </nav>

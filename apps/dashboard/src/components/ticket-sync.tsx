@@ -27,6 +27,7 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
             <div className="ticket-sync-header">
                 <div className="ticket-sync-left">
                     <svg
+                        aria-hidden="true"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
@@ -86,6 +87,7 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
                                 <span className="impact-badge ok">No impact</span>
                             )}
                             <svg
+                                aria-hidden="true"
                                 viewBox="0 0 24 24"
                                 fill="none"
                                 stroke="currentColor"
@@ -105,6 +107,7 @@ export function TicketSyncBar({ onGenerateTest }: TicketSyncProps) {
                         title="Sync with ticket system"
                     >
                         <svg
+                            aria-hidden="true"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
@@ -237,6 +240,7 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
                                             </span>
                                         )}
                                         <svg
+                                            aria-hidden="true"
                                             viewBox="0 0 24 24"
                                             fill="none"
                                             stroke="currentColor"
@@ -362,23 +366,26 @@ function ImpactPanel({ impact, onGenerateTest }: ImpactPanelProps) {
                 <div className="impact-section">
                     <h4>Suggestions</h4>
                     <ul className="impact-list">
-                        {impact.suggestions.map((s, i) => (
-                            <li key={i} className="impact-item suggestion">
-                                <span
-                                    className={`dot ${s.action === "create_test" ? "create" : s.action === "update_test" ? "warn" : s.action === "review_test" ? "info" : "ok"}`}
-                                />
-                                <span className="item-reason">{s.reason}</span>
-                                {s.suggestedPrompt && onGenerateTest && (
-                                    <button
-                                        type="button"
-                                        className="use-prompt-btn"
-                                        onClick={() => onGenerateTest(s.suggestedPrompt!)}
-                                    >
-                                        Generate
-                                    </button>
-                                )}
-                            </li>
-                        ))}
+                        {impact.suggestions.map((s, i) => {
+                            const suggestedPrompt = s.suggestedPrompt;
+                            return (
+                                <li key={i} className="impact-item suggestion">
+                                    <span
+                                        className={`dot ${s.action === "create_test" ? "create" : s.action === "update_test" ? "warn" : s.action === "review_test" ? "info" : "ok"}`}
+                                    />
+                                    <span className="item-reason">{s.reason}</span>
+                                    {suggestedPrompt && onGenerateTest && (
+                                        <button
+                                            type="button"
+                                            className="use-prompt-btn"
+                                            onClick={() => onGenerateTest(suggestedPrompt)}
+                                        >
+                                            Generate
+                                        </button>
+                                    )}
+                                </li>
+                            );
+                        })}
                     </ul>
                 </div>
             )}

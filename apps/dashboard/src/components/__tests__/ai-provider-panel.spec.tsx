@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeModelOptions } from "./ai-provider-panel";
+import { normalizeModelOptions } from "../ai-provider-panel";
 
 describe("normalizeModelOptions", () => {
     it("deduplicates provider models and fills missing display names", () => {

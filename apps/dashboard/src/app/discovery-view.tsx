@@ -14,6 +14,15 @@ function formatDate(value: string | null | undefined): string {
     return Number.isNaN(date.getTime()) ? "n/a" : date.toLocaleString();
 }
 
+function safeHttpUrl(value: string): string | null {
+    try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+    } catch {
+        return null;
+    }
+}
+
 const POLL_RUNTIME_IDLE_MS = 15_000;
 const POLL_RUNTIME_ACTIVE_MS = 3_000;
 const POLL_DATA_IDLE_MS = 20_000;
@@ -30,6 +39,7 @@ interface DiscoveryViewProps {
 
 export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
     const [toastMessage, setToastMessage] = useState<string | null>(null);
+    const generateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         if (toastMessage) {
@@ -38,9 +48,20 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
         }
     }, [toastMessage]);
 
+    useEffect(
+        () => () => {
+            if (generateTimerRef.current) clearTimeout(generateTimerRef.current);
+        },
+        [],
+    );
+
     const handleGenerateTest = (pageUrl: string) => {
         setToastMessage(`Sending to AI Agent: ${pageUrl}`);
-        setTimeout(() => onGenerateTest?.(pageUrl), 600);
+        if (generateTimerRef.current) clearTimeout(generateTimerRef.current);
+        generateTimerRef.current = setTimeout(() => {
+            generateTimerRef.current = null;
+            onGenerateTest?.(pageUrl);
+        }, 600);
     };
     const utils = trpc.useUtils();
     const [runtimePollMs, setRuntimePollMs] = useState(POLL_RUNTIME_IDLE_MS);
@@ -59,6 +80,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
         skipAuth: false,
         excludePatterns: [...DEFAULT_EXCLUDE],
     });
+    const formUrlForLink = useMemo(() => safeHttpUrl(form.url), [form.url]);
 
     const runtimeQuery = trpc.getDiscoveryRuntime.useQuery(
         {},
@@ -348,8 +370,8 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
     }, [isRunning, runtime?.maxPages, runtime?.pagesDiscovered]);
 
     const totalResults = pagesTotal + verifiedLinks.length + brokenLinks.length;
-    const showCompletion =
-        runtime?.phase === "completed" && runtime.completionReason && !dismissedCompletion;
+    const completionReason = runtime?.phase === "completed" ? runtime.completionReason : undefined;
+    const showCompletion = Boolean(completionReason) && !dismissedCompletion;
 
     return (
         <div className="discovery-view">
@@ -397,10 +419,10 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                             }
                                             placeholder={detectedBaseURL ?? "http://localhost:3000"}
                                         />
-                                        {form.url && (
+                                        {formUrlForLink && (
                                             <a
                                                 className="url-open"
-                                                href={form.url}
+                                                href={formUrlForLink}
                                                 target="_blank"
                                                 rel="noreferrer"
                                                 title="Open in browser"
@@ -414,6 +436,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                 >
                                                     <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                                                 </svg>
+                                                <span className="sr-only">Open in browser</span>
                                             </a>
                                         )}
                                     </div>
@@ -636,9 +659,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                     >
                                         <path d="M5 13l4 4L19 7" />
                                     </svg>
-                                    <span>
-                                        Discovery complete &mdash; {runtime!.completionReason}
-                                    </span>
+                                    <span>Discovery complete &mdash; {completionReason}</span>
                                     <button
                                         type="button"
                                         className="banner-close"
@@ -844,54 +865,59 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                                                         </td>
                                                     </tr>
                                                 ) : (
-                                                    pages.map((page) => (
-                                                        <tr key={`${page.url}-${page.depth}`}>
-                                                            <td
-                                                                className="url-cell"
-                                                                title={page.url}
-                                                            >
-                                                                {page.url}
-                                                            </td>
-                                                            <td>{page.depth}</td>
-                                                            <td>{page.title || "Untitled"}</td>
-                                                            <td>
-                                                                <div className="page-actions">
-                                                                    <button
-                                                                        type="button"
-                                                                        className="table-action"
-                                                                        onClick={() =>
-                                                                            setSelectedPageUrl(
-                                                                                page.url,
-                                                                            )
-                                                                        }
-                                                                    >
-                                                                        Snapshot
-                                                                    </button>
-                                                                    <a
-                                                                        className="table-action table-link"
-                                                                        href={page.url}
-                                                                        target="_blank"
-                                                                        rel="noreferrer"
-                                                                    >
-                                                                        Open
-                                                                    </a>
-                                                                    {onGenerateTest && (
+                                                    pages.map((page) => {
+                                                        const pageHref = safeHttpUrl(page.url);
+                                                        return (
+                                                            <tr key={`${page.url}-${page.depth}`}>
+                                                                <td
+                                                                    className="url-cell"
+                                                                    title={page.url}
+                                                                >
+                                                                    {page.url}
+                                                                </td>
+                                                                <td>{page.depth}</td>
+                                                                <td>{page.title || "Untitled"}</td>
+                                                                <td>
+                                                                    <div className="page-actions">
                                                                         <button
                                                                             type="button"
-                                                                            className="table-action generate"
+                                                                            className="table-action"
                                                                             onClick={() =>
-                                                                                handleGenerateTest(
+                                                                                setSelectedPageUrl(
                                                                                     page.url,
                                                                                 )
                                                                             }
                                                                         >
-                                                                            Generate Test
+                                                                            Snapshot
                                                                         </button>
-                                                                    )}
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    ))
+                                                                        {pageHref && (
+                                                                            <a
+                                                                                className="table-action table-link"
+                                                                                href={pageHref}
+                                                                                target="_blank"
+                                                                                rel="noreferrer"
+                                                                            >
+                                                                                Open
+                                                                            </a>
+                                                                        )}
+                                                                        {onGenerateTest && (
+                                                                            <button
+                                                                                type="button"
+                                                                                className="table-action generate"
+                                                                                onClick={() =>
+                                                                                    handleGenerateTest(
+                                                                                        page.url,
+                                                                                    )
+                                                                                }
+                                                                            >
+                                                                                Generate Test
+                                                                            </button>
+                                                                        )}
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })
                                                 )}
                                             </tbody>
                                         </table>
@@ -1055,7 +1081,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
             </div>
 
             {toastMessage && (
-                <div className="dv-toast">
+                <output className="dv-toast" aria-live="polite">
                     <svg
                         viewBox="0 0 24 24"
                         fill="none"
@@ -1066,7 +1092,7 @@ export function DiscoveryView({ onGenerateTest }: DiscoveryViewProps) {
                         <path d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
                     <span>{toastMessage}</span>
-                </div>
+                </output>
             )}
 
             <style>{STYLES}</style>
@@ -1253,9 +1279,9 @@ function BlockerCard({
             </div>
 
             {evidence && (
-                <pre className="bp-evidence" role="region" aria-label="Detector evidence">
-                    {evidence}
-                </pre>
+                <section aria-label="Detector evidence">
+                    <pre className="bp-evidence">{evidence}</pre>
+                </section>
             )}
 
             {needsBrowser && (

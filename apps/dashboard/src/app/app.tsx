@@ -132,11 +132,17 @@ function ConnectionError() {
     );
 }
 
+// Attention badges are cheap "does anything need a look" checks, not
+// realtime telemetry — a slow 30s poll keeps the nav rail honest without
+// adding meaningful load, matching the getHealth poll below.
+const ATTENTION_POLL_MS = 30000;
+
 export function App() {
     const [currentView, setCurrentView] = useState<View>(getViewFromHash);
     const [sidebarTab, setSidebarTab] = useState<SidebarTab>("chat");
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [pendingTestPrompt, setPendingTestPrompt] = useState<string | undefined>();
+    const [hitlPending, setHitlPending] = useState(false);
 
     const healthQuery = trpc.getHealth.useQuery(undefined, {
         retry: 2,
@@ -144,6 +150,31 @@ export function App() {
         refetchInterval: 30000,
     });
     const isBackendDown = healthQuery.isError;
+
+    // Nav-rail attention dots — the same "don't make the user go hunting for
+    // what needs them" idea as the REPL's startup banner, just live-updating
+    // instead of a one-shot message. Each query degrades independently (a
+    // fresh project with no discovery DB yet just resolves to "nothing to
+    // flag" server-side) so one failing check can't blank out the others.
+    const discoverySessionQuery = trpc.getDiscoverySession.useQuery(
+        {},
+        { refetchInterval: ATTENTION_POLL_MS, refetchOnWindowFocus: false },
+    );
+    const discoveryStatsQuery = trpc.getDiscoveryStats.useQuery(
+        {},
+        { refetchInterval: ATTENTION_POLL_MS, refetchOnWindowFocus: false },
+    );
+    const testFilesQuery = trpc.listTestFiles.useQuery(
+        {},
+        { refetchInterval: ATTENTION_POLL_MS, refetchOnWindowFocus: false },
+    );
+
+    const discoveryNeedsAttention =
+        discoverySessionQuery.data?.status === "paused" ||
+        discoverySessionQuery.data?.status === "failed" ||
+        (discoveryStatsQuery.data?.unresolvedBlockersCount ?? 0) > 0;
+
+    const anyTestBroken = (testFilesQuery.data?.files ?? []).some((f) => f.status === "broken");
 
     const navigateTo = useCallback((view: View) => {
         setCurrentView(view);
@@ -200,6 +231,11 @@ export function App() {
                 sidebarCollapsed={sidebarCollapsed}
                 onNavigate={handleNavigate}
                 onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+                attention={{
+                    chat: hitlPending,
+                    files: anyTestBroken,
+                    discovery: discoveryNeedsAttention,
+                }}
             />
 
             {/*
@@ -220,6 +256,7 @@ export function App() {
                     pendingPrompt={pendingTestPrompt}
                     onPromptConsumed={() => setPendingTestPrompt(undefined)}
                     onNavigateRoute={handleSlashRoute}
+                    onHitlPendingChange={setHitlPending}
                 />
             </div>
 

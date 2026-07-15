@@ -30,7 +30,13 @@ const STATUS_META = {
 
 function StatusDot({ status }: { status: TestFileItem["status"] }) {
     if (!status) return null;
-    return <span className={`fp-dot fp-dot--${status}`} aria-label={STATUS_META[status].label} />;
+    return (
+        <span
+            className={`fp-dot fp-dot--${status}`}
+            role="img"
+            aria-label={STATUS_META[status].label}
+        />
+    );
 }
 
 export function FilesPanel({
@@ -54,7 +60,10 @@ export function FilesPanel({
     const grouped = useMemo(() => {
         const map: Record<string, TestFileItem[]> = {};
         for (const f of filtered) {
-            (map[f.directory] ??= []).push(f);
+            if (!map[f.directory]) {
+                map[f.directory] = [];
+            }
+            map[f.directory].push(f);
         }
         return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
     }, [filtered]);

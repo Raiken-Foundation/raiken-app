@@ -366,11 +366,7 @@ export function CodeEditor({
                             <div className="ce-rule" aria-hidden="true" />
 
                             {/* Icon-only actions */}
-                            <div
-                                className="ce-actions"
-                                role="toolbar"
-                                aria-label="File actions"
-                            >
+                            <div className="ce-actions" role="toolbar" aria-label="File actions">
                                 {onNewFile && (
                                     <IconButton label={`New file (${MOD}N)`} onClick={onNewFile}>
                                         <IconPlus />
@@ -457,9 +453,7 @@ export function CodeEditor({
                                 )}
                                 {onRunTests && (
                                     <IconButton
-                                        label={
-                                            isRunningTests ? "Running…" : `Run tests (${MOD}↵)`
-                                        }
+                                        label={isRunningTests ? "Running…" : `Run tests (${MOD}↵)`}
                                         onClick={() => onRunTests(activeFile.id)}
                                         disabled={isRunningTests}
                                         tone="run"

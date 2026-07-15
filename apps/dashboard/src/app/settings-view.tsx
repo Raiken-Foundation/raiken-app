@@ -1,15 +1,39 @@
-import { useEffect, useState } from "react";
+import { cloneElement, isValidElement, type ReactElement, useEffect, useId, useState } from "react";
 import { AIProviderPanel } from "../components/ai-provider-panel";
 import { Header } from "../components/header";
 import { trpc } from "../utils/trpc";
+
+function optionalNumber(value: string): number | undefined {
+    if (value === "") return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 interface RaikenConfig {
     projectType: string;
     testDirectory: string;
     playwrightConfig: string;
     outputFormats: string[];
-    ai: { provider: string; model: string; apiKey?: string; baseURL?: string };
-    auth?: Record<string, unknown>;
+    ai: {
+        provider: string;
+        model: string;
+        apiKey?: string;
+        baseURL?: string;
+        maxTokens?: number;
+        temperature?: number;
+    };
+    auth?: {
+        storageStatePath?: string;
+        baseUrl?: string;
+        loginPath?: string;
+        credentials?: {
+            username?: string;
+            password?: string;
+            usernameEnv?: string;
+            passwordEnv?: string;
+        };
+        customLoginScript?: string;
+    };
     features: { video: boolean; screenshots: boolean; tracing: boolean; network: boolean };
     indexing?: { fullScan: boolean };
     discovery?: {
@@ -19,6 +43,8 @@ interface RaikenConfig {
         timeout?: number;
         excludePatterns?: string[];
         pauseOnAuth?: boolean;
+        maxRunTimeMs?: number;
+        preserveQueryParams?: boolean;
     };
     browser: { defaultBrowser: string; headless: boolean; timeout: number; retries: number };
     autonomy?: {
@@ -28,6 +54,13 @@ interface RaikenConfig {
         autoLearn: string;
         maxRetries: number;
     };
+    integrations?: {
+        provider?: "github" | "jira" | "linear";
+        github?: { token?: string; owner?: string; repo?: string };
+        jira?: { host?: string; email?: string; apiToken?: string; projectKey?: string };
+        linear?: { apiKey?: string; teamKey?: string };
+        branchPatterns?: string[];
+    };
 }
 
 const defaultConfig: RaikenConfig = {
@@ -35,7 +68,13 @@ const defaultConfig: RaikenConfig = {
     testDirectory: "e2e",
     playwrightConfig: "playwright.config.ts",
     outputFormats: ["typescript"],
-    ai: { provider: "openrouter", model: "anthropic/claude-sonnet-4.5" },
+    ai: {
+        provider: "openrouter",
+        model: "anthropic/claude-sonnet-4.5",
+        maxTokens: 4000,
+        temperature: 0.7,
+    },
+    auth: {},
     features: { video: true, screenshots: true, tracing: false, network: true },
     discovery: {
         maxPages: 100,
@@ -44,7 +83,10 @@ const defaultConfig: RaikenConfig = {
         timeout: 30000,
         excludePatterns: [],
         pauseOnAuth: true,
+        maxRunTimeMs: 30 * 60 * 1000,
+        preserveQueryParams: false,
     },
+    indexing: { fullScan: false },
     browser: { defaultBrowser: "chromium", headless: true, timeout: 30000, retries: 1 },
     autonomy: {
         autoSaveTests: false,
@@ -53,9 +95,22 @@ const defaultConfig: RaikenConfig = {
         autoLearn: "confirm",
         maxRetries: 2,
     },
+    integrations: {
+        provider: "github",
+        branchPatterns: [],
+    },
 };
 
-type Section = "general" | "ai" | "browser" | "discovery" | "features" | "autonomy";
+type Section =
+    | "general"
+    | "ai"
+    | "auth"
+    | "browser"
+    | "discovery"
+    | "advanced"
+    | "features"
+    | "autonomy"
+    | "integrations";
 
 const SECTIONS: { id: Section; label: string; icon: string }[] = [
     {
@@ -67,6 +122,11 @@ const SECTIONS: { id: Section; label: string; icon: string }[] = [
         id: "ai",
         label: "AI Provider",
         icon: "M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z",
+    },
+    {
+        id: "auth",
+        label: "Auth",
+        icon: "M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z",
     },
     {
         id: "browser",
@@ -87,6 +147,16 @@ const SECTIONS: { id: Section; label: string; icon: string }[] = [
         id: "autonomy",
         label: "Autonomy",
         icon: "M4.5 12a7.5 7.5 0 0015 0m-15 0a7.5 7.5 0 1115 0m-15 0H3m16.5 0H21m-1.645-7.5h-2.818m2.818 15h-2.818M4.145 4.5h2.818m-2.818 15h2.818",
+    },
+    {
+        id: "integrations",
+        label: "Integrations",
+        icon: "M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244",
+    },
+    {
+        id: "advanced",
+        label: "Advanced",
+        icon: "M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z",
     },
 ];
 
@@ -125,10 +195,10 @@ export function SettingsView() {
     });
 
     useEffect(() => {
-        if (configQuery.data) {
+        if (configQuery.data && !dirty) {
             setForm(configQuery.data as Partial<RaikenConfig>);
         }
-    }, [configQuery.data]);
+    }, [configQuery.data, dirty]);
 
     const update = <K extends keyof RaikenConfig>(section: K, field: string, value: unknown) => {
         setForm((prev) => ({
@@ -173,6 +243,39 @@ export function SettingsView() {
         return undefined;
     };
 
+    // Deep-path variants for settings that nest two or more levels (e.g.
+    // `auth.credentials.usernameEnv`, `integrations.github.owner`) — `update`
+    // above only supports a single level of nesting under a top-level section.
+    const updateAt = (path: string[], value: unknown) => {
+        setForm((prev) => {
+            const next = structuredClone(prev) as Record<string, unknown>;
+            let obj = next;
+            for (let i = 0; i < path.length - 1; i++) {
+                const key = path[i];
+                if (typeof obj[key] !== "object" || obj[key] === null) {
+                    obj[key] = {};
+                }
+                obj = obj[key] as Record<string, unknown>;
+            }
+            obj[path[path.length - 1]] = value;
+            return next as Partial<RaikenConfig>;
+        });
+        setDirty(true);
+        setSaved(false);
+    };
+
+    const valAt = (path: string[]): unknown => {
+        let obj: unknown = form;
+        for (const key of path) {
+            if (obj && typeof obj === "object") {
+                obj = (obj as Record<string, unknown>)[key];
+            } else {
+                return undefined;
+            }
+        }
+        return obj;
+    };
+
     if (configQuery.isLoading) {
         return (
             <div className="settings-view">
@@ -196,6 +299,7 @@ export function SettingsView() {
                 <Header projectName="Settings" />
                 <div className="settings-loading">
                     <svg
+                        aria-hidden="true"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="var(--fail)"
@@ -234,7 +338,7 @@ export function SettingsView() {
             <Header projectName="Settings" />
 
             <div className="settings-body">
-                <nav className="settings-nav" role="navigation" aria-label="Settings sections">
+                <nav className="settings-nav" aria-label="Settings sections">
                     {SECTIONS.map((s) => (
                         <button
                             key={s.id}
@@ -265,14 +369,20 @@ export function SettingsView() {
                                     "Project-level settings for test output and configuration paths."}
                                 {activeSection === "ai" &&
                                     "Configure the AI provider used for test generation and analysis."}
+                                {activeSection === "auth" &&
+                                    "Configure how Raiken authenticates against your app during discovery and test runs."}
                                 {activeSection === "browser" &&
                                     "Browser settings for running Playwright tests."}
                                 {activeSection === "discovery" &&
                                     "Control how Raiken crawls and discovers your site structure."}
+                                {activeSection === "advanced" &&
+                                    "Advanced discovery limits and indexing behavior. Most projects won't need to change these."}
                                 {activeSection === "features" &&
                                     "Toggle test recording features and artifacts."}
                                 {activeSection === "autonomy" &&
                                     "Control how much Raiken does automatically vs. asking for confirmation."}
+                                {activeSection === "integrations" &&
+                                    "Connect a ticket provider so Raiken can link tests to issues and branches."}
                             </p>
                         </div>
                         <div className="save-bar">
@@ -367,13 +477,158 @@ export function SettingsView() {
                         )}
 
                         {activeSection === "ai" && (
-                            <AIProviderPanel
-                                provider={val("ai", "provider") as string | undefined}
-                                apiKey={val("ai", "apiKey") as string | undefined}
-                                model={val("ai", "model") as string | undefined}
-                                baseURL={val("ai", "baseURL") as string | undefined}
-                                onChange={(field, value) => update("ai", field, value)}
-                            />
+                            <>
+                                <AIProviderPanel
+                                    provider={val("ai", "provider") as string | undefined}
+                                    apiKey={val("ai", "apiKey") as string | undefined}
+                                    model={val("ai", "model") as string | undefined}
+                                    baseURL={val("ai", "baseURL") as string | undefined}
+                                    onChange={(field, value) => update("ai", field, value)}
+                                />
+                                <FieldGroup
+                                    label="Max Tokens"
+                                    hint={`Maximum tokens per AI request/response (default: ${def("ai", "maxTokens")}).`}
+                                >
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        step={100}
+                                        value={
+                                            (val("ai", "maxTokens") as number) ??
+                                            (def("ai", "maxTokens") as number)
+                                        }
+                                        onChange={(e) =>
+                                            // Empty input = "use the default", not 0
+                                            // (0 fails the schema's positive() check
+                                            // with no way to recover from the UI).
+                                            update(
+                                                "ai",
+                                                "maxTokens",
+                                                optionalNumber(e.target.value),
+                                            )
+                                        }
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Temperature"
+                                    hint="Sampling temperature (0 = deterministic, 2 = most random)."
+                                >
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={2}
+                                        step={0.1}
+                                        value={
+                                            (val("ai", "temperature") as number) ??
+                                            (def("ai", "temperature") as number)
+                                        }
+                                        onChange={(e) =>
+                                            // Empty input = "use the default", not
+                                            // silently committing temperature 0.
+                                            update(
+                                                "ai",
+                                                "temperature",
+                                                optionalNumber(e.target.value),
+                                            )
+                                        }
+                                    />
+                                </FieldGroup>
+                            </>
+                        )}
+
+                        {activeSection === "auth" && (
+                            <>
+                                <FieldGroup
+                                    label="Storage State Path"
+                                    hint="Path to a Playwright storageState JSON file for pre-authenticated sessions."
+                                >
+                                    <input
+                                        type="text"
+                                        value={(val("auth", "storageStatePath") as string) ?? ""}
+                                        onChange={(e) =>
+                                            update("auth", "storageStatePath", e.target.value)
+                                        }
+                                        placeholder=".raiken/auth-state.json"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Base URL"
+                                    hint="Base URL of the application, used to resolve the login path."
+                                >
+                                    <input
+                                        type="text"
+                                        value={(val("auth", "baseUrl") as string) ?? ""}
+                                        onChange={(e) => update("auth", "baseUrl", e.target.value)}
+                                        placeholder="https://app.example.com"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Login Path"
+                                    hint="Path to the login page, relative to the base URL."
+                                >
+                                    <input
+                                        type="text"
+                                        value={(val("auth", "loginPath") as string) ?? ""}
+                                        onChange={(e) =>
+                                            update("auth", "loginPath", e.target.value)
+                                        }
+                                        placeholder="/login"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Username Env Var"
+                                    hint="Name of the environment variable holding the test username (never the raw value)."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["auth", "credentials", "usernameEnv"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["auth", "credentials", "usernameEnv"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="RAIKEN_TEST_USERNAME"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Password Env Var"
+                                    hint="Name of the environment variable holding the test password (never the raw value)."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["auth", "credentials", "passwordEnv"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["auth", "credentials", "passwordEnv"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="RAIKEN_TEST_PASSWORD"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Custom Login Script"
+                                    hint="Path to a script handling non-standard login flows (SSO, MFA, etc.)."
+                                >
+                                    <input
+                                        type="text"
+                                        value={(val("auth", "customLoginScript") as string) ?? ""}
+                                        onChange={(e) =>
+                                            update("auth", "customLoginScript", e.target.value)
+                                        }
+                                        placeholder="scripts/login.ts"
+                                    />
+                                </FieldGroup>
+                            </>
                         )}
 
                         {activeSection === "browser" && (
@@ -421,7 +676,11 @@ export function SettingsView() {
                                             defaultConfig.browser.timeout
                                         }
                                         onChange={(e) =>
-                                            update("browser", "timeout", Number(e.target.value))
+                                            update(
+                                                "browser",
+                                                "timeout",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
                                     />
                                 </FieldGroup>
@@ -438,7 +697,11 @@ export function SettingsView() {
                                             defaultConfig.browser.retries
                                         }
                                         onChange={(e) =>
-                                            update("browser", "retries", Number(e.target.value))
+                                            update(
+                                                "browser",
+                                                "retries",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
                                     />
                                 </FieldGroup>
@@ -459,7 +722,11 @@ export function SettingsView() {
                                             (def("discovery", "maxPages") as number)
                                         }
                                         onChange={(e) =>
-                                            update("discovery", "maxPages", Number(e.target.value))
+                                            update(
+                                                "discovery",
+                                                "maxPages",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
                                     />
                                 </FieldGroup>
@@ -476,7 +743,11 @@ export function SettingsView() {
                                             (def("discovery", "maxDepth") as number)
                                         }
                                         onChange={(e) =>
-                                            update("discovery", "maxDepth", Number(e.target.value))
+                                            update(
+                                                "discovery",
+                                                "maxDepth",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
                                     />
                                 </FieldGroup>
@@ -496,7 +767,7 @@ export function SettingsView() {
                                             update(
                                                 "discovery",
                                                 "maxConcurrency",
-                                                Number(e.target.value),
+                                                optionalNumber(e.target.value),
                                             )
                                         }
                                     />
@@ -514,7 +785,11 @@ export function SettingsView() {
                                             (def("discovery", "timeout") as number)
                                         }
                                         onChange={(e) =>
-                                            update("discovery", "timeout", Number(e.target.value))
+                                            update(
+                                                "discovery",
+                                                "timeout",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
                                     />
                                 </FieldGroup>
@@ -549,6 +824,55 @@ export function SettingsView() {
                                             )
                                         }
                                         placeholder="/admin, /logout"
+                                    />
+                                </FieldGroup>
+                            </>
+                        )}
+
+                        {activeSection === "advanced" && (
+                            <>
+                                <FieldGroup
+                                    label="Max Run Time (ms)"
+                                    hint={`Hard wall-clock cap on a single discovery run; 0 disables (default: ${def("discovery", "maxRunTimeMs")}).`}
+                                >
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={60000}
+                                        value={
+                                            (val("discovery", "maxRunTimeMs") as number) ??
+                                            (def("discovery", "maxRunTimeMs") as number)
+                                        }
+                                        onChange={(e) =>
+                                            update(
+                                                "discovery",
+                                                "maxRunTimeMs",
+                                                optionalNumber(e.target.value),
+                                            )
+                                        }
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Preserve Query Params"
+                                    hint="Treat URLs that differ only by query string as distinct routes, instead of collapsing them."
+                                >
+                                    <ToggleSwitch
+                                        checked={
+                                            (val("discovery", "preserveQueryParams") as boolean) ??
+                                            false
+                                        }
+                                        onChange={(v) =>
+                                            update("discovery", "preserveQueryParams", v)
+                                        }
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Full Scan Indexing"
+                                    hint="Force a full project re-scan for the AST/embeddings index instead of an incremental update."
+                                >
+                                    <ToggleSwitch
+                                        checked={(val("indexing", "fullScan") as boolean) ?? false}
+                                        onChange={(v) => update("indexing", "fullScan", v)}
                                     />
                                 </FieldGroup>
                             </>
@@ -675,8 +999,180 @@ export function SettingsView() {
                                         max={10}
                                         value={(val("autonomy", "maxRetries") as number) ?? 2}
                                         onChange={(e) =>
-                                            update("autonomy", "maxRetries", Number(e.target.value))
+                                            update(
+                                                "autonomy",
+                                                "maxRetries",
+                                                optionalNumber(e.target.value),
+                                            )
                                         }
+                                    />
+                                </FieldGroup>
+                            </>
+                        )}
+
+                        {activeSection === "integrations" && (
+                            <>
+                                <FieldGroup
+                                    label="Ticket Provider"
+                                    hint="Which system Raiken links tests/branches to when resolving ticket references."
+                                >
+                                    <select
+                                        value={
+                                            (val("integrations", "provider") as string) ?? "github"
+                                        }
+                                        onChange={(e) =>
+                                            update("integrations", "provider", e.target.value)
+                                        }
+                                    >
+                                        <option value="github">GitHub</option>
+                                        <option value="jira">Jira</option>
+                                        <option value="linear">Linear</option>
+                                    </select>
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="GitHub Owner"
+                                    hint="Repository owner/org. Auto-detected from the git remote if left blank."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["integrations", "github", "owner"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "github", "owner"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="my-org"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="GitHub Repo"
+                                    hint="Repository name. Auto-detected from the git remote if left blank."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["integrations", "github", "repo"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "github", "repo"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="my-repo"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Jira Base URL"
+                                    hint="Your Jira instance's base URL."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["integrations", "jira", "host"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "jira", "host"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="https://your-org.atlassian.net"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Jira Project Key"
+                                    hint="Project key used when linking tests to Jira issues (e.g. ENG)."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["integrations", "jira", "projectKey"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "jira", "projectKey"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="ENG"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Linear API Key"
+                                    hint="Personal or workspace API key used to look up Linear issues."
+                                >
+                                    <input
+                                        type="password"
+                                        autoComplete="off"
+                                        value={
+                                            (valAt(["integrations", "linear", "apiKey"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "linear", "apiKey"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="lin_api_…"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Linear Team Key"
+                                    hint="Team key used when linking tests to Linear issues (e.g. ENG)."
+                                >
+                                    <input
+                                        type="text"
+                                        value={
+                                            (valAt(["integrations", "linear", "teamKey"]) as
+                                                | string
+                                                | undefined) ?? ""
+                                        }
+                                        onChange={(e) =>
+                                            updateAt(
+                                                ["integrations", "linear", "teamKey"],
+                                                e.target.value,
+                                            )
+                                        }
+                                        placeholder="ENG"
+                                    />
+                                </FieldGroup>
+                                <FieldGroup
+                                    label="Branch Patterns"
+                                    hint="One regex per line, used to extract a ticket ID from the current git branch name."
+                                    align="start"
+                                >
+                                    <textarea
+                                        rows={4}
+                                        value={(
+                                            (val("integrations", "branchPatterns") as
+                                                | string[]
+                                                | undefined) ?? []
+                                        ).join("\n")}
+                                        onChange={(e) =>
+                                            update(
+                                                "integrations",
+                                                "branchPatterns",
+                                                e.target.value
+                                                    .split("\n")
+                                                    .map((s) => s.trim())
+                                                    .filter(Boolean),
+                                            )
+                                        }
+                                        placeholder={"feature/([A-Z]+-\\d+)\nbugfix/([A-Z]+-\\d+)"}
                                     />
                                 </FieldGroup>
                             </>
@@ -926,7 +1422,8 @@ export function SettingsView() {
                 .field-control input[type="text"],
                 .field-control input[type="password"],
                 .field-control input[type="number"],
-                .field-control select {
+                .field-control select,
+                .field-control textarea {
                     width: 100%;
                     padding: 0.375rem 0.5rem;
                     background: var(--bg);
@@ -940,8 +1437,14 @@ export function SettingsView() {
                     box-sizing: border-box;
                 }
 
+                .field-control textarea {
+                    resize: vertical;
+                    line-height: 1.5;
+                }
+
                 .field-control input:focus,
-                .field-control select:focus {
+                .field-control select:focus,
+                .field-control textarea:focus {
                     border-color: var(--accent);
                 }
 
@@ -1014,31 +1517,48 @@ function FieldGroup({
     label,
     hint,
     children,
+    align = "center",
 }: {
     label: string;
     hint?: string;
     children: React.ReactNode;
+    /** Use "start" for multi-line controls (e.g. a textarea) so the label
+     * doesn't center against the control's full height. */
+    align?: "center" | "start";
 }) {
+    const generatedControlId = useId();
+    const child = isValidElement(children) ? (children as ReactElement<{ id?: string }>) : null;
+    const controlId = child?.props.id ?? generatedControlId;
+    const control = child ? cloneElement(child, { id: controlId }) : children;
+
     return (
-        <div className="field-group">
+        <div
+            className="field-group"
+            style={{ alignItems: align === "start" ? "flex-start" : "center" }}
+        >
             <div className="field-label-block">
-                <div className="field-label">{label}</div>
+                <label className="field-label" htmlFor={controlId}>
+                    {label}
+                </label>
                 {hint && <p className="field-hint">{hint}</p>}
             </div>
-            <div className="field-control">{children}</div>
+            <div className="field-control">{control}</div>
         </div>
     );
 }
 
 function ToggleSwitch({
+    id,
     checked,
     onChange,
 }: {
+    id?: string;
     checked: boolean;
     onChange: (value: boolean) => void;
 }) {
     return (
         <button
+            id={id}
             type="button"
             className={`toggle-switch ${checked ? "on" : ""}`}
             onClick={() => onChange(!checked)}

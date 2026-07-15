@@ -64,7 +64,7 @@ function decodeHitlPayload(payload: string): HITLConfirmation | null {
     }
 }
 
-interface Message {
+export interface Message {
     id: string;
     content: string;
     timestamp: string;
@@ -100,7 +100,7 @@ function buildConversationWindow(messages: Message[]): Array<{ role: string; con
 }
 
 // Human-in-the-loop confirmation data
-interface HITLConfirmation {
+export interface HITLConfirmation {
     type: string;
     title: string;
     message: string;
@@ -115,21 +115,45 @@ interface HITLConfirmation {
         files?: string[];
     };
     /**
-     * Discriminator for the HITL card shape. When `kind === "save_approval"`
-     * the card renders a code preview + editable path instead of the simple
-     * proceed/cancel layout used by goal-classification confirmations.
+     * Discriminator for the HITL card shape. `"save_approval"` renders a code
+     * preview + editable path; `"run_approval"` renders a simpler run/skip
+     * card for a test that's already saved. Anything else falls back to the
+     * plain proceed/cancel layout used by goal-classification confirmations.
      */
-    kind?: "save_approval";
+    kind?: "save_approval" | "run_approval";
     /** Test source code awaiting approval (only for kind === "save_approval"). */
     testCode?: string;
     /** Default file path the agent wants to save to. */
     suggestedPath?: string;
     /** Display name (without extension) for the pending test. */
     testName?: string;
+    /** Path of the already-saved test awaiting a run (kind === "run_approval"). */
+    testFile?: string;
+}
+
+/**
+ * Is there a `save_approval`/`run_approval` card in `messages` that hasn't
+ * been resolved yet (per the two approval maps)? Pulled out of the
+ * component as a pure function so it's unit-testable without mounting the
+ * whole `Sidebar` (which drags in a dozen live tRPC queries).
+ */
+export function computeHitlPending(
+    messages: Pick<Message, "id" | "isUser" | "hitlData">[],
+    savedApprovals: Record<string, unknown>,
+    runApprovals: Record<string, unknown>,
+): boolean {
+    return messages.some((msg) => {
+        if (msg.isUser || !msg.hitlData) return false;
+        if (msg.hitlData.kind === "save_approval") return !savedApprovals[msg.id];
+        if (msg.hitlData.kind === "run_approval") return !runApprovals[msg.id];
+        return false;
+    });
 }
 
 // localStorage key for persisting resolved save-approval cards across reloads.
 const SAVED_APPROVALS_KEY = "raiken:savedApprovals";
+// Same, for run-approval cards (kind === "run_approval").
+const RUN_APPROVALS_KEY = "raiken:runApprovals";
 
 const WELCOME_MESSAGE: Message = {
     id: "welcome",
@@ -153,6 +177,13 @@ interface SidebarProps {
      * The sidebar only knows intent — the shell decides how to actually route.
      */
     onNavigateRoute?: (route: DashboardRoute) => void;
+    /**
+     * Fires whenever the current chat has an unresolved `save_approval` or
+     * `run_approval` card (i.e. the agent is blocked waiting on the user).
+     * Lets the shell surface an attention dot on the nav rail without the
+     * sidebar needing to know anything about navigation UI.
+     */
+    onHitlPendingChange?: (pending: boolean) => void;
 }
 
 export function Sidebar({
@@ -165,6 +196,7 @@ export function Sidebar({
     initialPrompt,
     onInitialPromptConsumed,
     onNavigateRoute,
+    onHitlPendingChange,
 }: SidebarProps) {
     const activeTab = externalTab ?? "chat";
     const isCollapsed = externalCollapsed ?? false;
@@ -295,6 +327,23 @@ export function Sidebar({
     /** Per-card override of the suggested path while the user edits it. */
     const [pathEdits, setPathEdits] = useState<Record<string, string>>({});
 
+    /**
+     * Track run-approval cards that have already resolved (ran or skipped),
+     * mirroring `savedApprovals` above. Kept separate because a "run"
+     * pause's payload/decision shape differs from "save" (no path to edit,
+     * a pass/fail outcome instead of a saved path).
+     */
+    const [runApprovals, setRunApprovals] = useState<
+        Record<string, { status: "ran" | "skipped"; passed?: boolean; error?: string }>
+    >(() => {
+        try {
+            const raw = localStorage.getItem(RUN_APPROVALS_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch {
+            return {};
+        }
+    });
+
     // Persist resolved approvals so they survive reloads.
     useEffect(() => {
         try {
@@ -303,6 +352,22 @@ export function Sidebar({
             // localStorage unavailable — non-critical.
         }
     }, [savedApprovals]);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(RUN_APPROVALS_KEY, JSON.stringify(runApprovals));
+        } catch {
+            // localStorage unavailable — non-critical.
+        }
+    }, [runApprovals]);
+
+    // Report "the agent is blocked on me" up to the shell so it can put a
+    // dot on the nav rail — otherwise a pending approval sitting in a
+    // background tab (user navigated to discovery/quality/settings) is
+    // invisible until they happen to click back into chat.
+    useEffect(() => {
+        onHitlPendingChange?.(computeHitlPending(messages, savedApprovals, runApprovals));
+    }, [messages, savedApprovals, runApprovals, onHitlPendingChange]);
 
     // Load messages from server on mount
     useEffect(() => {
@@ -362,6 +427,7 @@ export function Sidebar({
                 // Drop resolved-approval bookkeeping too so a fresh chat starts clean.
                 setSavedApprovals({});
                 setPathEdits({});
+                setRunApprovals({});
             },
         });
     };
@@ -440,41 +506,85 @@ export function Sidebar({
 
                 for (const line of lines) {
                     if (line.startsWith("data: ")) {
+                        // Mirrors the main chat path's SSE parsing: a JSON.parse
+                        // failure means a partial chunk (skip it), but a
+                        // server-sent {error} must propagate to the outer catch.
+                        let data: { error?: string; chunk?: string; done?: boolean } | null = null;
                         try {
-                            const data = JSON.parse(line.slice(6));
-                            if (data.chunk) {
-                                accumulated += data.chunk;
-                                setMessages((prev) =>
-                                    prev.map((msg) =>
-                                        msg.id === aiMessageId
-                                            ? { ...msg, content: accumulated, isLoading: false }
-                                            : msg,
-                                    ),
-                                );
-                            }
+                            data = JSON.parse(line.slice(6));
                         } catch {
-                            // Ignore parse errors
+                            continue;
+                        }
+
+                        if (data?.error) {
+                            throw new Error(data.error);
+                        }
+
+                        if (data?.chunk) {
+                            accumulated += data.chunk;
+
+                            // Strip the live activity trail out of the visible
+                            // content and surface it separately, same as the
+                            // main chat path — approval round-trips run tools
+                            // too (saving, running, repairing) and deserve the
+                            // same "what's happening now" feedback.
+                            const { clean: withoutEvents, activity } =
+                                parseAgentActivity(accumulated);
+
+                            const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
+                            let hitlData: HITLConfirmation | undefined;
+                            let displayContent = withoutEvents;
+
+                            if (hitlMatch) {
+                                const parsed = decodeHitlPayload(hitlMatch[1]);
+                                if (parsed) {
+                                    hitlData = parsed;
+                                    displayContent = "";
+                                } else {
+                                    console.warn("Failed to parse HITL data");
+                                }
+                            }
+
+                            const hasText = displayContent.trim().length > 0;
+
+                            setMessages((prev) =>
+                                prev.map((msg) =>
+                                    msg.id === aiMessageId
+                                        ? {
+                                              ...msg,
+                                              content: displayContent,
+                                              isLoading: !hasText && !hitlData,
+                                              hitlData,
+                                              activity,
+                                          }
+                                        : msg,
+                                ),
+                            );
                         }
                     }
                 }
             }
 
+            // Strip the live activity markers before persisting/analyzing — they
+            // are transient UI, not part of the assistant's message or the test.
+            const cleanedFinal = parseAgentActivity(accumulated).clean;
+
             // Check if we should trigger save dialog
             const hasPlaywrightImport =
-                accumulated.includes("import { test") && accumulated.includes("@playwright/test");
+                cleanedFinal.includes("import { test") && cleanedFinal.includes("@playwright/test");
             const hasTestStructure =
-                accumulated.includes("test.describe(") ||
-                (accumulated.includes("describe(") && accumulated.includes("test("));
-            const hasMultipleTests = (accumulated.match(/\btest\s*\(/g) || []).length >= 2;
+                cleanedFinal.includes("test.describe(") ||
+                (cleanedFinal.includes("describe(") && cleanedFinal.includes("test("));
+            const hasMultipleTests = (cleanedFinal.match(/\btest\s*\(/g) || []).length >= 2;
 
             if (hasPlaywrightImport && hasTestStructure && hasMultipleTests) {
-                onSendMessage?.(accumulated);
+                onSendMessage?.(cleanedFinal);
             }
 
             // Persist the AI response
             persistMessage({
                 id: aiMessageId,
-                content: accumulated,
+                content: cleanedFinal,
                 timestamp: new Date().toLocaleTimeString("en-US", {
                     hour: "2-digit",
                     minute: "2-digit",
@@ -624,6 +734,74 @@ export function Sidebar({
     };
 
     /**
+     * Handle the run-approval card (kind === "run_approval") — the test is
+     * already saved and the agent paused only because `autoRunTests` isn't
+     * on. Deterministic, same as `handleSaveApproval`: no LLM round-trip.
+     */
+    const handleRunApproval = async (
+        messageId: string,
+        actionId: "run_approve" | "run_approve_remember" | "run_reject",
+        hitl: HITLConfirmation,
+    ) => {
+        if (runApprovals[messageId] || runningTestFor) return;
+
+        if (actionId === "run_reject") {
+            setRunApprovals((prev) => ({ ...prev, [messageId]: { status: "skipped" } }));
+            return;
+        }
+
+        const testFile = hitl.testFile ?? "";
+        if (!testFile) {
+            setRunApprovals((prev) => ({
+                ...prev,
+                [messageId]: { status: "skipped", error: "Missing test file — cannot run." },
+            }));
+            return;
+        }
+
+        if (actionId === "run_approve_remember") {
+            try {
+                await updateConfigMutation.mutateAsync({
+                    config: { autonomy: { autoRunTests: true } },
+                });
+            } catch (err) {
+                console.warn("Failed to persist autoRunTests preference:", err);
+            }
+        }
+
+        setRunningTestFor(messageId);
+        try {
+            const result = (await runTestMutation.mutateAsync({ testFile })) as {
+                success?: boolean;
+            };
+            const passed = Boolean(result.success);
+            setRunApprovals((prev) => ({ ...prev, [messageId]: { status: "ran", passed } }));
+            const resultMsg: Message = {
+                id: `sys-run-${Date.now()}`,
+                content: passed
+                    ? `✅ \`${testFile}\` passed.`
+                    : `❌ \`${testFile}\` failed. Open it in the editor and use **Fix with AI** to repair the spec.`,
+                timestamp: new Date().toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                isUser: false,
+            };
+            setMessages((prev) => [...prev, resultMsg]);
+            persistMessage(resultMsg);
+            if (!passed) onFileSelect?.(testFile);
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : "Test run failed";
+            setRunApprovals((prev) => ({
+                ...prev,
+                [messageId]: { status: "ran", error: errorMessage },
+            }));
+        } finally {
+            setRunningTestFor(null);
+        }
+    };
+
+    /**
      * Run a test that was just saved from a save-approval card. This closes the
      * generate → save → run loop directly in chat (the graph itself ends at the
      * save pause, so running is offered here deterministically via tRPC rather
@@ -703,6 +881,7 @@ export function Sidebar({
                 name: file.name,
                 path: file.path,
                 directory: file.directory,
+                status: file.status,
             }));
 
             setFiles(convertedFiles);
@@ -866,9 +1045,8 @@ export function Sidebar({
             const mentionRegex = /@([\w/.-]+)/g;
             const parts: React.ReactNode[] = [];
             let lastIndex = 0;
-            let match;
 
-            while ((match = mentionRegex.exec(content)) !== null) {
+            for (const match of content.matchAll(mentionRegex)) {
                 if (match.index > lastIndex) {
                     parts.push(content.substring(lastIndex, match.index));
                 }
@@ -935,6 +1113,7 @@ export function Sidebar({
                                         >
                                             {copied ? (
                                                 <svg
+                                                    aria-hidden="true"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -944,6 +1123,7 @@ export function Sidebar({
                                                 </svg>
                                             ) : (
                                                 <svg
+                                                    aria-hidden="true"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
                                                     stroke="currentColor"
@@ -970,6 +1150,7 @@ export function Sidebar({
                                             title="Open in editor"
                                         >
                                             <svg
+                                                aria-hidden="true"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -1244,7 +1425,9 @@ export function Sidebar({
         const historicalFiles = new Set<string>();
         messages.forEach((msg) => {
             const msgMatches = [...msg.content.matchAll(mentionRegex)];
-            msgMatches.forEach((match) => historicalFiles.add(match[1]));
+            msgMatches.forEach((match) => {
+                historicalFiles.add(match[1]);
+            });
         });
 
         // Combine new files with historical files (deduplicate)
@@ -1502,6 +1685,7 @@ export function Sidebar({
                                     disabled={messages.length <= 1}
                                 >
                                     <svg
+                                        aria-hidden="true"
                                         viewBox="0 0 24 24"
                                         fill="none"
                                         stroke="currentColor"
@@ -1746,11 +1930,105 @@ export function Sidebar({
                                                         </div>
                                                     );
                                                 })()
+                                            ) : msg.hitlData?.kind === "run_approval" ? (
+                                                // Run-approval card: the test is already
+                                                // saved, just needs a run/skip decision.
+                                                // Simpler than the save card — no path to
+                                                // edit, no code preview.
+                                                (() => {
+                                                    const hitl = msg.hitlData;
+                                                    const decision = runApprovals[msg.id];
+                                                    const isResolved = Boolean(decision);
+                                                    const isRunning = runningTestFor === msg.id;
+                                                    return (
+                                                        <div className="hitl-confirmation hitl-run">
+                                                            <div className="hitl-header">
+                                                                <svg
+                                                                    viewBox="0 0 24 24"
+                                                                    fill="none"
+                                                                    stroke="currentColor"
+                                                                    strokeWidth="2"
+                                                                    aria-hidden="true"
+                                                                    focusable="false"
+                                                                >
+                                                                    <path d="M5 3l14 9-14 9V3z" />
+                                                                </svg>
+                                                                <span>{hitl.title}</span>
+                                                            </div>
+                                                            <p className="hitl-message">
+                                                                {hitl.message}
+                                                            </p>
+                                                            {hitl.testFile && (
+                                                                <p className="hitl-run-file">
+                                                                    <code>{hitl.testFile}</code>
+                                                                </p>
+                                                            )}
+                                                            {!isResolved && (
+                                                                <div className="hitl-actions">
+                                                                    {hitl.options.map((option) => {
+                                                                        const variant =
+                                                                            option.id ===
+                                                                            "run_reject"
+                                                                                ? "secondary"
+                                                                                : "primary";
+                                                                        return (
+                                                                            <button
+                                                                                key={option.id}
+                                                                                type="button"
+                                                                                className={`hitl-btn ${variant}`}
+                                                                                onClick={() =>
+                                                                                    handleRunApproval(
+                                                                                        msg.id,
+                                                                                        option.id as
+                                                                                            | "run_approve"
+                                                                                            | "run_approve_remember"
+                                                                                            | "run_reject",
+                                                                                        hitl,
+                                                                                    )
+                                                                                }
+                                                                                disabled={isRunning}
+                                                                                title={
+                                                                                    option.description
+                                                                                }
+                                                                            >
+                                                                                <span>
+                                                                                    {isRunning
+                                                                                        ? "Running…"
+                                                                                        : option.label}
+                                                                                </span>
+                                                                            </button>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
+                                                            {decision?.status === "ran" &&
+                                                                !decision.error && (
+                                                                    <p className="hitl-resolved hitl-resolved-ok">
+                                                                        {decision.passed
+                                                                            ? "✅ Passed."
+                                                                            : "❌ Failed — open the file and use Fix with AI."}
+                                                                    </p>
+                                                                )}
+                                                            {decision?.error && (
+                                                                <p className="hitl-resolved hitl-resolved-warn">
+                                                                    ⚠️ {decision.error}
+                                                                </p>
+                                                            )}
+                                                            {decision?.status === "skipped" &&
+                                                                !decision.error && (
+                                                                    <p className="hitl-resolved hitl-resolved-warn">
+                                                                        Skipped.
+                                                                    </p>
+                                                                )}
+                                                        </div>
+                                                    );
+                                                })()
                                             ) : msg.hitlData ? (
                                                 // Legacy proceed/cancel goal-classification card.
                                                 <div className="hitl-confirmation">
                                                     <div className="hitl-header">
                                                         <svg
+                                                            aria-hidden="true"
                                                             viewBox="0 0 24 24"
                                                             fill="none"
                                                             stroke="currentColor"
@@ -1775,6 +2053,7 @@ export function Sidebar({
                                                     <div className="hitl-actions">
                                                         {msg.hitlData.options.map((option) => (
                                                             <button
+                                                                type="button"
                                                                 key={option.id}
                                                                 className={`hitl-btn ${option.id === "proceed" ? "primary" : "secondary"}`}
                                                                 onClick={() =>
@@ -1787,6 +2066,7 @@ export function Sidebar({
                                                             >
                                                                 {option.id === "proceed" ? (
                                                                     <svg
+                                                                        aria-hidden="true"
                                                                         viewBox="0 0 24 24"
                                                                         fill="none"
                                                                         stroke="currentColor"
@@ -1796,6 +2076,7 @@ export function Sidebar({
                                                                     </svg>
                                                                 ) : (
                                                                     <svg
+                                                                        aria-hidden="true"
                                                                         viewBox="0 0 24 24"
                                                                         fill="none"
                                                                         stroke="currentColor"
@@ -1897,6 +2178,7 @@ export function Sidebar({
                                                 onMouseEnter={() => setAutocompletePosition(index)}
                                             >
                                                 <svg
+                                                    aria-hidden="true"
                                                     className="file-icon"
                                                     viewBox="0 0 24 24"
                                                     fill="none"
@@ -1940,13 +2222,23 @@ export function Sidebar({
                                         title="Stop the running agent (Esc)"
                                         aria-label="Stop the running agent"
                                     >
-                                        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                                        <svg
+                                            aria-hidden="true"
+                                            viewBox="0 0 24 24"
+                                            fill="currentColor"
+                                            stroke="none"
+                                        >
                                             <rect x="6" y="6" width="12" height="12" rx="2" />
                                         </svg>
                                     </button>
                                 ) : (
-                                    <button type="submit" className="send-btn">
+                                    <button
+                                        type="submit"
+                                        className="send-btn"
+                                        aria-label="Send message"
+                                    >
                                         <svg
+                                            aria-hidden="true"
                                             viewBox="0 0 24 24"
                                             fill="none"
                                             stroke="currentColor"
@@ -2748,6 +3040,21 @@ export function Sidebar({
         .hitl-save .hitl-path-input:disabled {
           opacity: 0.55;
           cursor: not-allowed;
+        }
+        /* Run-approval card variant: just the file awaiting a run/skip
+         * decision, no code preview or editable path. */
+        .hitl-run-file {
+          margin: 6px 0 8px;
+          padding: 4px 8px;
+          font-family: var(--mono);
+          font-size: 11px;
+          color: var(--ink);
+          background: var(--bg-elev);
+          border: 1px solid var(--line);
+          border-radius: 3px;
+        }
+        .hitl-run-file code {
+          font-family: inherit;
         }
         .hitl-resolved {
           margin: 6px 0 0;

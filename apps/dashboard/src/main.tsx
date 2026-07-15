@@ -75,6 +75,7 @@ class ErrorBoundary extends Component<
                     }}
                 >
                     <svg
+                        aria-hidden="true"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="#ef4444"

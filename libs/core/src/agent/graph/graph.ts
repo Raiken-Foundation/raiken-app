@@ -13,7 +13,7 @@ import {
     createResolveInterruptionNode,
 } from "./nodes/interruptions";
 import { createExploreNode, createNavigateNode } from "./nodes/navigation";
-import { createRepairNode, shouldRepair } from "./nodes/repair";
+import { createRepairNode, resolveAutonomy, shouldRepair } from "./nodes/repair";
 import { createSummarizeNode } from "./nodes/summarize";
 import type { AgentNodeDeps } from "./nodes/types";
 import { GraphState, type GraphStateType } from "./state";
@@ -30,6 +30,9 @@ function userClearlyWantsTest(prompt: string): boolean {
 }
 
 export function createAgentGraph(deps: AgentNodeDeps) {
+    // Resolved once per graph (not per-node) so every routing decision in
+    // this run sees the exact same autonomy snapshot.
+    const autonomy = resolveAutonomy(deps);
     const graph = new StateGraph(GraphState)
         .addNode("classifyGoal", createClassifyGoalNode(deps))
         .addNode("navigate", createNavigateNode(deps))
@@ -155,7 +158,7 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             "hitlRun",
             (state: GraphStateType) => {
                 if (state.shouldPause) return END;
-                if (shouldRepair(state, deps.projectPath)) return "repair";
+                if (shouldRepair(state, autonomy)) return "repair";
                 return "summarize";
             },
             ["repair", "summarize", END],

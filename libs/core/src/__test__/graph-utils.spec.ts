@@ -283,15 +283,15 @@ describe("Goal-directed action helpers", () => {
                     "Verify the page loads authenticated, NOT the login/Get Started page",
                 ),
             ).toBe(false);
-            expect(
-                goalTargetsUnauthedPage("ensure it does not redirect to the login page"),
-            ).toBe(false);
+            expect(goalTargetsUnauthedPage("ensure it does not redirect to the login page")).toBe(
+                false,
+            );
             expect(
                 goalTargetsUnauthedPage("the user is signed in; test the overview dashboard"),
             ).toBe(false);
-            expect(
-                goalTargetsUnauthedPage("as a logged-in user, open the customers table"),
-            ).toBe(false);
+            expect(goalTargetsUnauthedPage("as a logged-in user, open the customers table")).toBe(
+                false,
+            );
         });
 
         it("returns false for ordinary authenticated page goals", () => {
@@ -411,7 +411,6 @@ describe("Explore Link Prioritization", () => {
             { text: "About", href: "/about" },
         ];
 
-        const keywords: string[] = [];
         const scored = links.map((link) => ({ ...link, score: 0 }));
         scored.sort((a, b) => b.score - a.score);
 

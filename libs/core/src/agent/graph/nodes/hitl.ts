@@ -1,5 +1,6 @@
 import type { TestRunResult } from "../../../testing/runner";
 import type { GraphStateType } from "../state";
+import { resolveAutonomy } from "./repair";
 import type { AgentNodeDeps } from "./types";
 
 const MAX_BASENAME_LENGTH = 40;
@@ -68,38 +69,73 @@ export const createHitlSaveNode =
         };
     };
 
-export const createHitlRunNode =
-    ({ callTool }: AgentNodeDeps) =>
-    async (state: GraphStateType) => {
-        if (!state.savedTestPath || !state.shouldRunTests) return {};
-        const runResult = await callTool("runTest", {
-            testFile: state.savedTestPath,
-            headed: true,
-        });
-        if (runResult.hitlRequired) {
-            return {
-                shouldPause: true,
-                awaitUserMessage: `Waiting for approval to run ${state.savedTestPath}.`,
-            };
-        }
+export const createHitlRunNode = (deps: AgentNodeDeps) => async (state: GraphStateType) => {
+    const { callTool } = deps;
+    if (!state.savedTestPath || !state.shouldRunTests) return {};
 
-        if (!runResult.success) {
-            return {
-                testRunResult: [
-                    {
-                        testFile: state.savedTestPath,
-                        testName: "unknown",
-                        status: "error" as const,
-                        duration: 0,
-                        error: { message: runResult.message || "Test run failed" },
-                    },
-                ] satisfies TestRunResult[],
-            };
-        }
+    // A run triggered after a repair attempt is verifying that specific
+    // fix, not asking "should this test run at all" from scratch — the
+    // user already authorized the loop via `autoCorrect` when it wasn't
+    // "off". Without this, a repair loop with `autoCorrect: "apply"`/
+    // `"suggest"` but `autoRunTests: false` would pause here on every
+    // single verification run, defeating automatic repair entirely.
+    const isRepairVerification = state.repairAttempts > 0;
+    const runResult = await callTool("runTest", {
+        testFile: state.savedTestPath,
+        headed: true,
+        ...(isRepairVerification ? { _repairVerification: true } : {}),
+    });
+    if (runResult.hitlRequired) {
+        return {
+            shouldPause: true,
+            awaitUserMessage: `Waiting for approval to run ${state.savedTestPath}.`,
+        };
+    }
 
-        const results = Array.isArray(runResult.data) ? (runResult.data as TestRunResult[]) : null;
-        if (results) {
-            return { testRunResult: results };
+    // The `runTest` tool sets `success: false` for BOTH "Playwright ran
+    // and some tests failed" and "the tool itself never got Playwright
+    // to run" (bad path, spawn error). Only the second case has no
+    // per-test data — checking for real results first (regardless of
+    // `success`) means a real assertion/selector failure reaches the
+    // repair node with its actual error message instead of being
+    // replaced by a generic "Test run failed", which left auto-repair
+    // working blind.
+    const results = Array.isArray(runResult.data) ? (runResult.data as TestRunResult[]) : null;
+    if (results) {
+        const stillFailing = results.some((r) => r.status !== "passed");
+        if (stillFailing && isRepairVerification) {
+            const autonomy = resolveAutonomy(deps);
+            const exhausted = state.repairAttempts >= autonomy.maxRetries;
+            // "apply" fully trusts the loop even when it gives up — it
+            // just reports the outcome via the normal end-of-turn
+            // summary, same as before. "suggest" gets exactly one pause,
+            // and only now: automatic repair tried its best and is
+            // still failing, so this is the one moment worth
+            // interrupting the user for instead of silently leaving the
+            // last (still-broken) attempt on disk unannounced.
+            if (exhausted && autonomy.autoCorrect === "suggest") {
+                return {
+                    testRunResult: results,
+                    shouldPause: true,
+                    awaitUserMessage: `Automatic repair tried ${state.repairAttempts} time(s) but ${state.savedTestPath} still fails. The last attempt is saved — review it, edit manually, or ask me to try again.`,
+                };
+            }
         }
-        return {};
-    };
+        return { testRunResult: results };
+    }
+
+    if (!runResult.success) {
+        return {
+            testRunResult: [
+                {
+                    testFile: state.savedTestPath,
+                    testName: "unknown",
+                    status: "error" as const,
+                    duration: 0,
+                    error: { message: runResult.message || "Test run failed" },
+                },
+            ] satisfies TestRunResult[],
+        };
+    }
+    return {};
+};

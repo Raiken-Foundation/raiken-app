@@ -1,6 +1,7 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
+import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import {
     getRequestedInputFields,
     type InterruptionInfo,
@@ -148,10 +149,10 @@ export async function classifyInterruption(
         const structured = model.withStructuredOutput(interruptionSchema, {
             name: "classify_page_blocker",
         });
-        result = await structured.invoke([
-            new SystemMessage(SYSTEM_PROMPT),
-            new HumanMessage(classificationPrompt),
-        ]);
+        result = await structured.invoke(
+            [new SystemMessage(SYSTEM_PROMPT), new HumanMessage(classificationPrompt)],
+            { timeout: LLM_REQUEST_TIMEOUT_MS },
+        );
     } catch {
         try {
             result = await fallbackClassify(model, classificationPrompt);
@@ -191,8 +192,9 @@ export async function classifyInterruption(
             ? buildFieldRequestMessage(requestedFields)
             : "Credentials detected. Attempting to continue automatically.";
     } else if (result.type === "consent" && result.actionElementName) {
+        const actionElementName = result.actionElementName;
         const match = elements.find(
-            (el) => el.name.toLowerCase() === result.actionElementName!.toLowerCase(),
+            (el) => el.name.toLowerCase() === actionElementName.toLowerCase(),
         );
         if (match && match.selectors.length > 0) {
             info.actionSelector = match.selectors[0];
@@ -285,10 +287,10 @@ Current message: ${userPrompt}`;
     const values: Record<string, string> = {};
     try {
         const structured = model.withStructuredOutput(schema, { name: "map_values_to_fields" });
-        const result = (await structured.invoke([
-            new SystemMessage(prompt),
-            new HumanMessage(userPrompt),
-        ])) as Record<string, unknown>;
+        const result = (await structured.invoke(
+            [new SystemMessage(prompt), new HumanMessage(userPrompt)],
+            { timeout: LLM_REQUEST_TIMEOUT_MS },
+        )) as Record<string, unknown>;
 
         for (const field of requestedFields) {
             const v = result[field.key];
@@ -335,8 +337,9 @@ function extractSingleReplyValue(userPrompt: string, fieldType?: string): string
         if (afterColon) candidate = afterColon;
     }
 
-    // Single line only — ignore any trailing prose.
-    candidate = candidate.split(/\r?\n/)[0]!.trim();
+    // Single line only — ignore any trailing prose. `split` always returns at
+    // least one element, so the `?? ""` fallback is unreachable in practice.
+    candidate = (candidate.split(/\r?\n/)[0] ?? "").trim();
     if (!candidate) return null;
 
     // For numeric-style inputs, keep only digits (preserving a leading +) so
@@ -361,10 +364,10 @@ async function fallbackClassify(
 ): Promise<ClassificationResult> {
     const strictPrompt = `${SYSTEM_PROMPT}\n\nReturn JSON only, no fences:\n{"type":"auth|otp|captcha|consent|paywall|error|none","requiresUser":boolean,"message":string,"actionElementName":string|null}`;
 
-    const response = await model.invoke([
-        new SystemMessage(strictPrompt),
-        new HumanMessage(userPrompt),
-    ]);
+    const response = await model.invoke(
+        [new SystemMessage(strictPrompt), new HumanMessage(userPrompt)],
+        { timeout: LLM_REQUEST_TIMEOUT_MS },
+    );
 
     const content = Array.isArray(response.content)
         ? response.content

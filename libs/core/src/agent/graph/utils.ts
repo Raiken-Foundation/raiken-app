@@ -193,9 +193,7 @@ export function goalTargetsUnauthedPage(prompt: string): boolean {
     // page") would wrongly suppress the saved session and make every generated
     // test run logged-out — failing on the sign-in redirect.
     const authedIntent =
-        /\bauthenticated\b/.test(p) ||
-        /\bsigned[-\s]?in\b/.test(p) ||
-        /\blogged[-\s]?in\b/.test(p);
+        /\bauthenticated\b/.test(p) || /\bsigned[-\s]?in\b/.test(p) || /\blogged[-\s]?in\b/.test(p);
     if (authedIntent) return false;
 
     // 3. Otherwise treat "the login/sign-in/get-started page" as the target only

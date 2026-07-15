@@ -1,6 +1,6 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { AgentClassifierResult, ContextData, MemoryContext } from "../../prompts";
-import type { ToolResult } from "../../tools";
+import type { AutonomySettings, ToolResult } from "../../tools";
 import type { AgentIntent } from "../utils";
 
 export type CallTool = (toolName: string, args: unknown) => Promise<ToolResult>;
@@ -9,6 +9,14 @@ export interface AgentNodeDeps {
     callTool: CallTool;
     projectPath: string;
     model: BaseChatModel;
+    /**
+     * Resolved autonomy settings for this run (raiken.config.json merged with
+     * any session-scoped override, e.g. the REPL's `/mode`). Optional so
+     * existing callers/tests that don't care about autonomy keep working —
+     * nodes that need it fall back to reading `raiken.config.json` directly
+     * via `loadAutonomyConfig(projectPath)` when it's absent.
+     */
+    autonomy?: AutonomySettings;
     gatherContext: (
         prompt: string,
         projectPath: string,

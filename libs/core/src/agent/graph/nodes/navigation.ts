@@ -4,6 +4,7 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { BrowserSession } from "../../../browser/session";
+import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
 import type { ActionResult, InterruptionInfo, SummaryElement } from "../utils";
 import {
@@ -67,16 +68,19 @@ async function assessExplorationSufficiency(
         const structured = model.withStructuredOutput(sufficiencySchema, {
             name: "assess_exploration_sufficiency",
         });
-        const result = await structured.invoke([
-            new SystemMessage(
-                "You decide whether an automated web crawler has explored enough of a site to satisfy the user's goal. " +
-                    "Answer sufficient=true when the visited pages already cover the goal, or when continuing is unlikely to reveal new relevant functionality. " +
-                    "Prefer stopping early over exhaustive crawling.",
-            ),
-            new HumanMessage(
-                `Goal: ${goalText || "(general exploration)"}\n\nPages visited so far (${pageSummaries.length}):\n${pages}`,
-            ),
-        ]);
+        const result = await structured.invoke(
+            [
+                new SystemMessage(
+                    "You decide whether an automated web crawler has explored enough of a site to satisfy the user's goal. " +
+                        "Answer sufficient=true when the visited pages already cover the goal, or when continuing is unlikely to reveal new relevant functionality. " +
+                        "Prefer stopping early over exhaustive crawling.",
+                ),
+                new HumanMessage(
+                    `Goal: ${goalText || "(general exploration)"}\n\nPages visited so far (${pageSummaries.length}):\n${pages}`,
+                ),
+            ],
+            { timeout: LLM_REQUEST_TIMEOUT_MS },
+        );
         return result.sufficient === true;
     } catch {
         return false;
@@ -608,7 +612,8 @@ export const createExploreNode =
                 break;
             }
 
-            const link = linksToProcess.shift()!;
+            const link = linksToProcess.shift();
+            if (!link) break; // unreachable — the `while` condition above guarantees a queued link
             if (visited.has(normalizeExploreUrl(link.href))) continue;
 
             onProgress?.("Exploring", `${pagesExplored + 1}/${maxPages}`);

@@ -13,6 +13,8 @@
 import path from "node:path";
 import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from "../agent/agent";
 import type { HITLAction } from "../agent/hitl-types";
+import type { AutonomySettings, ToolResult } from "../agent/tools";
+import { RunTraceRecorder } from "../run-traces";
 
 /**
  * Projects with an agent run in flight. Concurrent runs for the same project
@@ -37,10 +39,30 @@ export interface RunOrchestratorOptions {
     targetTestFile?: string;
     /** Files the user referenced (e.g. @mentions) to focus context gathering on. */
     fileContext?: string[];
+    /**
+     * Session-scoped autonomy override for just this run — see
+     * {@link ToolAgentOptions.autonomyOverride}.
+     */
+    autonomyOverride?: Partial<AutonomySettings>;
     /** Abort signal to cancel the run when the client disconnects. */
     signal?: AbortSignal;
     /** Callback for tool call events (for UI feedback) */
     onToolCall?: (toolName: string, args: unknown) => void;
+    /**
+     * Callback for tool result events. Fired synchronously right after a
+     * tool's `execute()` resolves, alongside (not instead of) the inline
+     * `<!--EVENT:...-->` text markers already embedded in the streamed
+     * text — this is the hook a caller (e.g. the CLI server) uses to also
+     * emit a structured `{ type: "tool" }` SSE event for richer dashboard UI.
+     */
+    onToolResult?: (toolName: string, result: ToolResult) => void;
+    /**
+     * Structured trace recorder for this run. When omitted, a recorder is
+     * created automatically iff the `RAIKEN_TRACE` env var is set (writes
+     * JSONL under `.raiken/traces/`). Pass one explicitly from harnesses
+     * (evals) that always want traces.
+     */
+    trace?: RunTraceRecorder | null;
 }
 
 /**
@@ -70,8 +92,10 @@ export async function* runOrchestrator(
         conversationHistory,
         targetTestFile,
         fileContext,
+        autonomyOverride,
         signal,
         onToolCall,
+        onToolResult,
     } = options;
 
     const runKey = path.resolve(projectPath);
@@ -84,14 +108,31 @@ export async function* runOrchestrator(
     }
     activeAgentRuns.add(runKey);
 
+    const trace =
+        options.trace !== undefined
+            ? options.trace
+            : RunTraceRecorder.fromEnv(projectPath, "agent", userPrompt);
+
     const agentOptions: ToolAgentOptions = {
         userPrompt,
         projectPath,
         conversationHistory,
         targetTestFile,
         fileContext,
+        autonomyOverride,
         signal,
-        onToolCall,
+        onToolCall: trace
+            ? (toolName, args) => {
+                  trace.toolCall(toolName, args);
+                  onToolCall?.(toolName, args);
+              }
+            : onToolCall,
+        onToolResult: trace
+            ? (toolName, result) => {
+                  trace.toolResult(toolName, result, undefined, result?.success);
+                  onToolResult?.(toolName, result);
+              }
+            : onToolResult,
     };
 
     let agentResult: ToolAgentResult | undefined;
@@ -108,6 +149,10 @@ export async function* runOrchestrator(
             }
             yield value as string;
         }
+        trace?.end(signal?.aborted ? "aborted" : "completed");
+    } catch (error) {
+        trace?.end("error", error instanceof Error ? error.message : String(error));
+        throw error;
     } finally {
         activeAgentRuns.delete(runKey);
     }

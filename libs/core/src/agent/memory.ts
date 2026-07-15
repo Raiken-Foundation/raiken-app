@@ -183,8 +183,9 @@ export class AgentMemory {
      * Returns from cache if available, falls back to database.
      */
     getPreference(key: string, defaultValue?: string): string | null {
-        if (this.preferencesCache.has(key)) {
-            return this.preferencesCache.get(key)!;
+        const cached = this.preferencesCache.get(key);
+        if (cached !== undefined) {
+            return cached;
         }
 
         const value = this.db.getPreference(key);
@@ -528,6 +529,59 @@ export class AgentMemory {
      */
     getTestOutcome(testId: number): TestOutcome | null {
         return this.db.getTestOutcome(testId);
+    }
+
+    /**
+     * Find the most recently generated outcome row for a test file, so a run
+     * result can be attached to it without the caller having to carry the
+     * testId returned from `recordTestGenerated` across separate tool calls.
+     */
+    getLatestTestOutcomeId(testFile: string): number | null {
+        return this.db.getLatestTestOutcomeId(testFile);
+    }
+
+    /**
+     * Attach a run result to the most recently generated outcome row for
+     * `testFile` and opportunistically refresh the dominant selector
+     * strategy. No-ops (rather than throwing) when there's no generation
+     * record yet — e.g. a test that was never saved through Raiken.
+     */
+    recordRunOutcome(
+        testFile: string,
+        summary: {
+            status: "passed" | "failed" | "error" | "timeout";
+            durationMs?: number;
+            errorMessage?: string;
+            failingSelector?: string;
+        },
+    ): void {
+        const testId = this.getLatestTestOutcomeId(testFile);
+        if (testId === null) return;
+        this.recordTestResult(
+            testId,
+            summary.status,
+            summary.durationMs,
+            summary.errorMessage,
+            summary.failingSelector,
+        );
+        this.updateDominantSelectorStrategy();
+    }
+
+    /**
+     * Recompute the dominant selector strategy from accumulated selector
+     * history and persist it if one strategy clearly leads. Cheap enough to
+     * call after every recorded test result; a no-op once there isn't a new
+     * leader or the sample size is too small to trust.
+     */
+    private static readonly MIN_SELECTOR_SAMPLES = 10;
+    private static readonly VALID_STRATEGIES = new Set(["data-testid", "role", "text", "css"]);
+    updateDominantSelectorStrategy(): void {
+        const dominant = this.db.getDominantSelectorType();
+        if (!dominant) return;
+        if (dominant.successCount < AgentMemory.MIN_SELECTOR_SAMPLES) return;
+        if (!AgentMemory.VALID_STRATEGIES.has(dominant.type)) return;
+        if (this.getSelectorStrategy() === dominant.type) return;
+        this.setSelectorStrategy(dominant.type as "data-testid" | "role" | "text" | "css");
     }
 
     // =========================================================================

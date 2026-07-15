@@ -146,7 +146,7 @@ ${urlRule}
 
     formatSiteKnowledgeSection(siteKnowledge: SiteKnowledge, baseURL?: string | null): string {
         const { formatSiteKnowledge } = require("../site-discovery");
-        return "\n" + formatSiteKnowledge(siteKnowledge, baseURL);
+        return `\n${formatSiteKnowledge(siteKnowledge, baseURL)}`;
     },
 
     changelog: [

@@ -2,8 +2,10 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
+import { parseSourceFile } from "../../../analysis/ast-parser";
 import { ProjectContext } from "../../../analysis/project-context";
 import { cleanGeneratedTestCode } from "../../../utils";
+import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import { AgentMemory } from "../../memory";
 import type { ContextData } from "../../prompts";
 import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
@@ -11,6 +13,33 @@ import type { GraphStateType } from "../state";
 import type { ContextPlan } from "../utils";
 import { goalTargetsUnauthedPage, normalizeSelector, parseSummaryElements } from "../utils";
 import type { AgentNodeDeps } from "./types";
+
+/**
+ * Save-gate for generated test drafts.
+ *
+ * A streamed response that gets interrupted mid-token, an empty/near-empty
+ * LLM reply, or the model answering with prose instead of code would
+ * otherwise flow straight through as `testDraft` — which `hitl.ts` then
+ * writes to disk and (optionally) runs unconditionally, since it only checks
+ * `if (!state.testDraft) return {}`. A truthy-but-garbage string passes that
+ * check. Real syntax validation (not a brace-counting heuristic, which is
+ * easily fooled by parens/braces inside string literals) catches truncation
+ * reliably; the `test(`-call check catches well-formed-but-useless output
+ * (e.g. just a comment) that happens to parse.
+ */
+function validateTestDraft(code: string): { ok: boolean; reason?: string } {
+    if (!code.trim()) return { ok: false, reason: "empty response" };
+    try {
+        parseSourceFile(code, "generated-test.spec.ts");
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { ok: false, reason: `does not parse as valid JS/TS (${message})` };
+    }
+    if (!/\btest(?:\.(?:describe|only|skip|fixme))?\s*\(/.test(code)) {
+        return { ok: false, reason: "no Playwright test() call found" };
+    }
+    return { ok: true };
+}
 
 /**
  * Return the locators used in a generated test that do NOT appear in the
@@ -413,7 +442,9 @@ async function planTestContext(deps: AgentNodeDeps, state: GraphStateType): Prom
         ]
             .filter(Boolean)
             .join("\n");
-        const plan = await planner.invoke([new SystemMessage(system), new HumanMessage(human)]);
+        const plan = await planner.invoke([new SystemMessage(system), new HumanMessage(human)], {
+            timeout: LLM_REQUEST_TIMEOUT_MS,
+        });
         const searchQueries =
             plan.searchQueries && plan.searchQueries.length > 0
                 ? plan.searchQueries.slice(0, MAX_PLAN_QUERIES)
@@ -608,7 +639,9 @@ export const createGenerateTestsNode =
             let content = "";
             if (onToken && typeof model.stream === "function") {
                 try {
-                    const stream = await model.stream(messages);
+                    const stream = await model.stream(messages, {
+                        timeout: LLM_REQUEST_TIMEOUT_MS,
+                    });
                     for await (const chunk of stream) {
                         const part = Array.isArray(chunk.content)
                             ? chunk.content
@@ -632,7 +665,7 @@ export const createGenerateTestsNode =
             }
 
             if (!content) {
-                const response = await model.invoke(messages);
+                const response = await model.invoke(messages, { timeout: LLM_REQUEST_TIMEOUT_MS });
                 content = Array.isArray(response.content)
                     ? response.content
                           .map((part) => (typeof part === "string" ? part : part?.text || ""))
@@ -669,6 +702,17 @@ export const createGenerateTestsNode =
                             .join(", ")}`,
                     );
                 }
+            }
+
+            const validation = validateTestDraft(cleaned);
+            if (!validation.ok) {
+                console.warn(`Generated test draft rejected: ${validation.reason}`);
+                return {
+                    testDraft: "",
+                    summary: `Test generation produced output that wasn't usable (${validation.reason}). This can happen when a streamed response gets interrupted — try again.`,
+                    context,
+                    testDirectory: context.testDirectory,
+                };
             }
 
             return {
@@ -1007,10 +1051,10 @@ export const createAnswerQuestionsNode =
         };
 
         const invokeWithPrompt = async (prompt: string): Promise<string> => {
-            const response = await model.invoke([
-                new SystemMessage(prompt),
-                new HumanMessage(state.userPrompt),
-            ]);
+            const response = await model.invoke(
+                [new SystemMessage(prompt), new HumanMessage(state.userPrompt)],
+                { timeout: LLM_REQUEST_TIMEOUT_MS },
+            );
             return Array.isArray(response.content)
                 ? response.content
                       .map((part) => (typeof part === "string" ? part : part?.text || ""))

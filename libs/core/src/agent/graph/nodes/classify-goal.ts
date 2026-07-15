@@ -1,5 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
+import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
 
@@ -111,12 +112,12 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
 
         let result: ClassifierOutput;
         try {
-            const response = await structuredModel.invoke([
-                new SystemMessage(prompt),
-                new HumanMessage(state.userPrompt),
-            ]);
+            const response = await structuredModel.invoke(
+                [new SystemMessage(prompt), new HumanMessage(state.userPrompt)],
+                { timeout: LLM_REQUEST_TIMEOUT_MS },
+            );
             result = response;
-        } catch (structuredError) {
+        } catch {
             // Structured output failed (model doesn't support it, or schema mismatch).
             // Fall back to raw JSON parsing.
             result = await fallbackClassify(deps, prompt, state.userPrompt);
@@ -277,10 +278,10 @@ async function fallbackClassify(
 ): Promise<ClassifierOutput> {
     const strictPrompt = `${systemPrompt}\n\nReturn JSON only, no fences:\n${JSON.stringify(classifierSchema.shape)}`;
 
-    const response = await deps.model.invoke([
-        new SystemMessage(strictPrompt),
-        new HumanMessage(userPrompt),
-    ]);
+    const response = await deps.model.invoke(
+        [new SystemMessage(strictPrompt), new HumanMessage(userPrompt)],
+        { timeout: LLM_REQUEST_TIMEOUT_MS },
+    );
 
     const content = Array.isArray(response.content)
         ? response.content

@@ -745,15 +745,25 @@ export function createAIClient(resolved: ResolvedAIConfig): AIClient {
  * Per-request timeout (ms) for every LLM call. Without this LangChain has no
  * request timeout, so a provider that accepts the connection but never responds
  * hangs the whole agent run forever (the dashboard just "loads infinitely").
+ *
+ * Set at the SDK-client level below for Anthropic/OpenAI (`clientOptions.timeout`
+ * / `timeout`), which enforces it under the hood. `@langchain/google-genai` has
+ * no equivalent client-level option, so callers MUST also pass
+ * `{ timeout: LLM_REQUEST_TIMEOUT_MS }` as the second argument to every
+ * `.invoke()` / `.stream()` / `.withStructuredOutput(...).invoke()` call —
+ * LangChain's `Runnable.invoke(input, config)` turns `config.timeout` into a
+ * real `AbortSignal` that every provider (including Google) threads through
+ * to its underlying HTTP call. This is exported so every call site shares one
+ * value instead of each node picking its own (or forgetting to set one).
  */
-const LLM_REQUEST_TIMEOUT_MS = 60_000;
+export const LLM_REQUEST_TIMEOUT_MS = 60_000;
 
 /**
  * Bounded retries. LangChain's default is 6 with exponential backoff, which on a
  * rate-limited/5xx provider can stall a single call for minutes. Two keeps us
  * resilient to transient blips without looking hung.
  */
-const LLM_MAX_RETRIES = 2;
+export const LLM_MAX_RETRIES = 2;
 
 /**
  * Build a LangChain chat model for the resolved config. The LangGraph agent

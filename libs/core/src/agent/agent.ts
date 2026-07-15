@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fullAstToSearchableText } from "../analysis/ast-parser";
 import { EntryPointDetector } from "../analysis/entry-points";
 import { ProjectContext } from "../analysis/project-context";
+import { loadAutonomyConfig } from "../config";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
@@ -308,29 +309,19 @@ export async function gatherContext(
 import { type AutonomySettings, createAgentTools, type HITLAction, type ToolResult } from "./tools";
 
 /**
- * Load autonomy settings from raiken.config.json
+ * Load autonomy settings from raiken.config.json, optionally overridden for
+ * just this call (e.g. the REPL's `/mode` reflecting the current session
+ * without permanently rewriting the project's shared config file).
+ *
+ * Thin wrapper over {@link loadAutonomyConfig} (the single source of truth
+ * for this section, also used directly by graph nodes) kept for backward
+ * compatibility with existing callers/imports.
  */
-function loadAutonomySettings(projectPath: string): AutonomySettings {
-    const defaults: AutonomySettings = {
-        autoSaveTests: false,
-        autoRunTests: false,
-        autoCorrect: "suggest",
-        autoLearn: "confirm",
-    };
-
-    const configPath = path.join(projectPath, "raiken.config.json");
-    if (fs.existsSync(configPath)) {
-        try {
-            const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-            if (config.autonomy) {
-                return { ...defaults, ...config.autonomy };
-            }
-        } catch {
-            // Config parse failed
-        }
-    }
-
-    return defaults;
+export function loadAutonomySettings(
+    projectPath: string,
+    override?: Partial<AutonomySettings>,
+): AutonomySettings {
+    return loadAutonomyConfig(projectPath, override);
 }
 
 /**
@@ -399,24 +390,137 @@ export function buildHITLMarker(payload: unknown): string {
     return `<!--HITL:${encoded}-->`;
 }
 
-/** Human-readable label for a tool call, for the activity trail. */
-function humanizeToolCall(toolName: string): string | null {
+/**
+ * Decide which (if any) rich HITL marker to surface for the current pause,
+ * given every HITL action collected so far this run. We piggy-back on the
+ * `<!--HITL:..-->` marker so the dashboard sidebar / CLI REPL can render an
+ * actionable approval card (code preview or run summary, Approve / Reject /
+ * Always-* buttons) instead of the bare `awaitUserMessage` text — without
+ * this the user sees only "Waiting for approval to save/run X." with nothing
+ * to click or type.
+ *
+ * Only the LAST action decides what's actually pending: a "run" pause always
+ * comes after its own "save" already resolved (auto-approved or
+ * user-approved), so an earlier save in the same turn must never be
+ * re-surfaced as if it were still awaiting a decision.
+ *
+ * Extracted as a pure function (mirrors `computeOneShotOutcome` in
+ * `oneshot.ts`) so this branching is unit-testable without spinning up the
+ * full graph/LLM stack.
+ */
+export function buildPendingHitlMarker(hitlActions: HITLAction[]): string | null {
+    const lastPendingAction = hitlActions[hitlActions.length - 1];
+    if (!lastPendingAction) return null;
+
+    if (lastPendingAction.type === "save") {
+        return buildHITLMarker({
+            kind: "save_approval" as const,
+            type: "save",
+            title: "Approve test save",
+            message:
+                "Review the generated test below. Approve to save it to disk, edit the path if you want it elsewhere, or reject to discard it.",
+            reasons: [],
+            testCode: lastPendingAction.testCode,
+            suggestedPath: lastPendingAction.suggestedPath,
+            testName: lastPendingAction.testName,
+            options: [
+                {
+                    id: "save_approve",
+                    label: "Save",
+                    description: "Write this test to the suggested path.",
+                },
+                {
+                    id: "save_approve_remember",
+                    label: "Save & always save",
+                    description:
+                        "Save now and skip this prompt for future test saves (autoSaveTests = true).",
+                },
+                {
+                    id: "save_reject",
+                    label: "Reject",
+                    description: "Discard the draft without saving.",
+                },
+            ],
+            context: {},
+        });
+    }
+
+    if (lastPendingAction.type === "run") {
+        return buildHITLMarker({
+            kind: "run_approval" as const,
+            type: "run",
+            title: "Approve test run",
+            message: "The test is saved. Run it now, or skip and run it later yourself.",
+            reasons: lastPendingAction.warnings ?? [],
+            testFile: lastPendingAction.testFile,
+            testName: lastPendingAction.testName,
+            options: [
+                {
+                    id: "run_approve",
+                    label: "Run",
+                    description: "Execute this test now.",
+                },
+                {
+                    id: "run_approve_remember",
+                    label: "Run & always run",
+                    description:
+                        "Run now and skip this prompt for future test runs (autoRunTests = true).",
+                },
+                {
+                    id: "run_reject",
+                    label: "Skip",
+                    description: "Don't run it now.",
+                },
+            ],
+            context: {},
+        });
+    }
+
+    return null;
+}
+
+/**
+ * Human-readable label for a tool call, for the activity trail.
+ *
+ * Every tool exported by `createAgentTools` (agent/tools.ts) should have an
+ * entry here so the dashboard/CLI activity trail never shows a silent gap
+ * mid-run. New tools that forget to add a mapping still get a serviceable
+ * generic label instead of falling through to `null` (which used to mean
+ * "show nothing at all").
+ */
+export function humanizeToolCall(toolName: string): string {
     const labels: Record<string, string> = {
-        startBrowser: "Starting browser",
-        navigateTo: "Navigating",
+        searchCodebase: "Searching codebase",
+        readFile: "Reading file",
+        listDirectory: "Listing directory",
         captureDOM: "Reading page",
-        captureCurrentPage: "Reading page",
+        saveFile: "Saving test",
+        runTest: "Running test",
+        getMemoryContext: "Recalling past runs",
+        getProjectOverview: "Analyzing project",
+        getDiscoveryOverview: "Reviewing site map",
+        listDiscoveredPages: "Listing discovered pages",
+        getDiscoveredPageSnapshot: "Loading page snapshot",
+        startBrowser: "Starting browser",
+        closeBrowser: "Closing browser",
+        navigateTo: "Navigating",
         clickElement: "Clicking",
         fillInput: "Filling input",
         pressKey: "Pressing key",
+        captureCurrentPage: "Reading page",
+        waitForElement: "Waiting for element",
+        typeText: "Typing",
+        hoverElement: "Hovering",
         selectOption: "Selecting option",
         toggleCheckbox: "Toggling checkbox",
-        discoverLinks: "Discovering links",
+        getCurrentUrl: "Checking current URL",
         saveAuthState: "Saving login state",
-        saveFile: "Saving test",
-        runTest: "Running test",
+        discoverLinks: "Discovering links",
+        done: "Finishing up",
+        respond: "Responding",
+        awaitUser: "Waiting for your input",
     };
-    return labels[toolName] ?? null;
+    return labels[toolName] ?? `Running ${toolName}...`;
 }
 
 /**
@@ -435,6 +539,15 @@ export interface ToolAgentOptions {
     /** Files the user referenced (e.g. @mentions) to focus context gathering on. */
     fileContext?: string[];
     config?: AgentConfig;
+    /**
+     * Session-scoped autonomy override for just this run — e.g. the CLI
+     * REPL's `/mode auto-run`/`/mode yolo` reflecting what the user asked
+     * for in *this* session, without permanently rewriting the project's
+     * shared `raiken.config.json` (which may be committed and shared with
+     * teammates). Merged on top of the on-disk config; omit any field to
+     * fall back to it.
+     */
+    autonomyOverride?: Partial<AutonomySettings>;
     /**
      * Abort signal to cancel the run (e.g. the SSE client disconnected).
      * LangGraph checks it at step boundaries and stops the graph.
@@ -468,6 +581,7 @@ export async function* runToolAgent(
         targetTestFile,
         fileContext,
         config: configOverride,
+        autonomyOverride,
         signal,
         onToolCall,
         onToolResult,
@@ -502,7 +616,7 @@ export async function* runToolAgent(
     let draftStreamed = false;
 
     try {
-        const autonomy = loadAutonomySettings(projectPath);
+        const autonomy = loadAutonomySettings(projectPath, autonomyOverride);
         const tools = createAgentTools({ projectPath, autonomy });
         const toolMap = tools as Record<
             string,
@@ -516,8 +630,9 @@ export async function* runToolAgent(
                 channel.push({ kind: "event", text: buildAgentEventMarker("tool", activityLabel) });
             }
             let result: ToolResult;
-            if (toolMap[toolName]?.execute) {
-                result = await toolMap[toolName]!.execute!(args);
+            const tool = toolMap[toolName];
+            if (tool?.execute) {
+                result = await tool.execute(args);
             } else {
                 result = { success: true, message: `${toolName} invoked` };
             }
@@ -615,6 +730,7 @@ export async function* runToolAgent(
         const graph = createAgentGraph({
             callTool,
             projectPath,
+            autonomy,
             onProgress,
             onToken,
             signal,
@@ -704,57 +820,21 @@ export async function* runToolAgent(
         const finalState = await invokePromise;
 
         for (const msg of respondMessages) {
-            yield msg + "\n";
-            fullText += msg + "\n";
+            yield `${msg}\n`;
+            fullText += `${msg}\n`;
         }
 
         if (finalState.awaitUserMessage) {
             const userMessage = finalState.awaitUserMessage;
 
-            // If we're paused because saveFile asked for HITL approval, surface
-            // the actual test draft + structured action data to the dashboard
-            // *before* the await message. Without this the user sees only
-            // "Waiting for approval to save e2e/foo.spec.ts." with no preview
-            // of what they're about to put on disk — the test content lives in
-            // `state.testDraft` and `hitlActions[]`, but neither is streamed.
-            //
-            // We piggy-back on the existing dashboard <!--HITL:..--> marker so
-            // the sidebar can render a rich approval card (code preview,
-            // editable path, Approve / Reject / Save-always buttons) instead
-            // of a bare prompt.
-            const pendingSaveAction = [...hitlActions].reverse().find((a) => a.type === "save");
-            if (pendingSaveAction && pendingSaveAction.type === "save") {
-                const hitlPayload = {
-                    kind: "save_approval" as const,
-                    type: "save",
-                    title: "Approve test save",
-                    message:
-                        "Review the generated test below. Approve to save it to disk, edit the path if you want it elsewhere, or reject to discard it.",
-                    reasons: [],
-                    testCode: pendingSaveAction.testCode,
-                    suggestedPath: pendingSaveAction.suggestedPath,
-                    testName: pendingSaveAction.testName,
-                    options: [
-                        {
-                            id: "save_approve",
-                            label: "Save",
-                            description: "Write this test to the suggested path.",
-                        },
-                        {
-                            id: "save_approve_remember",
-                            label: "Save & always save",
-                            description:
-                                "Save now and skip this prompt for future test saves (autoSaveTests = true).",
-                        },
-                        {
-                            id: "save_reject",
-                            label: "Reject",
-                            description: "Discard the draft without saving.",
-                        },
-                    ],
-                    context: {},
-                };
-                const marker = buildHITLMarker(hitlPayload);
+            // If we're paused because saveFile/runTest asked for HITL approval,
+            // surface the actual pending action + structured data to the
+            // dashboard/CLI *before* the await message. Without this the user
+            // sees only a bare "Waiting for approval to save/run X." with
+            // nothing actionable — the content lives in `hitlActions[]` but is
+            // never streamed on its own.
+            const marker = buildPendingHitlMarker(hitlActions);
+            if (marker) {
                 yield marker;
                 fullText += marker;
             }
@@ -855,7 +935,7 @@ export async function* runToolAgent(
         yield `\n\n${errorMsg}`;
 
         return {
-            text: fullText + `\n\n${errorMsg}`,
+            text: `${fullText}\n\n${errorMsg}`,
             toolCalls: toolCallsLog,
             hitlActions,
         };

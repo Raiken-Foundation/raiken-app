@@ -13,6 +13,7 @@ import { z } from "zod";
 import { ProjectContext } from "../analysis/project-context";
 import { type DOMContext, formatDOMContext } from "../browser/dom-capture";
 import { BrowserSession } from "../browser/session";
+import { type AutonomyConfig, defaultConfig } from "../config";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "../site-discovery/db";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
@@ -169,11 +170,148 @@ async function snapshotAfterAction(
     }
 }
 
+/**
+ * Collapse a multi-test run into the single-outcome shape `test_outcomes`
+ * tracks. Picks the worst status across the run (error > timeout > failed >
+ * passed) and surfaces the first failure's message/selector, since that's
+ * almost always the one worth remembering for a repair pass.
+ */
+function summarizeRunResults(results: TestRunResult[]): {
+    status: "passed" | "failed" | "error" | "timeout";
+    durationMs: number;
+    errorMessage?: string;
+    failingSelector?: string;
+} {
+    const durationMs = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+    const rank: Record<string, number> = { error: 3, timeout: 2, failed: 1, skipped: 0, passed: 0 };
+    let worst: TestRunResult | undefined;
+    for (const r of results) {
+        if (!worst || (rank[r.status] ?? 0) > (rank[worst.status] ?? 0)) worst = r;
+    }
+    const status: "passed" | "failed" | "error" | "timeout" =
+        worst &&
+        (worst.status === "error" || worst.status === "timeout" || worst.status === "failed")
+            ? worst.status
+            : "passed";
+    return {
+        status,
+        durationMs,
+        errorMessage: worst?.error?.message,
+        failingSelector: worst?.error?.selector,
+    };
+}
+
 function formatToolError<T = unknown>(context: string, error: unknown): ToolResult<T> {
     return {
         success: false,
         message: `${context}: ${error instanceof Error ? error.message : "Unknown error"}`,
     };
+}
+
+/** Result of {@link writeTestFile}. */
+export interface WriteTestFileResult {
+    success: boolean;
+    path?: string;
+    message: string;
+}
+
+/**
+ * Clean, atomically write, and (best-effort) record a generated/repaired
+ * test file. Shared by the `saveFile` tool's auto-save branch and the repair
+ * node's own writes — the repair node bypasses the tool's HITL gate (its
+ * `autoCorrect` setting, not `autoSaveTests`, is the authorizing signal for a
+ * repair's writes) but must still go through the exact same clean +
+ * atomic-write + learn pipeline so on-disk output never differs by caller.
+ */
+export async function writeTestFile(
+    projectPath: string,
+    filePath: string,
+    rawContent: string,
+    testName: string | undefined,
+    autonomy: Pick<AutonomySettings, "autoLearn">,
+): Promise<WriteTestFileResult> {
+    const name = testName || path.basename(filePath, path.extname(filePath));
+    const content = cleanGeneratedTestCode(stripEditMarkers(rawContent));
+    try {
+        const fullPath = safePath(projectPath, filePath);
+        const dir = path.dirname(fullPath);
+        await fs.mkdir(dir, { recursive: true });
+        const tmp = path.join(dir, `.${path.basename(fullPath)}.tmp-${process.pid}-${Date.now()}`);
+        await fs.writeFile(tmp, content, "utf-8");
+        await fs.rename(tmp, fullPath);
+        if (autonomy.autoLearn !== "off") {
+            try {
+                AgentMemory.getInstance(projectPath).recordTestGenerated(
+                    filePath,
+                    name,
+                    "",
+                    content,
+                );
+            } catch {
+                /* non-critical */
+            }
+        }
+        return { success: true, path: filePath, message: `Saved ${filePath}` };
+    } catch (error) {
+        return {
+            success: false,
+            message: `Failed to save file: ${error instanceof Error ? error.message : "Unknown error"}`,
+        };
+    }
+}
+
+/** Result of {@link executeTestRun}. */
+export interface ExecuteTestRunResult {
+    success: boolean;
+    results?: TestRunResult[];
+    message: string;
+}
+
+/**
+ * Run a Playwright test file and (best-effort) record the outcome. Shared by
+ * the `runTest` tool's auto-run branch and the repair node's own
+ * verification runs — see {@link writeTestFile} for why the repair node
+ * bypasses the tool wrapper's HITL gate but not its behavior.
+ */
+export async function executeTestRun(
+    projectPath: string,
+    testFile: string,
+    headed: boolean,
+    autonomy: Pick<AutonomySettings, "autoLearn">,
+): Promise<ExecuteTestRunResult> {
+    try {
+        const runner = new TestRunner(projectPath);
+        const results = await runner.runTest(testFile, { headed });
+        const passed = results.every((r) => r.status === "passed");
+
+        // A run that executed nothing (zero matched tests, or every test
+        // skipped) proves nothing — recording it would stamp the outcome row
+        // "passed" and feed the learning loop from a non-run.
+        const executedAny = results.some((r) => r.status !== "skipped");
+        if (autonomy.autoLearn !== "off" && executedAny) {
+            try {
+                AgentMemory.getInstance(projectPath).recordRunOutcome(
+                    testFile,
+                    summarizeRunResults(results),
+                );
+            } catch {
+                /* non-critical */
+            }
+        }
+
+        return {
+            success: passed,
+            results,
+            message: passed
+                ? `All tests passed (${results.length} test(s))`
+                : `${results.filter((r) => r.status !== "passed").length} test(s) failed`,
+        };
+    } catch (error) {
+        return {
+            success: false,
+            message: `Test execution failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        };
+    }
 }
 
 // Lazy shared DB connection for site knowledge persistence during a tools session.
@@ -245,7 +383,11 @@ function persistPageDiscovery(
         const existing = siteDb.getPage(snapshot.url);
 
         if (existing) {
-            siteDb.updatePageVisit(snapshot.url);
+            siteDb.updatePageContent(snapshot.url, {
+                title: snapshot.title,
+                snapshotJson: snapshot.summary,
+                formsJson: null,
+            });
             return;
         }
 
@@ -327,14 +469,13 @@ function persistLinksDiscovery(
 }
 
 /**
- * Autonomy settings for tool execution
+ * Autonomy settings for tool execution. Alias of the fully-resolved
+ * `raiken.config.json` `autonomy` section (see `config/schema.ts`) so tool
+ * gates and the repair/run nodes all reason about the exact same shape —
+ * previously this was a separate, hand-duplicated interface that could
+ * drift from the schema (e.g. it never picked up `maxRetries`).
  */
-export interface AutonomySettings {
-    autoSaveTests: boolean;
-    autoRunTests: boolean;
-    autoCorrect: "suggest" | "apply" | "off";
-    autoLearn: "confirm" | "auto" | "off";
-}
+export type AutonomySettings = Required<AutonomyConfig>;
 
 /**
  * Tool result that may require HITL confirmation
@@ -359,12 +500,7 @@ export interface ToolContext {
 /**
  * Default autonomy settings (conservative - always ask)
  */
-const defaultAutonomy: AutonomySettings = {
-    autoSaveTests: false,
-    autoRunTests: false,
-    autoCorrect: "suggest",
-    autoLearn: "confirm",
-};
+const defaultAutonomy: AutonomySettings = defaultConfig.autonomy;
 
 /**
  * Create the agent tools with project context
@@ -544,49 +680,51 @@ export function createAgentTools(ctx: ToolContext) {
                     filePath,
                     content: rawContent,
                     testName,
+                    _repairVerification,
                 } = params as {
                     filePath: string;
                     content: string;
                     testName?: string;
+                    /**
+                     * Internal-only flag set by the repair node's own writes
+                     * (never by the LLM — it's not part of the tool's public
+                     * schema). The file being repaired was already saved once
+                     * to reach the repair loop, so `autoCorrect` — not
+                     * `autoSaveTests` — is the authorizing signal here;
+                     * without this, a repair loop with `autoCorrect: "apply"`
+                     * but `autoSaveTests: false` would silently no-op every
+                     * write while looking like it succeeded.
+                     */
+                    _repairVerification?: boolean;
                 };
                 const name = testName || path.basename(filePath, path.extname(filePath));
-                // Normalize once so the preview shown to the user and the bytes
-                // written to disk are identical, regardless of save path. Strip
-                // any stray SEARCH/REPLACE markers first (a malformed edit block
-                // falling back to a full-file rewrite) so they can never end up
-                // as invalid TypeScript on disk.
-                const content = cleanGeneratedTestCode(stripEditMarkers(rawContent));
 
-                // Check if we can skip HITL
-                if (shouldSkipHITL("save", autonomy)) {
-                    // Auto-save enabled - save immediately.
-                    try {
-                        const fullPath = safePath(projectPath, filePath);
-                        // Atomic write (temp + rename) so a crash mid-write can't
-                        // leave a truncated/corrupt spec — matching the semantics
-                        // of the dashboard's saveGeneratedTest path.
-                        const dir = path.dirname(fullPath);
-                        await fs.mkdir(dir, { recursive: true });
-                        const tmp = path.join(
-                            dir,
-                            `.${path.basename(fullPath)}.tmp-${process.pid}-${Date.now()}`,
-                        );
-                        await fs.writeFile(tmp, content, "utf-8");
-                        await fs.rename(tmp, fullPath);
-                        return {
-                            success: true,
-                            data: { path: filePath, saved: true },
-                            message: `Saved ${filePath}`,
-                        };
-                    } catch (error) {
-                        return {
-                            success: false,
-                            message: `Failed to save file: ${error instanceof Error ? error.message : "Unknown error"}`,
-                        };
-                    }
+                const autoApproved =
+                    shouldSkipHITL("save", autonomy) ||
+                    (_repairVerification === true && autonomy.autoCorrect !== "off");
+                if (autoApproved) {
+                    const result = await writeTestFile(
+                        projectPath,
+                        filePath,
+                        rawContent,
+                        name,
+                        autonomy,
+                    );
+                    if (!result.success) return { success: false, message: result.message };
+                    return {
+                        success: true,
+                        data: { path: result.path ?? filePath, saved: true },
+                        message: result.message,
+                    };
                 }
 
-                // HITL required - return action for confirmation
+                // HITL required - return action for confirmation. Normalize
+                // once so the preview shown to the user matches what would
+                // land on disk if approved. Strip any stray SEARCH/REPLACE
+                // markers first (a malformed edit block falling back to a
+                // full-file rewrite) so they never end up as invalid
+                // TypeScript on disk.
+                const content = cleanGeneratedTestCode(stripEditMarkers(rawContent));
                 const hitlAction = createSaveAction(content, filePath, name);
                 return {
                     success: true,
@@ -610,40 +748,52 @@ export function createAgentTools(ctx: ToolContext) {
                 headed: z.boolean().optional().default(false).describe("Run with visible browser"),
             }),
             execute: async (params): Promise<ToolResult<TestRunResult[] | { status: string }>> => {
-                const { testFile, headed = false } = params as {
+                const {
+                    testFile,
+                    headed = false,
+                    _repairVerification,
+                } = params as {
                     testFile: string;
                     headed?: boolean;
+                    /** Internal-only flag — see `saveFile`'s `_repairVerification`. */
+                    _repairVerification?: boolean;
                 };
+                let validatedTestFile: string;
+                try {
+                    validatedTestFile = path.relative(projectPath, safePath(projectPath, testFile));
+                } catch (error) {
+                    return {
+                        success: false,
+                        message: error instanceof Error ? error.message : "Invalid test file path",
+                    };
+                }
 
-                // Check if we can skip HITL
-                if (shouldSkipHITL("run", autonomy)) {
-                    // Auto-run enabled - execute immediately
-                    try {
-                        const runner = new TestRunner(projectPath);
-                        const results = await runner.runTest(testFile, { headed });
-                        const passed = results.every((r) => r.status === "passed");
-
-                        return {
-                            success: passed,
-                            data: results,
-                            message: passed
-                                ? `All tests passed (${results.length} test(s))`
-                                : `${results.filter((r) => r.status !== "passed").length} test(s) failed`,
-                        };
-                    } catch (error) {
-                        return {
-                            success: false,
-                            message: `Test execution failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-                        };
-                    }
+                const autoApproved =
+                    shouldSkipHITL("run", autonomy) ||
+                    (_repairVerification === true && autonomy.autoCorrect !== "off");
+                if (autoApproved) {
+                    const result = await executeTestRun(
+                        projectPath,
+                        validatedTestFile,
+                        headed,
+                        autonomy,
+                    );
+                    return {
+                        success: result.success,
+                        data: result.results,
+                        message: result.message,
+                    };
                 }
 
                 // HITL required - return action for confirmation
-                const hitlAction = createRunAction(testFile, path.basename(testFile));
+                const hitlAction = createRunAction(
+                    validatedTestFile,
+                    path.basename(validatedTestFile),
+                );
                 return {
                     success: true,
                     data: { status: "pending" },
-                    message: `Ready to run ${testFile}. Waiting for confirmation.`,
+                    message: `Ready to run ${validatedTestFile}. Waiting for confirmation.`,
                     hitlRequired: true,
                     hitlAction,
                 };

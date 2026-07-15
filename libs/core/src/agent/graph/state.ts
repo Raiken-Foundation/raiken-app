@@ -153,6 +153,17 @@ export const GraphState = Annotation.Root({
         value: (_left, right) => right,
         default: () => 0,
     }),
+    /**
+     * The fixed code produced by the most recent repair attempt. Lets the next
+     * attempt detect "no progress" — the AI returning byte-identical code to
+     * either the pre-repair file or its own prior attempt — so the repair loop
+     * can stop early instead of burning through `maxRetries` on guesses that
+     * are provably not changing anything.
+     */
+    lastRepairedCode: Annotation<string | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
     pauseReason: Annotation<string | null>({
         value: (_left, right) => right,
         default: () => null,

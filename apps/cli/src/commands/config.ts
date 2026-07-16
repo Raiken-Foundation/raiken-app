@@ -20,6 +20,7 @@ import {
     getProvider,
     listProviderModels,
     listProviders,
+    type ModelInfo,
     type ProviderDefinition,
     readApiKeyFromEnv,
     resolveAIConfig,
@@ -458,6 +459,22 @@ function resolveProviderAnswer(
 }
 
 /**
+ * Match a `/config` model-picker answer against a 1-based index into the
+ * listed models, a model id typed directly (doesn't have to be in the
+ * list — some providers' catalogs are incomplete or stale), or Enter for
+ * the default.
+ */
+function resolveModelAnswer(answer: string, models: ModelInfo[], defaultModel: string): string {
+    const trimmed = answer.trim();
+    if (!trimmed) return defaultModel;
+    const asIndex = Number(trimmed);
+    if (Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= models.length) {
+        return models[asIndex - 1].id;
+    }
+    return trimmed;
+}
+
+/**
  * `/config` with no flags, run from inside the live REPL. A shorter version
  * of {@link runInteractiveWizard} (provider → key → model; base URL is only
  * asked for the "custom" provider) built on the REPL's own cancelable
@@ -533,11 +550,6 @@ export async function runReplConfigWizard(
         }
     }
 
-    const defaultModel = switchedProvider ? provider.defaultModel : current.model;
-    const modelAnswer = await ask(dim(`  Model [Enter for ${defaultModel}] › `));
-    if (modelAnswer === null) return;
-    const model = modelAnswer.trim() || defaultModel;
-
     let baseURL = switchedProvider ? provider.defaultBaseURL || undefined : current.baseURL;
     if (provider.id === "custom") {
         const baseUrlAnswer = await ask(dim("  Base URL (required for a custom endpoint) › "));
@@ -547,6 +559,35 @@ export async function runReplConfigWizard(
             return;
         }
         baseURL = baseUrlAnswer.trim();
+    }
+
+    const defaultModel = switchedProvider ? provider.defaultModel : current.model;
+    const effectiveApiKey = apiKeyPatch || envKey || (switchedProvider ? undefined : current.apiKey);
+    const spinner = ora({ text: "Fetching available models…", spinner: "dots" }).start();
+    const { models, error } = await listProviderModels({
+        provider: provider.id,
+        apiKey: effectiveApiKey,
+        baseURL,
+    });
+    if (error) spinner.warn(dim(`Could not fetch live models: ${error}`));
+    else spinner.stop();
+
+    let model: string;
+    if (models.length > 0) {
+        models.forEach((m, i) => {
+            const marker = m.id === defaultModel ? accent("›") : " ";
+            const label = m.description ? `${m.name}  ${dim(m.description)}` : m.name;
+            console.log(`  ${marker} ${dim(`${i + 1}.`.padEnd(4))}${label}`);
+        });
+        const modelAnswer = await ask(
+            dim(`\n  Model [1-${models.length}, id, or Enter for ${defaultModel}] › `),
+        );
+        if (modelAnswer === null) return;
+        model = resolveModelAnswer(modelAnswer, models, defaultModel);
+    } else {
+        const modelAnswer = await ask(dim(`  Model [Enter for ${defaultModel}] › `));
+        if (modelAnswer === null) return;
+        model = modelAnswer.trim() || defaultModel;
     }
 
     console.log(accent("\n  Summary"));

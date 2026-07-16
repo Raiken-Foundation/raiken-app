@@ -10,10 +10,25 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ModelInfo } from "@raiken/core";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withThrowExit } from "../../repl/exit";
-import { buildAiConfigPatch, configCommand, looksLikeApiKey } from "../config";
+
+// The REPL wizard's model step fetches the live model catalog. Stubbed to an
+// empty list by default (falls back to freeform text entry, no network) —
+// the one test that needs the numbered picker overrides this per-call.
+const mockListProviderModels = vi.fn(async () => ({ models: [] as ModelInfo[] }));
+
+vi.mock(import("@raiken/core"), async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        listProviderModels: mockListProviderModels,
+    };
+});
+
+const { buildAiConfigPatch, configCommand, looksLikeApiKey } = await import("../config");
 
 const AI_ENV_VARS = [
     "OPENROUTER_API_KEY",
@@ -257,6 +272,7 @@ describe("configCommand", () => {
     describe("REPL-native wizard (fromRepl + replAsk)", () => {
         beforeEach(() => {
             vi.spyOn(console, "log").mockImplementation(() => {});
+            mockListProviderModels.mockReset().mockResolvedValue({ models: [] });
         });
 
         /** Feeds one scripted answer per `ask()` call, in order. */
@@ -281,6 +297,34 @@ describe("configCommand", () => {
                 provider: "deepseek",
                 apiKey: "sk-test-deepseek-key",
             });
+        });
+
+        it("lets you pick a model by number from the fetched catalog", async () => {
+            mockListProviderModels.mockResolvedValue({
+                models: [
+                    { id: "model-a", name: "Model A", source: "recommended" },
+                    { id: "model-b", name: "Model B", source: "recommended" },
+                ] satisfies ModelInfo[],
+            });
+
+            await configCommand(undefined, {
+                fromRepl: true,
+                // provider, key, model (pick #2 from the list), confirm
+                replAsk: scriptedAsk(["deepseek", "sk-test-deepseek-key", "2", "y"]),
+            });
+
+            expect(readConfig().ai).toMatchObject({ provider: "deepseek", model: "model-b" });
+        });
+
+        it("falls back to freeform entry when the catalog fetch fails", async () => {
+            mockListProviderModels.mockResolvedValue({ models: [], error: "network unreachable" });
+
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["deepseek", "sk-test-deepseek-key", "some-custom-model", "y"]),
+            });
+
+            expect(readConfig().ai).toMatchObject({ provider: "deepseek", model: "some-custom-model" });
         });
 
         it("skips the key prompt entirely for a keyless provider (Ollama)", async () => {
@@ -332,20 +376,25 @@ describe("configCommand", () => {
         });
 
         it("requires a base URL for the custom provider and aborts if left blank", async () => {
+            // Order: provider, key, base URL (blank -> abort before the model
+            // step is ever reached).
             await configCommand(undefined, {
                 fromRepl: true,
-                replAsk: scriptedAsk(["custom", "sk-test", "my-model", ""]),
+                replAsk: scriptedAsk(["custom", "sk-test", ""]),
             });
 
             expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
 
+            // Order: provider, key, base URL, model, confirm. Base URL comes
+            // before the model prompt since fetching a live model list needs
+            // it (matters most for self-hosted/custom endpoints).
             await configCommand(undefined, {
                 fromRepl: true,
                 replAsk: scriptedAsk([
                     "custom",
                     "sk-test",
-                    "my-model",
                     "http://localhost:1234/v1",
+                    "my-model",
                     "y",
                 ]),
             });

@@ -253,4 +253,108 @@ describe("configCommand", () => {
         expect(printed).toContain("/config --provider openai --api-key sk-... --model gpt-4o");
         expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
     });
+
+    describe("REPL-native wizard (fromRepl + replAsk)", () => {
+        beforeEach(() => {
+            vi.spyOn(console, "log").mockImplementation(() => {});
+        });
+
+        /** Feeds one scripted answer per `ask()` call, in order. */
+        function scriptedAsk(
+            answers: Array<string | null>,
+        ): (query: string) => Promise<string | null> {
+            let i = 0;
+            return async () => {
+                const answer = i < answers.length ? answers[i] : null;
+                i += 1;
+                return answer;
+            };
+        }
+
+        it("picks a provider by id, sets a key, keeps the default model, and saves", async () => {
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["deepseek", "sk-test-deepseek-key", "", "y"]),
+            });
+
+            expect(readConfig().ai).toMatchObject({
+                provider: "deepseek",
+                apiKey: "sk-test-deepseek-key",
+            });
+        });
+
+        it("skips the key prompt entirely for a keyless provider (Ollama)", async () => {
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["ollama", "", "y"]),
+            });
+
+            const config = readConfig();
+            expect((config.ai as Record<string, unknown>).provider).toBe("ollama");
+            // Switching *to* a keyless provider still clears any stale key
+            // from the previous provider (same as the interactive wizard).
+            expect((config.ai as Record<string, unknown>).apiKey).toBe("");
+        });
+
+        it("Enter on the provider prompt keeps the current provider", async () => {
+            await configCommand(undefined, { provider: "anthropic", apiKey: "sk-ant-existing" });
+
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["", "", "", "y"]), // provider, key, model, confirm
+            });
+
+            expect((readConfig().ai as Record<string, unknown>).provider).toBe("anthropic");
+        });
+
+        it("rejects an unrecognized provider answer without writing anything", async () => {
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["not-a-real-provider"]),
+            });
+
+            expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+        });
+
+        it("Ctrl-C (null) at any step cancels without writing anything", async () => {
+            await configCommand(undefined, { fromRepl: true, replAsk: scriptedAsk([null]) });
+
+            expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+        });
+
+        it("declining the final confirmation does not write anything", async () => {
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["openai", "sk-test-openai", "", "n"]),
+            });
+
+            expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+        });
+
+        it("requires a base URL for the custom provider and aborts if left blank", async () => {
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk(["custom", "sk-test", "my-model", ""]),
+            });
+
+            expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+
+            await configCommand(undefined, {
+                fromRepl: true,
+                replAsk: scriptedAsk([
+                    "custom",
+                    "sk-test",
+                    "my-model",
+                    "http://localhost:1234/v1",
+                    "y",
+                ]),
+            });
+
+            expect(readConfig().ai).toMatchObject({
+                provider: "custom",
+                baseURL: "http://localhost:1234/v1",
+                model: "my-model",
+            });
+        });
+    });
 });

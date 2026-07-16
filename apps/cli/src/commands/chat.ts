@@ -1070,6 +1070,9 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                         list: booleanFlag(parsedArgs, "list"),
                         json: booleanFlag(parsedArgs, "json"),
                         fromRepl: true,
+                        // No flags at all -> a real (REPL-native) wizard
+                        // instead of just printing the catalog + a hint.
+                        replAsk: askCancelable,
                     }),
                 );
                 return;

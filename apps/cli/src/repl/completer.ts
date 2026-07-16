@@ -42,7 +42,7 @@ export const SLASH_COMMAND_REGISTRY: readonly SlashCommandDefinition[] = [
     {
         name: "config",
         aliases: ["ai"],
-        description: "Paste an API key, or set provider/key/model (use `raiken config` for the wizard)",
+        description: "Set AI provider, key, and model — wizard, a pasted key, or flags",
         argsHint: "<api-key> | [--provider <id>] [--api-key <key>] [--model <id>] [--list]",
         group: "Agent",
     },

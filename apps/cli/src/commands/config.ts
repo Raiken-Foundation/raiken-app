@@ -4,11 +4,14 @@
  * dashboard's Settings → AI Provider panel does (via the same `updateConfig`
  * tRPC procedure, so both surfaces stay in sync and get the same validation).
  *
- * Two ways to use it:
- *   - Flags (scriptable, safe inside the REPL): `raiken config --provider
- *     openai --api-key sk-... --model gpt-4o`
- *   - No flags on a real terminal: an interactive wizard (provider → key →
- *     base URL → model), mirroring the dashboard panel's flow.
+ * Three ways to use it:
+ *   - Flags (scriptable): `raiken config --provider openai --api-key sk-...
+ *     --model gpt-4o`, or just `raiken config <key>` to set a key for
+ *     whichever provider is already active.
+ *   - No flags on a real terminal: the full interactive wizard (provider →
+ *     key → base URL → model), mirroring the dashboard panel's flow.
+ *   - No flags inside the REPL (`/config`): a shorter REPL-native wizard
+ *     (provider → key → model) — see {@link runReplConfigWizard}.
  */
 
 import {
@@ -17,6 +20,7 @@ import {
     getProvider,
     listProviderModels,
     listProviders,
+    type ProviderDefinition,
     readApiKeyFromEnv,
     resolveAIConfig,
 } from "@raiken/core";
@@ -69,14 +73,19 @@ export interface ConfigCommandOptions {
     /** Show the provider catalog + current AI config; don't change anything. */
     list?: boolean;
     json?: boolean;
-    /**
-     * Set by the REPL's `/config` — inquirer's prompts would open a second
-     * readline on top of the REPL's own (double echo, raw-mode desync on
-     * teardown; see `organizeCommand`'s `confirm` for the same issue). The
-     * REPL is limited to the flag-driven path; the full wizard is
-     * standalone-terminal only.
-     */
+    /** Set by the REPL's `/config` (vs. a standalone `raiken config`). */
     fromRepl?: boolean;
+    /**
+     * The REPL's own single-line, cancelable prompt (chat.ts's
+     * `askCancelable`), used to run {@link runReplConfigWizard} when
+     * `/config` is invoked with no flags. `@inquirer/prompts` can't be used
+     * here — it opens a second readline on top of the REPL's own (double
+     * echo, raw-mode desync on teardown; see `organizeCommand`'s `confirm`
+     * for the same issue), so the REPL needs its own prompt primitive
+     * instead. Optional: without it, `/config` (no flags) falls back to the
+     * static catalog + hint.
+     */
+    replAsk?: (query: string) => Promise<string | null>;
 }
 
 /**
@@ -144,6 +153,11 @@ export async function configCommand(
 
     if (hasDirectFlags) {
         await applyDirectFlags(caller, projectPath, options);
+        return;
+    }
+
+    if (options.fromRepl && options.replAsk) {
+        await runReplConfigWizard(caller, projectPath, options.replAsk);
         return;
     }
 
@@ -419,6 +433,158 @@ async function runInteractiveWizard(caller: Caller, projectPath: string): Promis
         console.log(chalk.red("\n✗ Invalid configuration:"));
         for (const err of result.errors ?? []) console.log(chalk.red(`  - ${err}`));
         cliExit(1);
+        return;
+    }
+
+    console.log(chalk.green("\n✓ Saved to raiken.config.json"));
+    console.log(dim("  Run `raiken status` to verify.\n"));
+}
+
+/** Match a `/config` provider-picker answer against a 1-based index or a provider id. */
+function resolveProviderAnswer(
+    answer: string,
+    providers: ProviderDefinition[],
+    currentProviderId: string,
+): AIProviderId | null {
+    const trimmed = answer.trim();
+    if (!trimmed) return currentProviderId as AIProviderId;
+    const asIndex = Number(trimmed);
+    if (Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= providers.length) {
+        return providers[asIndex - 1].id;
+    }
+    const asId = trimmed.toLowerCase();
+    if ((AI_PROVIDER_IDS as readonly string[]).includes(asId)) return asId as AIProviderId;
+    return null;
+}
+
+/**
+ * `/config` with no flags, run from inside the live REPL. A shorter version
+ * of {@link runInteractiveWizard} (provider → key → model; base URL is only
+ * asked for the "custom" provider) built on the REPL's own cancelable
+ * question/answer prompt instead of `@inquirer/prompts` — see the
+ * `replAsk` doc on {@link ConfigCommandOptions} for why. Ctrl-C at any step
+ * cancels that prompt and aborts the wizard without saving, same as every
+ * other cancelable REPL prompt.
+ */
+export async function runReplConfigWizard(
+    caller: Caller,
+    projectPath: string,
+    ask: (query: string) => Promise<string | null>,
+): Promise<void> {
+    const current = resolveAIConfig(projectPath);
+    const currentProvider = getProvider(current.provider);
+    const providers = listProviders();
+
+    console.log(accent("\n  Configure AI provider"));
+    console.log(
+        dim(
+            `  Current: ${currentProvider.label} · ${current.model} · key ` +
+                `${current.apiKey ? `configured (${current.apiKeySource})` : "missing"}\n`,
+        ),
+    );
+    providers.forEach((p, i) => {
+        const marker = p.id === current.provider ? accent("›") : " ";
+        console.log(`  ${marker} ${dim(`${i + 1}.`.padEnd(4))}${p.label.padEnd(24)} ${dim(p.id)}`);
+    });
+
+    const providerAnswer = await ask(
+        dim(`\n  Provider [1-${providers.length}, id, or Enter to keep it] › `),
+    );
+    if (providerAnswer === null) return;
+    const providerId = resolveProviderAnswer(providerAnswer, providers, current.provider);
+    if (!providerId) {
+        console.log(chalk.red(`  Unknown provider: "${providerAnswer.trim()}". Not saved.\n`));
+        return;
+    }
+    const provider = getProvider(providerId);
+    const switchedProvider = providerId !== current.provider;
+
+    // undefined => omit `apiKey` from the patch entirely (leave the saved
+    // value on disk untouched); see the identical comment in
+    // `runInteractiveWizard` for why it's never set to an env-sourced value.
+    let apiKeyPatch: string | undefined;
+    const envKey = readApiKeyFromEnv(provider.id);
+
+    if (provider.envVars.length === 0) {
+        console.log(dim(`  ${provider.label} doesn't require an API key.`));
+        if (switchedProvider) apiKeyPatch = "";
+    } else {
+        if (envKey) {
+            console.log(
+                dim(
+                    `  ${provider.envVars[0]} is set in your environment — it will be used at ` +
+                        "runtime regardless of what you save here.",
+                ),
+            );
+        }
+        const keyAnswer = await ask(
+            dim(
+                `  API key${provider.apiKeyPlaceholder ? ` (${provider.apiKeyPlaceholder})` : ""} ` +
+                    "[Enter to skip] › ",
+            ),
+        );
+        if (keyAnswer === null) return;
+        if (keyAnswer.trim()) {
+            apiKeyPatch = keyAnswer.trim();
+        } else if (switchedProvider && current.apiKey && !envKey) {
+            // The saved `apiKey` field is shared across providers — leaving
+            // a stale key here would resolve as this (wrong) provider's key.
+            apiKeyPatch = "";
+        }
+    }
+
+    const defaultModel = switchedProvider ? provider.defaultModel : current.model;
+    const modelAnswer = await ask(dim(`  Model [Enter for ${defaultModel}] › `));
+    if (modelAnswer === null) return;
+    const model = modelAnswer.trim() || defaultModel;
+
+    let baseURL = switchedProvider ? provider.defaultBaseURL || undefined : current.baseURL;
+    if (provider.id === "custom") {
+        const baseUrlAnswer = await ask(dim("  Base URL (required for a custom endpoint) › "));
+        if (baseUrlAnswer === null) return;
+        if (!baseUrlAnswer.trim()) {
+            console.log(chalk.red("  Base URL is required for a custom endpoint. Not saved.\n"));
+            return;
+        }
+        baseURL = baseUrlAnswer.trim();
+    }
+
+    console.log(accent("\n  Summary"));
+    console.log(dim(`  Provider   ${provider.label} (${provider.id})`));
+    console.log(dim(`  Model      ${model}`));
+    if (baseURL) console.log(dim(`  Base URL   ${baseURL}`));
+    console.log(
+        dim("  API key    ") +
+            (apiKeyPatch
+                ? maskApiKey(apiKeyPatch)
+                : envKey
+                  ? "(using env var)"
+                  : current.apiKey && !switchedProvider
+                    ? maskApiKey(current.apiKey)
+                    : "(none)"),
+    );
+
+    const confirmAnswer = await ask(dim("\n  Save this configuration? [Y/n] › "));
+    if (confirmAnswer === null) return;
+    if (["n", "no"].includes(confirmAnswer.trim().toLowerCase())) {
+        console.log(dim("  Not saved.\n"));
+        return;
+    }
+
+    const result = await caller.updateConfig({
+        config: {
+            ai: {
+                provider: provider.id,
+                model,
+                ...(baseURL ? { baseURL } : {}),
+                ...(apiKeyPatch !== undefined ? { apiKey: apiKeyPatch } : {}),
+            },
+        },
+    });
+
+    if (!result.success) {
+        console.log(chalk.red("\n✗ Invalid configuration:"));
+        for (const err of result.errors ?? []) console.log(chalk.red(`  - ${err}`));
         return;
     }
 

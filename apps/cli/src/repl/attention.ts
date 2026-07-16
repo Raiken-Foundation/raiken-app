@@ -32,8 +32,8 @@ export async function gatherAttentionItems(
         if (provider.envVars.length > 0 && !ai.apiKey) {
             items.push(
                 `No AI provider key configured for ${provider.label} — set ` +
-                    `${provider.envVars[0]} or add it in the dashboard's Settings view. ` +
-                    "Test generation and chat won't work until then.",
+                    `${provider.envVars[0]}, run \`/config\`, or add it in the dashboard's ` +
+                    "Settings view. Test generation and chat won't work until then.",
             );
         }
     } catch {

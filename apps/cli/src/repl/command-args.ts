@@ -17,6 +17,7 @@ const BOOLEAN_FLAGS = new Set([
     "force",
     "husky",
     "json",
+    "list",
     "noEmbedScreenshots",
     "noImpact",
     "open",
@@ -25,6 +26,7 @@ const BOOLEAN_FLAGS = new Set([
     "staged",
     "status",
     "testsOnly",
+    "unsetKey",
     "y",
     "yes",
 ]);

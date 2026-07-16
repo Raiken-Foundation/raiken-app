@@ -590,12 +590,18 @@ export async function* runToolAgent(
     // Load configuration
     const config = loadAgentConfig(projectPath, configOverride);
 
-    // Validate API key
-    if (!config.apiKey) {
-        const provider = getProvider(config.provider);
+    // Validate API key — skip entirely for providers that don't need one
+    // (e.g. Ollama), which previously hit this same "missing key" gate even
+    // though there's nothing to configure.
+    const configuredProvider = getProvider(config.provider);
+    if (configuredProvider.envVars.length > 0 && !config.apiKey) {
+        const provider = configuredProvider;
         const envHint = provider.envVars[0] ?? "AI_API_KEY";
         yield "**API Key Required**\n\n";
-        yield `Set ${envHint} in your environment, or configure **${provider.label}** in Settings → AI Provider.\n\n`;
+        yield `No key found for **${provider.label}**. Fastest fix: run \`raiken config <your-key>\` ` +
+            "(or `/config <your-key>` in this session) to save it — same settings as the dashboard's " +
+            "Settings → AI Provider panel, so it only needs to be set once.\n\n" +
+            `You can also set ${envHint} in your environment.\n\n`;
         return {
             text: "",
             toolCalls: [],

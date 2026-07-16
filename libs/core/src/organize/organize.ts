@@ -7,7 +7,7 @@
  */
 
 import * as path from "node:path";
-import { resolveAIConfig } from "../agent/ai-providers";
+import { getProvider, resolveAIConfig } from "../agent/ai-providers";
 import { readConfiguredTestDirectory } from "../utils";
 import { analyzeConfigCleanup } from "./config-cleanup";
 import { buildTestInventory } from "./inventory";
@@ -30,11 +30,15 @@ export async function runOrganize(options: OrganizeOptions): Promise<OrganizeRes
 
     if (includeTests) {
         const resolved = resolveAIConfig(projectPath, options.ai);
-        if (options.skipAI || !resolved.apiKey) {
+        // Providers like Ollama don't need a key at all — only treat a
+        // missing key as a blocker for providers that actually require one.
+        const needsKey = getProvider(resolved.provider).envVars.length > 0;
+        if (options.skipAI || (needsKey && !resolved.apiKey)) {
             result.testPlan = {
-                summary: resolved.apiKey
-                    ? "Skipped (--tests-only disabled or explicitly skipped)."
-                    : "No AI API key configured — set one in raiken.config.json or the environment to get test-organization suggestions.",
+                summary:
+                    !needsKey || resolved.apiKey
+                        ? "Skipped (--tests-only disabled or explicitly skipped)."
+                        : "No AI API key configured — set one with `raiken config <your-key>` (or in the environment) to get test-organization suggestions.",
                 moves: [],
                 warnings: [],
             };

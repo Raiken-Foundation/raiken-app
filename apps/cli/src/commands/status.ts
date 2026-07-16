@@ -79,13 +79,12 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
                 // "missing" here would be a false alarm.
                 chalk.gray("not required for this provider")
               : // `raiken init` never asks for or writes an API key, so
-                // pointing there was a dead end — the two places that
-                // actually work are an env var (checked automatically) or
-                // the dashboard's Settings view (writes ai.apiKey to
-                // raiken.config.json).
+                // pointing there was a dead end — an env var (checked
+                // automatically), `raiken config`, or the dashboard's
+                // Settings view all write ai.apiKey to raiken.config.json.
                 chalk.yellow(
-                    `missing — set ${providerDef.envVars[0]} or configure it in the ` +
-                        "dashboard's Settings view",
+                    `missing — set ${providerDef.envVars[0]}, run \`raiken config\`, or configure ` +
+                        "it in the dashboard's Settings view",
                 ),
     );
 

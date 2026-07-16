@@ -56,6 +56,21 @@ OPENROUTER_API_KEY=sk-or-v1-your-key-here
 
 Get a free API key at [openrouter.ai/keys](https://openrouter.ai/keys)
 
+Prefer not to touch environment variables? `raiken config` sets the provider, key, and model
+from the terminal (same settings as the dashboard's Settings → AI Provider panel), and supports
+OpenAI, Anthropic, Google, Groq, Mistral, DeepSeek, xAI, Together, Perplexity, Ollama, and any
+custom OpenAI-compatible endpoint — not just OpenRouter:
+
+```bash
+raiken config                                    # interactive wizard
+raiken config sk-or-v1-...                       # just paste a key for the current provider
+raiken config --provider openai --api-key sk-...  # switch provider + set its key
+raiken config --list                             # show current setup
+```
+
+Already set a key in the dashboard's Settings → AI Provider panel? Nothing to do — the CLI reads
+the same `raiken.config.json`, so it's picked up automatically.
+
 ### 3. Start the dashboard
 
 ```bash
@@ -83,6 +98,7 @@ Raiken will:
 | Command | Description |
 |---------|-------------|
 | `raiken init` | Initialize Raiken in your project |
+| `raiken config` | Set the AI provider, API key, and model (interactive wizard, or via flags) |
 | `raiken start` | Start the server and dashboard on port 7101 |
 | `raiken start -p 8080` | Start on a custom port |
 

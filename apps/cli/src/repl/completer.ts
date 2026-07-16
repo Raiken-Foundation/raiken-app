@@ -40,6 +40,13 @@ export const SLASH_COMMAND_REGISTRY: readonly SlashCommandDefinition[] = [
         group: "Agent",
     },
     {
+        name: "config",
+        aliases: ["ai"],
+        description: "Paste an API key, or set provider/key/model (use `raiken config` for the wizard)",
+        argsHint: "<api-key> | [--provider <id>] [--api-key <key>] [--model <id>] [--list]",
+        group: "Agent",
+    },
+    {
         name: "status",
         description: "Show project setup and indexes",
         argsHint: "[--json]",

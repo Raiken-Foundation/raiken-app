@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import readline from "node:readline";
-import { BrowserSession, type DOMContext, formatDOMContext, runOrchestrator } from "@raiken/core";
+import {
+    BrowserSession,
+    type DOMContext,
+    formatDOMContext,
+    getProvider,
+    resolveAIConfig,
+    runOrchestrator,
+} from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -61,6 +68,7 @@ import { SlashMenuOverlay } from "../repl/slash-overlay";
 import { gatherStatusSnapshot, renderStatusStrip } from "../repl/status";
 import { startThinking } from "../repl/thinking";
 import { ToolCallRenderer } from "../repl/tool-renderer";
+import { looksLikeApiKey } from "./config";
 
 const HISTORY_LIMIT = 200;
 const EXIT_CONFIRM_MS = 2000;
@@ -646,6 +654,37 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         }
     };
 
+    /**
+     * The user typed something that looks like a bare API key (no `/config`,
+     * no flags) while no key is configured — very likely they're trying to
+     * set one up and don't know (or don't want to bother with) the `/config`
+     * syntax. Offer to save it for the current provider on the spot instead
+     * of letting it fall through to `runAgentTurn` and dead-end on "API Key
+     * Required". Mirrors how OpenRouter/most providers onboard: paste the
+     * key, done — no flags, no re-entering it later.
+     */
+    const handlePastedApiKey = async (key: string): Promise<void> => {
+        const current = resolveAIConfig(projectPath);
+        const provider = getProvider(current.provider);
+        console.log(
+            dim(
+                `\n  That looks like an API key — save it as the ${provider.label} key in ` +
+                    "raiken.config.json?",
+            ),
+        );
+        const rawAnswer = await askCancelable(
+            `  ${accent("[Y]es · [n]o, send as a message instead ›")} `,
+        );
+        if (rawAnswer === null) return;
+        const answer = rawAnswer.trim().toLowerCase();
+        if (answer === "n" || answer === "no") {
+            await runAgentTurn(key);
+            return;
+        }
+        const { configCommand } = await import("./config");
+        await runParity("config", () => configCommand(undefined, { apiKey: key, fromRepl: true }));
+    };
+
     const handleShell = async (command: string): Promise<void> => {
         if (!command.trim()) {
             console.log(chalk.red("  usage: !<shell command>"));
@@ -1019,6 +1058,22 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                 );
                 return;
             }
+            case "config": {
+                const { configCommand } = await import("./config");
+                await runParity("config", () =>
+                    configCommand(parsedArgs.positionals[0], {
+                        provider: stringFlag(parsedArgs, "provider"),
+                        apiKey: stringFlag(parsedArgs, "apiKey"),
+                        model: stringFlag(parsedArgs, "model"),
+                        baseUrl: stringFlag(parsedArgs, "baseUrl"),
+                        unsetKey: booleanFlag(parsedArgs, "unsetKey"),
+                        list: booleanFlag(parsedArgs, "list"),
+                        json: booleanFlag(parsedArgs, "json"),
+                        fromRepl: true,
+                    }),
+                );
+                return;
+            }
             case "tests": {
                 const files = await caller.getGraphFiles({ limit: 500, offset: 0 });
                 const specs = files.files.filter((f) => /\.(spec|test|e2e)\.[tj]sx?$/.test(f.path));
@@ -1187,7 +1242,9 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         try {
             if (line.startsWith("!")) await handleShell(line.slice(1).trim());
             else if (line.startsWith("/")) await handleSlash(line);
-            else await runAgentTurn(line);
+            else if (looksLikeApiKey(line) && !resolveAIConfig(projectPath).apiKey) {
+                await handlePastedApiKey(line.trim());
+            } else await runAgentTurn(line);
         } catch (err) {
             console.log(chalk.red(`  ✗ ${err instanceof Error ? err.message : err}`));
         }

@@ -70,7 +70,9 @@ async function checkApiKey(): Promise<void> {
 
     const envHint = provider.envVars[0] ?? "AI_API_KEY";
     console.warn(chalk.yellow(`⚠ No ${provider.label} API key found. AI features will not work.`));
-    console.log(chalk.dim(`   Set ${envHint} in .env, or configure in Settings → AI Provider.`));
+    console.log(
+        chalk.dim(`   Set ${envHint} in .env, run \`raiken config\`, or configure in Settings → AI Provider.`),
+    );
     if (provider.apiKeyUrl) {
         console.log(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
     }
@@ -190,6 +192,38 @@ program
                 error instanceof Error ? error.message : error,
             );
             process.exit(1);
+        }
+    });
+
+program
+    .command("config [section]")
+    .description(
+        "Set the AI provider, API key, and model (same settings as the dashboard's Settings view)",
+    )
+    .option(
+        "--provider <id>",
+        "AI provider id (openrouter, openai, anthropic, google, groq, mistral, deepseek, xai, together, perplexity, ollama, custom)",
+    )
+    .option("--api-key <key>", "API key to store in raiken.config.json")
+    .option("--model <id>", "Model identifier")
+    .option("--base-url <url>", "Base URL override (for custom / self-hosted endpoints)")
+    .option(
+        "--unset-key",
+        "Remove the saved API key (falls back to an environment variable, if any)",
+        false,
+    )
+    .option("--list", "Show the provider catalog and current AI configuration", false)
+    .option("--json", "Emit machine-readable JSON", false)
+    .action(async (section, options) => {
+        try {
+            const { configCommand } = await import("./commands/config");
+            await configCommand(section, options);
+        } catch (error) {
+            console.error(
+                chalk.red("\n ✗ raiken config failed:"),
+                error instanceof Error ? error.message : error,
+            );
+            process.exit(2);
         }
     });
 

@@ -1,0 +1,256 @@
+/**
+ * `raiken config` / `/config` — CLI parity for the dashboard's Settings →
+ * AI Provider panel. `buildAiConfigPatch` covers the flag-precedence logic
+ * in isolation; the rest exercises `configCommand` end-to-end against a real
+ * temp project directory (same `updateConfig` tRPC procedure the dashboard
+ * uses), matching `discover-resume.spec.ts`'s "test against the real thing,
+ * not a mock" approach.
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withThrowExit } from "../../repl/exit";
+import { buildAiConfigPatch, configCommand, looksLikeApiKey } from "../config";
+
+const AI_ENV_VARS = [
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "AI_API_KEY",
+];
+
+describe("buildAiConfigPatch", () => {
+    it("builds a patch from provider/model/baseUrl flags", () => {
+        const result = buildAiConfigPatch({ provider: "openai", model: "gpt-4o" });
+        expect(result).toEqual({ patch: { provider: "openai", model: "gpt-4o" } });
+    });
+
+    it("lowercases and trims a provider id", () => {
+        const result = buildAiConfigPatch({ provider: " OpenAI " });
+        expect(result).toEqual({ patch: { provider: "openai" } });
+    });
+
+    it("rejects an unknown provider id", () => {
+        const result = buildAiConfigPatch({ provider: "bogus" });
+        expect("error" in result && result.error).toContain('Unknown provider: "bogus"');
+    });
+
+    it("sets apiKey from --api-key", () => {
+        const result = buildAiConfigPatch({ apiKey: "sk-test-123" });
+        expect(result).toEqual({ patch: { apiKey: "sk-test-123" } });
+    });
+
+    it("--unset-key clears the key and wins over a simultaneous --api-key", () => {
+        const result = buildAiConfigPatch({ apiKey: "sk-test-123", unsetKey: true });
+        expect(result).toEqual({ patch: { apiKey: "" } });
+    });
+
+    it("returns an empty patch when no relevant flags are set", () => {
+        const result = buildAiConfigPatch({ json: true, list: true });
+        expect(result).toEqual({ patch: {} });
+    });
+});
+
+describe("looksLikeApiKey", () => {
+    it("recognizes known provider key prefixes", () => {
+        expect(looksLikeApiKey("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789")).toBe(true);
+        expect(looksLikeApiKey("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")).toBe(true);
+        expect(looksLikeApiKey("sk-proj-abcdefghijklmnopqrstuvwxyz")).toBe(true);
+        expect(looksLikeApiKey("gsk_abcdefghijklmnopqrstuvwxyz")).toBe(true);
+        expect(looksLikeApiKey("AIzaSyAbcdefghijklmnopqrstuvwxyz")).toBe(true);
+        expect(looksLikeApiKey("pplx-abcdefghijklmnopqrstuvwxyz")).toBe(true);
+        expect(looksLikeApiKey("xai-abcdefghijklmnopqrstuvwxyz")).toBe(true);
+    });
+
+    it("falls back to a long mixed alnum heuristic for unlisted formats", () => {
+        expect(looksLikeApiKey("0b3d85ff19ae4280b3f5919571f370d2abcdefgh")).toBe(true);
+        expect(looksLikeApiKey("deepseek-v4-pro")).toBe(false); // no digits, too short
+    });
+
+    it("rejects multi-token input (flags, sentences)", () => {
+        expect(looksLikeApiKey("--provider openai --api-key sk-test-123")).toBe(false);
+        expect(looksLikeApiKey("test the login flow")).toBe(false);
+    });
+
+    it("rejects short or plain hyphenated phrases", () => {
+        expect(looksLikeApiKey("test-the-login-flow")).toBe(false);
+        expect(looksLikeApiKey("sk-abc")).toBe(false);
+    });
+
+    it("rejects slash/bang-prefixed tokens (commands, not keys)", () => {
+        expect(looksLikeApiKey("/config")).toBe(false);
+        expect(looksLikeApiKey("!ls")).toBe(false);
+    });
+});
+
+describe("configCommand", () => {
+    let projectPath: string;
+    let originalCwd: string;
+    const savedEnv: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+        originalCwd = process.cwd();
+        projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-config-cmd-"));
+        process.chdir(projectPath);
+        for (const key of AI_ENV_VARS) {
+            savedEnv[key] = process.env[key];
+            delete process.env[key];
+        }
+    });
+
+    afterEach(() => {
+        process.chdir(originalCwd);
+        fs.rmSync(projectPath, { recursive: true, force: true });
+        for (const key of AI_ENV_VARS) {
+            if (savedEnv[key] === undefined) delete process.env[key];
+            else process.env[key] = savedEnv[key];
+        }
+        vi.restoreAllMocks();
+    });
+
+    function readConfig(): Record<string, unknown> {
+        const raw = fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8");
+        return JSON.parse(raw);
+    }
+
+    it("writes provider/apiKey/model to raiken.config.json via direct flags", async () => {
+        vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await configCommand(undefined, {
+            provider: "openai",
+            apiKey: "sk-test-123",
+            model: "gpt-4o",
+        });
+
+        const config = readConfig();
+        expect(config.ai).toMatchObject({
+            provider: "openai",
+            apiKey: "sk-test-123",
+            model: "gpt-4o",
+        });
+    });
+
+    it("--unset-key clears a previously saved key", async () => {
+        vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await configCommand(undefined, { provider: "openai", apiKey: "sk-test-123" });
+        expect((readConfig().ai as Record<string, unknown>).apiKey).toBe("sk-test-123");
+
+        await configCommand(undefined, { unsetKey: true });
+        expect((readConfig().ai as Record<string, unknown>).apiKey).toBe("");
+    });
+
+    it("rejects an unknown provider with exit code 1 and no file write", async () => {
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const code = await withThrowExit(() => configCommand(undefined, { provider: "bogus" }));
+
+        expect(code).toBe(1);
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown provider: "bogus"'));
+        expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+    });
+
+    it("rejects an unsupported config section with exit code 1", async () => {
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const code = await withThrowExit(() => configCommand("testing", {}));
+
+        expect(code).toBe(1);
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown config section'));
+    });
+
+    it("treats a bare key positional (no flags) as --api-key for the current provider", async () => {
+        vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await configCommand("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789", {});
+
+        const config = readConfig();
+        expect(config.ai).toMatchObject({
+            apiKey: "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789",
+        });
+        // Default provider (openrouter) is left untouched — the point is to
+        // set a key without needing to also specify --provider.
+        expect((config.ai as Record<string, unknown>).provider).toBeUndefined();
+    });
+
+    it("an explicit --api-key flag wins over a key-like positional", async () => {
+        vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await configCommand("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789", {
+            apiKey: "sk-explicit-flag-value",
+        });
+
+        expect((readConfig().ai as Record<string, unknown>).apiKey).toBe("sk-explicit-flag-value");
+    });
+
+    it("--list --json emits the provider catalog and current config, without writing anything", async () => {
+        let output = "";
+        vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+            output += typeof chunk === "string" ? chunk : String(chunk);
+            return true;
+        });
+
+        await configCommand(undefined, { list: true, json: true });
+
+        const parsed = JSON.parse(output);
+        expect(parsed.current.provider).toBe("openrouter");
+        expect(parsed.current.hasKey).toBe(false);
+        expect(parsed.providers.map((p: { id: string }) => p.id)).toContain("ollama");
+        expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+    });
+
+    it("reflects an env-sourced key as the active provider's key source", async () => {
+        process.env.ANTHROPIC_API_KEY = "sk-ant-env-test";
+        vi.spyOn(console, "log").mockImplementation(() => {});
+        let output = "";
+        vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+            output += typeof chunk === "string" ? chunk : String(chunk);
+            return true;
+        });
+
+        await configCommand(undefined, {
+            list: true,
+            json: true,
+            provider: undefined,
+        });
+        // No provider saved yet — default is openrouter, unaffected by the
+        // Anthropic env var.
+        expect(JSON.parse(output).current.hasKey).toBe(false);
+
+        output = "";
+        await configCommand(undefined, { provider: "anthropic" });
+        await configCommand(undefined, { list: true, json: true });
+        const parsed = JSON.parse(output);
+        expect(parsed.current.provider).toBe("anthropic");
+        expect(parsed.current.hasKey).toBe(true);
+        expect(parsed.current.apiKeySource).toBe("env");
+        expect(parsed.current.apiKeyEnvVar).toBe("ANTHROPIC_API_KEY");
+    });
+
+    it("fromRepl with no flags prints the catalog instead of launching the interactive wizard", async () => {
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await configCommand(undefined, { fromRepl: true });
+
+        expect(logSpy).toHaveBeenCalled();
+        const printed = logSpy.mock.calls.flat().join("\n");
+        expect(printed).toContain("AI configuration");
+        // Hint must include the `/config` prefix — bare flags typed at the
+        // next prompt (no leading `/config`) get sent as a chat message
+        // instead of running the command.
+        expect(printed).toContain("/config <api-key>");
+        expect(printed).toContain("/config --provider openai --api-key sk-... --model gpt-4o");
+        expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
+    });
+});

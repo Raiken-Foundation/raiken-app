@@ -18,7 +18,8 @@
         "baseUrl": ".",
         "paths": {
             "@raiken/core": ["libs/core/src/index.ts"],
-            "@raiken/shared": ["libs/shared/src/index.ts"]
+            "@raiken/shared": ["libs/shared/src/index.ts"],
+            "@raiken/shared/lib/version": ["libs/shared/src/lib/version.ts"]
         }
     },
     "exclude": ["node_modules", "tmp"]

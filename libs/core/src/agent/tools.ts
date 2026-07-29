@@ -5,7 +5,6 @@
  * The LLM decides when to call each tool based on the user's request.
  */
 
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { tool } from "ai";
@@ -13,13 +12,21 @@ import { z } from "zod";
 import { ProjectContext } from "../analysis/project-context";
 import { type DOMContext, formatDOMContext } from "../browser/dom-capture";
 import { BrowserSession } from "../browser/session";
-import { type AutonomyConfig, defaultConfig } from "../config";
+import {
+    type AutonomyConfig,
+    defaultConfig,
+    resolveAuthStorageStateDestination,
+    resolvePathWithinProject,
+    resolveUsableAuthStorageStatePath,
+} from "../config";
 import { CodeGraphDB } from "../database/db";
+import { acquireProjectOperation } from "../operations";
 import { SiteKnowledgeDB } from "../site-discovery/db";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
 import { stripEditMarkers } from "../testing/edit-blocks";
 import { TestRunner, type TestRunResult } from "../testing/runner";
 import { cleanGeneratedTestCode } from "../utils";
+import type { AuthPrecondition } from "./graph/utils";
 import { createRunAction, createSaveAction, type HITLAction, shouldSkipHITL } from "./hitl-types";
 import { AgentMemory } from "./memory";
 
@@ -30,33 +37,20 @@ export type { HITLAction } from "./hitl-types";
  * Throws if the resolved path escapes the project directory.
  */
 function safePath(projectPath: string, filePath: string): string {
-    const resolved = path.resolve(projectPath, filePath);
-    const root = path.resolve(projectPath);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+    try {
+        return resolvePathWithinProject(projectPath, filePath);
+    } catch {
         throw new Error(`Path traversal denied: ${filePath}`);
     }
-    return resolved;
 }
 
-/**
- * Resolve auth storage state path for the browser session.
- * Checks raiken.config.json first, then .raiken/auth-state.json.
- */
-function resolveAuthStatePath(projectPath: string): string | undefined {
-    try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const raw = fsSync.readFileSync(configPath, "utf-8");
-        const config = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
-        if (config.auth?.storageStatePath) {
-            const resolved = safePath(projectPath, config.auth.storageStatePath);
-            if (fsSync.existsSync(resolved)) return resolved;
-        }
-    } catch {
-        // Config missing, invalid, or path traversal denied
-    }
-    const fallback = path.join(projectPath, ".raiken", "auth-state.json");
-    if (fsSync.existsSync(fallback)) return fallback;
-    return undefined;
+export function resolveBrowserAuthStatePath(
+    projectPath: string,
+    precondition: AuthPrecondition,
+): string | undefined {
+    return precondition === "authenticated"
+        ? (resolveUsableAuthStorageStatePath(projectPath) ?? undefined)
+        : undefined;
 }
 
 interface PageSnapshot {
@@ -113,10 +107,30 @@ function resolveHeadless(preferred = false): boolean {
  * navigate/capture auto-started, so a click/fill issued before navigation
  * failed with "Browser session not active".
  */
-async function ensureBrowserStarted(session: BrowserSession, projectPath: string): Promise<void> {
+const browserAuthPreconditions = new WeakMap<BrowserSession, AuthPrecondition>();
+
+/** @internal Exported for deterministic auth-context regression tests. */
+export async function ensureBrowserStarted(
+    session: BrowserSession,
+    projectPath: string,
+    getAuthPrecondition: () => AuthPrecondition,
+    preferredHeadless = false,
+    forceRestart = false,
+): Promise<void> {
+    const precondition = getAuthPrecondition();
+    const previousPrecondition = browserAuthPreconditions.get(session);
+    if (
+        session.isActive() &&
+        (forceRestart ||
+            previousPrecondition === undefined ||
+            previousPrecondition !== precondition)
+    ) {
+        await session.close();
+    }
     if (!session.isActive()) {
-        const storageStatePath = resolveAuthStatePath(projectPath);
-        await session.start({ headless: resolveHeadless(false), storageStatePath });
+        const storageStatePath = resolveBrowserAuthStatePath(projectPath, precondition);
+        await session.start({ headless: resolveHeadless(preferredHeadless), storageStatePath });
+        browserAuthPreconditions.set(session, precondition);
     }
 }
 
@@ -183,15 +197,27 @@ function summarizeRunResults(results: TestRunResult[]): {
     failingSelector?: string;
 } {
     const durationMs = results.reduce((sum, r) => sum + (r.duration || 0), 0);
-    const rank: Record<string, number> = { error: 3, timeout: 2, failed: 1, skipped: 0, passed: 0 };
+    // `flaky` ranks with `failed` and is recorded as such: the outcome table
+    // only knows four statuses, and "passed" is the one thing an intermittent
+    // run must never be remembered as — the learning loop reads these rows.
+    const rank: Record<string, number> = {
+        error: 3,
+        timeout: 2,
+        failed: 1,
+        flaky: 1,
+        skipped: 0,
+        passed: 0,
+    };
     let worst: TestRunResult | undefined;
     for (const r of results) {
         if (!worst || (rank[r.status] ?? 0) > (rank[worst.status] ?? 0)) worst = r;
     }
-    const status: "passed" | "failed" | "error" | "timeout" =
-        worst &&
-        (worst.status === "error" || worst.status === "timeout" || worst.status === "failed")
-            ? worst.status
+    const status: "passed" | "failed" | "error" | "timeout" = !worst
+        ? "passed"
+        : worst.status === "error" || worst.status === "timeout"
+          ? worst.status
+          : worst.status === "failed" || worst.status === "flaky"
+            ? "failed"
             : "passed";
     return {
         status,
@@ -260,6 +286,13 @@ export async function writeTestFile(
     }
 }
 
+/**
+ * How many times a repair verification runs the spec. Two is the cheapest
+ * number that can distinguish "fixed" from "passed once": the welcome-modal
+ * regression passed a verification run and failed the very next one.
+ */
+export const VERIFICATION_REPEAT_EACH = 2;
+
 /** Result of {@link executeTestRun}. */
 export interface ExecuteTestRunResult {
     success: boolean;
@@ -278,10 +311,31 @@ export async function executeTestRun(
     testFile: string,
     headed: boolean,
     autonomy: Pick<AutonomySettings, "autoLearn">,
+    signal?: AbortSignal,
+    operationHeld = false,
+    verifying = false,
 ): Promise<ExecuteTestRunResult> {
+    if (signal?.aborted) {
+        return {
+            success: false,
+            message: "Operation cancelled",
+        };
+    }
+
+    const lease = operationHeld ? null : await acquireProjectOperation(projectPath, "test", signal);
     try {
         const runner = new TestRunner(projectPath);
-        const results = await runner.runTest(testFile, { headed });
+        const results = await runner.runTest(testFile, {
+            headed,
+            signal,
+            // A verification run is evidence that a repair worked, so it must
+            // not inherit the project's `retries` (which would let a fix that
+            // works one time in three look solid) and must hold up more than
+            // once. `--repeat-each` runs the spec twice in the same
+            // invocation; the runner reports a mixed outcome as `flaky`, which
+            // is not `passed`, so the repair loop keeps going.
+            ...(verifying ? { retries: 0, repeatEach: VERIFICATION_REPEAT_EACH } : {}),
+        });
         const passed = results.every((r) => r.status === "passed");
 
         // A run that executed nothing (zero matched tests, or every test
@@ -311,6 +365,8 @@ export async function executeTestRun(
             success: false,
             message: `Test execution failed: ${error instanceof Error ? error.message : "Unknown error"}`,
         };
+    } finally {
+        await lease?.release();
     }
 }
 
@@ -495,6 +551,12 @@ export interface ToolContext {
     projectPath: string;
     /** Autonomy settings for HITL decisions */
     autonomy?: AutonomySettings;
+    /** Abort signal for cooperative cancellation of long-running tools */
+    signal?: AbortSignal;
+    /** The orchestrator already owns the project-operation lease for this tool run. */
+    operationHeld?: boolean;
+    /** Current goal-level auth contract; read lazily after goal classification. */
+    getAuthPrecondition?: () => AuthPrecondition;
 }
 
 /**
@@ -506,7 +568,13 @@ const defaultAutonomy: AutonomySettings = defaultConfig.autonomy;
  * Create the agent tools with project context
  */
 export function createAgentTools(ctx: ToolContext) {
-    const { projectPath, autonomy = defaultAutonomy } = ctx;
+    const {
+        projectPath,
+        autonomy = defaultAutonomy,
+        signal,
+        operationHeld = false,
+        getAuthPrecondition = () => "authenticated" as const,
+    } = ctx;
 
     return {
         /**
@@ -635,10 +703,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { url } = params as { url: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    if (!session.isActive()) {
-                        const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: resolveHeadless(true), storageStatePath });
-                    }
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition, true);
 
                     const domContext = await session.navigate(url);
                     const summary = formatDOMContext(domContext);
@@ -681,6 +746,7 @@ export function createAgentTools(ctx: ToolContext) {
                     content: rawContent,
                     testName,
                     _repairVerification,
+                    _overwriteTarget,
                 } = params as {
                     filePath: string;
                     content: string;
@@ -696,6 +762,13 @@ export function createAgentTools(ctx: ToolContext) {
                      * write while looking like it succeeded.
                      */
                     _repairVerification?: boolean;
+                    /**
+                     * Internal-only flag (also absent from the public schema):
+                     * `filePath` is a file the caller deliberately targeted,
+                     * so an approver must overwrite it rather than dedupe to
+                     * `name-2.spec.ts`. See {@link createSaveAction}.
+                     */
+                    _overwriteTarget?: boolean;
                 };
                 const name = testName || path.basename(filePath, path.extname(filePath));
 
@@ -725,7 +798,12 @@ export function createAgentTools(ctx: ToolContext) {
                 // full-file rewrite) so they never end up as invalid
                 // TypeScript on disk.
                 const content = cleanGeneratedTestCode(stripEditMarkers(rawContent));
-                const hitlAction = createSaveAction(content, filePath, name);
+                const hitlAction = createSaveAction(
+                    content,
+                    filePath,
+                    name,
+                    _overwriteTarget === true,
+                );
                 return {
                     success: true,
                     data: { path: filePath, saved: false },
@@ -777,6 +855,9 @@ export function createAgentTools(ctx: ToolContext) {
                         validatedTestFile,
                         headed,
                         autonomy,
+                        signal,
+                        operationHeld,
+                        _repairVerification === true,
                     );
                     return {
                         success: result.success,
@@ -1110,8 +1191,13 @@ export function createAgentTools(ctx: ToolContext) {
                 const effectiveHeadless = resolveHeadless(headless);
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    const storageStatePath = resolveAuthStatePath(projectPath);
-                    await session.start({ headless: effectiveHeadless, storageStatePath });
+                    await ensureBrowserStarted(
+                        session,
+                        projectPath,
+                        getAuthPrecondition,
+                        effectiveHeadless,
+                        true,
+                    );
                     return {
                         success: true,
                         data: { active: true },
@@ -1136,6 +1222,7 @@ export function createAgentTools(ctx: ToolContext) {
                 try {
                     const session = getBoundBrowserSession(projectPath);
                     await session.close();
+                    browserAuthPreconditions.delete(session);
                     return {
                         success: true,
                         data: { closed: true },
@@ -1163,10 +1250,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { url } = params as { url: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    if (!session.isActive()) {
-                        const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: resolveHeadless(false), storageStatePath });
-                    }
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
 
                     let previousUrl: string | undefined;
                     try {
@@ -1204,7 +1288,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { selector } = params as { selector: string | string[] };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     let prevUrl: string | undefined;
                     try {
                         prevUrl = session.getCurrentUrl();
@@ -1246,7 +1330,7 @@ export function createAgentTools(ctx: ToolContext) {
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     let prevUrl: string | undefined;
                     try {
                         prevUrl = session.getCurrentUrl();
@@ -1283,7 +1367,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { key } = params as { key: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     let prevUrl: string | undefined;
                     try {
                         prevUrl = session.getCurrentUrl();
@@ -1316,10 +1400,7 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (): Promise<ToolResult<PageSnapshot>> => {
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    if (!session.isActive()) {
-                        const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: resolveHeadless(false), storageStatePath });
-                    }
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     const domContext = await session.captureCurrentPage();
                     const snapshot = buildPageSnapshot(domContext);
 
@@ -1356,7 +1437,7 @@ export function createAgentTools(ctx: ToolContext) {
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     await session.waitForSelector(selector, timeout);
                     // Re-capture so the agent sees what actually appeared instead
                     // of reasoning against whatever DOM it had before the wait.
@@ -1392,7 +1473,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { selector, text } = params as { selector: string | string[]; text: string };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     await session.type(selector, text);
                     const after = await snapshotAfterAction(session);
                     return {
@@ -1423,7 +1504,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { selector } = params as { selector: string | string[] };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     await session.hover(selector);
                     const after = await snapshotAfterAction(session);
                     return {
@@ -1458,7 +1539,7 @@ export function createAgentTools(ctx: ToolContext) {
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     let prevUrl: string | undefined;
                     try {
                         prevUrl = session.getCurrentUrl();
@@ -1499,7 +1580,7 @@ export function createAgentTools(ctx: ToolContext) {
                 };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     let prevUrl: string | undefined;
                     try {
                         prevUrl = session.getCurrentUrl();
@@ -1560,13 +1641,9 @@ export function createAgentTools(ctx: ToolContext) {
             execute: async (): Promise<ToolResult<{ saved: boolean; path: string }>> => {
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    await ensureBrowserStarted(session, projectPath);
-                    const fs = await import("node:fs");
-                    const authDir = path.join(projectPath, ".raiken");
-                    if (!fs.existsSync(authDir)) {
-                        fs.mkdirSync(authDir, { recursive: true });
-                    }
-                    const authPath = path.join(authDir, "auth-state.json");
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
+                    const authPath = resolveAuthStorageStateDestination(projectPath);
+                    await fs.mkdir(path.dirname(authPath), { recursive: true });
                     await session.saveAuthState(authPath);
                     return {
                         success: true,
@@ -1600,10 +1677,7 @@ export function createAgentTools(ctx: ToolContext) {
                 const { includeExternal } = params as { includeExternal?: boolean };
                 try {
                     const session = getBoundBrowserSession(projectPath);
-                    if (!session.isActive()) {
-                        const storageStatePath = resolveAuthStatePath(projectPath);
-                        await session.start({ headless: resolveHeadless(false), storageStatePath });
-                    }
+                    await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
                     const allLinks = await session.discoverLinks();
 
                     const links = includeExternal

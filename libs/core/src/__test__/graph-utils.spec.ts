@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+    buildSummary,
     expandActionSynonyms,
     extractPageTitle,
     getStructuralSignals,
@@ -8,8 +9,10 @@ import {
     matchesAction,
     normalizeExploreUrl,
     parseSummaryElements,
+    resolveAuthPrecondition,
     type SummaryElement,
     shouldClassifyInterruption,
+    shouldUseStorageState,
 } from "../agent/graph/utils";
 
 // Helper to build SummaryElement objects
@@ -17,6 +20,29 @@ function el(role: string, name: string, selector?: string, type?: string): Summa
     const selectors = selector ? [selector] : [];
     return { role, name, selector, type, selectors };
 }
+
+describe("buildSummary", () => {
+    it("states which selectors could not be confirmed instead of leaving it in the log", () => {
+        const summary = buildSummary({
+            testDraft: "test('x', () => {})",
+            savedTestPath: "e2e/x.spec.ts",
+            groundingViolations: [
+                {
+                    locator: "getByTestId('login-error')",
+                    reason: "no captured element has the test id 'login-error'",
+                },
+            ],
+        });
+
+        expect(summary).toContain("1 selector(s) could not be confirmed");
+        expect(summary).toContain("getByTestId('login-error')");
+    });
+
+    it("says nothing about grounding when every selector was confirmed", () => {
+        const summary = buildSummary({ testDraft: "test('x', () => {})" });
+        expect(summary).not.toMatch(/could not be confirmed/);
+    });
+});
 
 describe("Structural Signals & Pre-filter", () => {
     describe("getStructuralSignals", () => {
@@ -317,6 +343,77 @@ describe("Goal-directed action helpers", () => {
         it("returns just the phrase when it has no known synonyms", () => {
             const synonyms = expandActionSynonyms("frobnicate widget");
             expect(synonyms).toEqual(["frobnicate widget"]);
+        });
+    });
+
+    describe("resolveAuthPrecondition", () => {
+        it.each([
+            "generate an MFA login test",
+            "verify the OTP rejects the wrong code",
+            "test the two-factor authentication flow",
+            "complete the sign-in flow with credentials",
+        ])("classifies %s as a login flow", (prompt) => {
+            expect(resolveAuthPrecondition({ userPrompt: prompt })).toBe("login_flow");
+        });
+
+        // A prompt that only ever says "signing in" / "credentials" used to
+        // miss every branch and land on the `authenticated` default, so
+        // generation injected saved storage state and the test opened an
+        // already-signed-in app with no login form to drive.
+        it.each([
+            "test signing in with invalid credentials",
+            "check that logging in with a locked account is refused",
+            "verify signing up creates an account",
+        ])("classifies the gerund form %s as a login flow", (prompt) => {
+            expect(resolveAuthPrecondition({ userPrompt: prompt })).toBe("login_flow");
+        });
+
+        it("classifies the login page itself as unauthenticated", () => {
+            expect(resolveAuthPrecondition({ userPrompt: "test the login page" })).toBe(
+                "unauthenticated",
+            );
+        });
+
+        it("keeps explicit logged-out and redirect goals unauthenticated", () => {
+            expect(
+                resolveAuthPrecondition({
+                    userPrompt: "verify the dashboard redirects when the user is logged out",
+                }),
+            ).toBe("unauthenticated");
+        });
+
+        it("keeps protected feature goals authenticated", () => {
+            expect(
+                resolveAuthPrecondition({
+                    userPrompt: "test the dashboard as a logged-in user",
+                }),
+            ).toBe("authenticated");
+            expect(resolveAuthPrecondition({ userPrompt: "test project creation" })).toBe(
+                "authenticated",
+            );
+        });
+
+        it("uses classified goal fields when the prompt is vague", () => {
+            expect(
+                resolveAuthPrecondition({
+                    userPrompt: "do that next",
+                    activeGoal: "complete MFA login with a verification code",
+                }),
+            ).toBe("login_flow");
+        });
+
+        it("lets explicit saved-session intent override incidental auth terms", () => {
+            expect(
+                resolveAuthPrecondition({
+                    userPrompt: "reuse the saved session to test authentication settings",
+                }),
+            ).toBe("authenticated");
+        });
+
+        it("only permits storage state for authenticated preconditions", () => {
+            expect(shouldUseStorageState("authenticated")).toBe(true);
+            expect(shouldUseStorageState("unauthenticated")).toBe(false);
+            expect(shouldUseStorageState("login_flow")).toBe(false);
         });
     });
 

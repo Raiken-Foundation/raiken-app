@@ -16,8 +16,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ChatOpenAI } from "@langchain/openai";
-import { LLM_MAX_RETRIES, LLM_REQUEST_TIMEOUT_MS } from "../agent/ai-providers";
+import {
+    createLangChainModel,
+    getProvider,
+    LLM_REQUEST_TIMEOUT_MS,
+    type ResolvedAIConfig,
+} from "../agent/ai-providers";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
@@ -38,11 +42,7 @@ export interface CoverOptions {
     /** Provider integration config (GitHub/Jira/Linear). */
     integrations?: IntegrationConfig;
     /** AI config; required for the actual LLM call. */
-    ai?: {
-        apiKey?: string;
-        model?: string;
-        baseURL?: string;
-    };
+    ai?: ResolvedAIConfig;
     /**
      * Optional dry run: skip the LLM call and write a scaffold-only file.
      * Useful for plumbing checks and offline tests.
@@ -98,7 +98,8 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     // ---- 4. Build prompt + call LLM (or scaffold on --dry-run)
     let body: string;
     let usedModel: string | undefined;
-    if (options.dryRun || !options.ai?.apiKey) {
+    const requiresKey = options.ai && getProvider(options.ai.provider).envVars.length > 0;
+    if (options.dryRun || !options.ai || (requiresKey && !options.ai.apiKey)) {
         body = buildScaffold(resolved.description, resolved.sourceFiles);
     } else {
         emit({ type: "llm_started" });
@@ -295,18 +296,13 @@ async function callLLM(
     ai: NonNullable<CoverOptions["ai"]>,
     resolved: ResolvedTarget,
 ): Promise<{ body: string; model: string }> {
-    const model = ai.model || "anthropic/claude-sonnet-4.5";
-    const llm = new ChatOpenAI({
-        apiKey: ai.apiKey,
-        model,
+    // One factory owns native-provider versus OpenAI-compatible wiring. This
+    // keeps `raiken cover` aligned with chat, organize, and repair instead of
+    // silently sending every configured provider through OpenRouter's API.
+    const llm = createLangChainModel({
+        ...ai,
         temperature: 0.4,
         maxTokens: 1500,
-        // `raiken cover` runs headless (CI PR-comment workflow included) with
-        // no human watching — a hung/rate-limited provider must fail fast
-        // rather than block the workflow run forever.
-        timeout: LLM_REQUEST_TIMEOUT_MS,
-        maxRetries: LLM_MAX_RETRIES,
-        configuration: { baseURL: ai.baseURL || "https://openrouter.ai/api/v1" },
     });
 
     const prompt = buildCoverPrompt(resolved);
@@ -320,7 +316,7 @@ async function callLLM(
                     .join("")
               : "";
 
-    return { body: stripCodeFences(text), model };
+    return { body: stripCodeFences(text), model: ai.model };
 }
 
 function buildCoverPrompt(resolved: ResolvedTarget): string {

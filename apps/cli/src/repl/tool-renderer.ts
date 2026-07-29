@@ -27,7 +27,7 @@ export class ToolCallRenderer {
     }
 
     onToolCall(toolName: string, args: unknown): void {
-        const detail = summarizeArgs(args);
+        const detail = summarizeArgs(toolName, args);
         if (this.verbose) {
             this.flush();
             process.stderr.write(callLine(toolName, detail));
@@ -80,7 +80,7 @@ function callLine(name: string, detail: string, count = 1): string {
     return `  ${bullet} ${label}${detail ? `  ${dim(detail)}` : ""}\n`;
 }
 
-function summarizeArgs(args: unknown): string {
+function summarizeArgs(toolName: string, args: unknown): string {
     const a = (args ?? {}) as Record<string, unknown>;
     const detail =
         (typeof a.url === "string" && a.url) ||
@@ -91,7 +91,10 @@ function summarizeArgs(args: unknown): string {
         (typeof a.filePath === "string" && a.filePath) ||
         (typeof a.label === "string" && a.label) ||
         "";
-    const value = typeof a.value === "string" ? ` = "${a.value}"` : "";
+    const value =
+        typeof a.value === "string"
+            ? ` = "${toolName === "fillInput" || toolName === "typeText" ? "[REDACTED]" : a.value}"`
+            : "";
     const text = `${detail}${value}`;
     return text.length > 60 ? `${text.slice(0, 57)}…` : text;
 }

@@ -52,7 +52,7 @@ describe("cross-process discovery lock (disc-3)", () => {
         fs.mkdirSync(path.join(projectPath, ".raiken"), { recursive: true });
 
         // Simulate "process A" by locking the exact same target directly.
-        const release = await lockfileLock(path.join(projectPath, ".raiken", "discovery.lock"), {
+        const release = await lockfileLock(path.join(projectPath, ".raiken", "operation.lock"), {
             realpath: false,
             stale: 45_000,
             update: 15_000,
@@ -61,7 +61,7 @@ describe("cross-process discovery lock (disc-3)", () => {
         releasers.push(release);
 
         await expect(acquireDiscoveryLock(projectPath)).rejects.toThrow(
-            /already running for this project/i,
+            /already active for this project/i,
         );
     });
 
@@ -69,7 +69,7 @@ describe("cross-process discovery lock (disc-3)", () => {
         const projectPath = makeProjectDir();
         fs.mkdirSync(path.join(projectPath, ".raiken"), { recursive: true });
 
-        const release = await lockfileLock(path.join(projectPath, ".raiken", "discovery.lock"), {
+        const release = await lockfileLock(path.join(projectPath, ".raiken", "operation.lock"), {
             realpath: false,
             stale: 45_000,
             update: 15_000,
@@ -99,7 +99,7 @@ describe("cross-process discovery lock (disc-3)", () => {
         fs.mkdirSync(path.join(projectPath, ".raiken"), { recursive: true });
 
         // Simulate a sibling OS process already crawling this project.
-        const release = await lockfileLock(path.join(projectPath, ".raiken", "discovery.lock"), {
+        const release = await lockfileLock(path.join(projectPath, ".raiken", "operation.lock"), {
             realpath: false,
             stale: 45_000,
             update: 15_000,
@@ -118,7 +118,7 @@ describe("cross-process discovery lock (disc-3)", () => {
 
         // Must reject with the lock message specifically — not fall through
         // to a browser launch, a network attempt, or any other failure mode.
-        await expect(discovery.start()).rejects.toThrow(/already running for this project/i);
+        await expect(discovery.start()).rejects.toThrow(/already active for this project/i);
         await discovery.close();
     });
 });

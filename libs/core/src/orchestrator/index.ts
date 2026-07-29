@@ -14,6 +14,8 @@ import path from "node:path";
 import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from "../agent/agent";
 import type { HITLAction } from "../agent/hitl-types";
 import type { AutonomySettings, ToolResult } from "../agent/tools";
+import { acquireBrowserSessionLease, type BrowserSessionLease } from "../browser/registry";
+import { acquireProjectOperation, type ProjectOperationLease } from "../operations";
 import { RunTraceRecorder } from "../run-traces";
 
 /**
@@ -56,6 +58,8 @@ export interface RunOrchestratorOptions {
      * emit a structured `{ type: "tool" }` SSE event for richer dashboard UI.
      */
     onToolResult?: (toolName: string, result: ToolResult) => void;
+    /** Surface that initiated this run, used for durable HITL continuation. */
+    origin?: "agent" | "dashboard" | "repl";
     /**
      * Structured trace recorder for this run. When omitted, a recorder is
      * created automatically iff the `RAIKEN_TRACE` env var is set (writes
@@ -72,6 +76,7 @@ export interface OrchestratorResult {
     text: string;
     hitlActions: HITLAction[];
     toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
+    workflowId?: string;
 }
 
 /**
@@ -96,6 +101,7 @@ export async function* runOrchestrator(
         signal,
         onToolCall,
         onToolResult,
+        origin,
     } = options;
 
     const runKey = path.resolve(projectPath);
@@ -107,6 +113,25 @@ export async function* runOrchestrator(
         return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
     }
     activeAgentRuns.add(runKey);
+    let operation: ProjectOperationLease;
+    let browserLease: BrowserSessionLease | undefined;
+    try {
+        operation = await acquireProjectOperation(projectPath, "agent", signal);
+    } catch (error) {
+        activeAgentRuns.delete(runKey);
+        const busyMessage = `\n\n${error instanceof Error ? error.message : "Project is busy."}`;
+        yield busyMessage;
+        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+    }
+    try {
+        browserLease = acquireBrowserSessionLease(projectPath, signal);
+    } catch (error) {
+        await operation.release();
+        activeAgentRuns.delete(runKey);
+        const busyMessage = `\n\n${error instanceof Error ? error.message : "Project is busy."}`;
+        yield busyMessage;
+        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+    }
 
     const trace =
         options.trace !== undefined
@@ -121,6 +146,7 @@ export async function* runOrchestrator(
         fileContext,
         autonomyOverride,
         signal,
+        operationHeld: true,
         onToolCall: trace
             ? (toolName, args) => {
                   trace.toolCall(toolName, args);
@@ -133,6 +159,7 @@ export async function* runOrchestrator(
                   onToolResult?.(toolName, result);
               }
             : onToolResult,
+        origin,
     };
 
     let agentResult: ToolAgentResult | undefined;
@@ -154,6 +181,12 @@ export async function* runOrchestrator(
         trace?.end("error", error instanceof Error ? error.message : String(error));
         throw error;
     } finally {
+        if (signal?.aborted) {
+            await browserLease?.release({ forceClose: true }).catch(() => undefined);
+        } else {
+            await browserLease?.release().catch(() => undefined);
+        }
+        await operation.release();
         activeAgentRuns.delete(runKey);
     }
 

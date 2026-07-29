@@ -2,7 +2,12 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { confirm, input, select } from "@inquirer/prompts";
-import { type AIProviderId, detectDevServerPort, listProviders } from "@raiken/core";
+import {
+    type AIProviderId,
+    detectDevServerPort,
+    listProviders,
+    writeConfigAtomic,
+} from "@raiken/core";
 import { createConfig } from "@raiken/shared";
 import chalk from "chalk";
 import {
@@ -278,6 +283,24 @@ export async function initializeProject(
         );
     }
 
+    // `init` must fail fast before opening its preference wizard. The REPL and
+    // dashboard can create `.raiken/` on first use, so the config file is the
+    // reliable signal that the project has actually been initialized.
+    const configPath = path.join(projectPath, "raiken.config.json");
+    try {
+        await fs.access(configPath);
+        if (!force) {
+            console.log(
+                chalk.yellow(
+                    "Project already has raiken.config.json. Use --force to re-initialize.",
+                ),
+            );
+            return;
+        }
+    } catch {
+        /* first initialization */
+    }
+
     // Step 1: Detect project information
     console.log(chalk.blue("Analyzing your project...\n"));
     const projectInfo = await detectProject(projectPath);
@@ -292,28 +315,6 @@ export async function initializeProject(
         testFramework: preferences.testFramework,
         testDir: preferences.testDirectory,
     };
-
-    // Check if already initialized. Gate on `raiken.config.json` — the
-    // artifact `init` actually produces — not the `.raiken/` cache dir,
-    // which `raiken start`/`raiken chat` create automatically on first run
-    // (code graph DB, agent memory) even if the user never ran `init`. Using
-    // `.raiken/` here meant anyone who tried the agent before running `init`
-    // got permanently told "already initialized" and had to guess `--force`.
-    const configPath = path.join(projectPath, "raiken.config.json");
-    let alreadyInitialized = false;
-    try {
-        await fs.access(configPath);
-        alreadyInitialized = true;
-    } catch {
-        /* not initialized yet */
-    }
-
-    if (alreadyInitialized && !force) {
-        console.log(
-            chalk.yellow("Project already has raiken.config.json. Use --force to re-initialize."),
-        );
-        return;
-    }
 
     console.log(
         chalk.blue(`\nSetting up ${finalProjectInfo.type} project: ${finalProjectInfo.name}\n`),
@@ -365,12 +366,28 @@ export async function initializeProject(
             await installPlaywrightBrowsers(projectPath, playwrightPackageReady);
         }
 
-        // Success message
+        // Complete the first-run experience in one place instead of making
+        // users infer that `init` and `config` are separate required setup
+        // phases. Environment-backed projects are already ready; everyone
+        // else can enter the exact same guided flow used by `/config`.
+        if (!nonInteractive && !detectAIProviderFromEnv()) {
+            const configureAI = await confirm({
+                message: "Configure an AI provider now?",
+                default: true,
+            });
+            if (configureAI) {
+                const { configCommand } = await import("./commands/config");
+                await configCommand(undefined, { projectPath });
+            }
+        }
+
         console.log(chalk.green("\n✓ Project initialization complete!"));
         console.log(chalk.cyan("\nNext steps:"));
-        console.log(chalk.gray('  1. Run "raiken start" to launch the dashboard'));
-        console.log(chalk.gray("  2. Open http://localhost:7101 in your browser"));
-        console.log(chalk.gray("  3. Start generating AI-powered tests!\n"));
+        console.log(chalk.gray('  1. Run "raiken" to start the interactive agent'));
+        console.log(chalk.gray('  2. Use "/config" anytime to update this project\'s AI setup'));
+        console.log(
+            chalk.gray('  3. Or open "raiken start" — the dashboard uses the same AI setting\n'),
+        );
 
         // Additional info based on choices
         if (!preferences.installPlaywright && preferences.testFramework === "playwright") {
@@ -451,14 +468,20 @@ async function updateGitignore(projectPath: string): Promise<void> {
     }
 
     const hasRaiken = gitignoreContent.includes(".raiken/");
+    const hasRaikenConfig = gitignoreContent.includes("raiken.config.json");
     const hasCrawleeStorage = gitignoreContent.includes("storage/");
 
-    if (!hasRaiken || !hasCrawleeStorage) {
-        let raikenSection = "\n# Raiken local database\n.raiken/\n";
+    if (!hasRaiken || !hasRaikenConfig || !hasCrawleeStorage) {
+        let raikenSection = "";
+        if (!hasRaiken || !hasRaikenConfig) {
+            raikenSection += "\n# Raiken local state and credentials\n";
+            if (!hasRaiken) raikenSection += ".raiken/\n";
+            if (!hasRaikenConfig) raikenSection += "raiken.config.json\n";
+        }
         if (!hasCrawleeStorage) {
             raikenSection += "# Crawlee storage (site discovery)\nstorage/\n";
         }
-        if (!hasRaiken) {
+        if (!hasRaiken || !hasRaikenConfig) {
             gitignoreContent += raikenSection;
         } else if (!hasCrawleeStorage) {
             gitignoreContent += `\n# Crawlee storage (site discovery)\nstorage/\n`;
@@ -559,21 +582,20 @@ async function createRaikenConfig(
         // File doesn't exist, proceed
     }
 
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await writeConfigAtomic(projectPath, config);
     console.log(chalk.green("✓ Created raiken.config.json"));
 
     if (detected && provider) {
         console.log(
             chalk.green(`✓ Found ${detected.envVar} — defaulting to ${provider.label}`) +
-                chalk.gray(` (change anytime in the dashboard's Settings view)`),
+                chalk.gray(" (change anytime with `raiken config` or in Settings)"),
         );
     } else {
         console.log(
             chalk.yellow("⚠ No AI provider key found in your environment.") +
                 chalk.gray(
-                    `\n   Set OPENROUTER_API_KEY (or another provider's key — see raiken.config.json's ` +
-                        `"ai" section) before generating tests,\n   or add it later from the dashboard's ` +
-                        `Settings view.`,
+                    "\n   Run `raiken config` to select a provider and store a local key, or set the " +
+                        "provider's environment variable before generating tests.",
                 ),
         );
     }

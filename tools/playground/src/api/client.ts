@@ -180,6 +180,15 @@ export async function getProjectBySlug(slug: string): Promise<Project> {
     });
 }
 
+function requireWritableProject(projectId: string): Project {
+    const project = store.projects.find((candidate) => candidate.id === projectId);
+    if (!project) throw new ApiError("project not found", "not_found");
+    if (project.status === "archived") {
+        throw new ApiError("archived projects are read-only", "forbidden");
+    }
+    return project;
+}
+
 export interface CreateProjectInput {
     name: string;
     description: string;
@@ -291,8 +300,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
         if (!input.title || input.title.trim().length < 3) {
             throw new ApiError("task title must be at least 3 characters", "validation");
         }
-        const project = store.projects.find((p) => p.id === input.projectId);
-        if (!project) throw new ApiError("project not found", "not_found");
+        const project = requireWritableProject(input.projectId);
         if (input.assigneeId && !project.memberIds.includes(input.assigneeId)) {
             throw new ApiError("assignee is not a member of this project", "validation");
         }
@@ -336,6 +344,7 @@ export async function updateTaskStatus({
     return call(() => {
         const task = store.tasks.find((t) => t.id === taskId);
         if (!task) throw new ApiError("task not found", "not_found");
+        requireWritableProject(task.projectId);
         if (task.status === status) return task;
         const previous = task.status;
         task.status = status;
@@ -361,6 +370,7 @@ export async function deleteTask(taskId: string, actor: User): Promise<void> {
         }
         const idx = store.tasks.findIndex((t) => t.id === taskId);
         if (idx === -1) throw new ApiError("task not found", "not_found");
+        requireWritableProject(store.tasks[idx].projectId);
         store.tasks.splice(idx, 1);
     });
 }
@@ -390,6 +400,7 @@ export async function addComment(input: AddCommentInput): Promise<Comment> {
         }
         const task = store.tasks.find((t) => t.id === input.taskId);
         if (!task) throw new ApiError("task not found", "not_found");
+        requireWritableProject(task.projectId);
         const comment: Comment = {
             id: nextId("c"),
             taskId: input.taskId,
@@ -430,4 +441,70 @@ export async function listMembers(projectId: string): Promise<User[]> {
 
 export async function listAllUsers(): Promise<User[]> {
     return call(() => [...store.users]);
+}
+
+export async function addProjectMember(
+    projectId: string,
+    userId: string,
+    actor: User,
+): Promise<Project> {
+    return call(() => {
+        if (actor.role !== "admin") {
+            throw new ApiError("only admins can manage project members", "forbidden");
+        }
+        const project = requireWritableProject(projectId);
+        const user = store.users.find((candidate) => candidate.id === userId);
+        if (!user) throw new ApiError("user not found", "not_found");
+        if (project.memberIds.includes(userId)) {
+            throw new ApiError("user is already a project member", "validation");
+        }
+        project.memberIds.push(userId);
+        project.updatedAt = nowIso();
+        store.activity.unshift({
+            id: nextId("a"),
+            projectId,
+            actorId: actor.id,
+            kind: "member_added",
+            summary: `added ${user.username} to the project`,
+            timestamp: project.updatedAt,
+        });
+        return project;
+    });
+}
+
+export async function removeProjectMember(
+    projectId: string,
+    userId: string,
+    actor: User,
+): Promise<Project> {
+    return call(() => {
+        if (actor.role !== "admin") {
+            throw new ApiError("only admins can manage project members", "forbidden");
+        }
+        const project = requireWritableProject(projectId);
+        if (project.ownerId === userId) {
+            throw new ApiError("the project owner cannot be removed", "validation");
+        }
+        const member = store.users.find((candidate) => candidate.id === userId);
+        if (!member || !project.memberIds.includes(userId)) {
+            throw new ApiError("project member not found", "not_found");
+        }
+        project.memberIds = project.memberIds.filter((id) => id !== userId);
+        project.updatedAt = nowIso();
+        for (const task of store.tasks) {
+            if (task.projectId === projectId && task.assigneeId === userId) {
+                task.assigneeId = null;
+                task.updatedAt = project.updatedAt;
+            }
+        }
+        store.activity.unshift({
+            id: nextId("a"),
+            projectId,
+            actorId: actor.id,
+            kind: "member_removed",
+            summary: `removed ${member.username} from the project`,
+            timestamp: project.updatedAt,
+        });
+        return project;
+    });
 }

@@ -1,5 +1,8 @@
+import type { HitlWorkflowRecord } from "@raiken/shared";
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
+import { serverAuthHeaders } from "../utils/api-auth";
+import { shouldAvoidOverwrite } from "../utils/save-target";
 import {
     type DashboardRoute,
     findSlashCommand,
@@ -9,9 +12,16 @@ import {
     type SlashCommand,
     type SlashContext,
 } from "../utils/slash-commands";
+import { readSseJsonStream } from "../utils/sse";
 import { trpc } from "../utils/trpc";
 import { FilesPanel, type TestFileItem } from "./files-panel";
 import { Logo } from "./logo";
+
+interface AgentStreamEvent {
+    error?: string;
+    chunk?: string;
+    done?: boolean;
+}
 
 // Matches the inline activity markers emitted by the agent
 // (buildAgentEventMarker). The payload is base64-encoded JSON.
@@ -41,6 +51,16 @@ function parseAgentActivity(raw: string): { clean: string; activity: string[] } 
     }
     const clean = raw.replace(AGENT_EVENT_MARKER, "");
     return { clean, activity };
+}
+
+export function formatInterruptedAssistantMessage(
+    accumulated: string,
+    errorMessage: string,
+    stopped: boolean,
+): string {
+    const partial = parseAgentActivity(accumulated).clean;
+    if (stopped) return partial ? `${partial}\n\n_Stopped._` : "_Stopped._";
+    return partial ? `${partial}\n\n_Error: ${errorMessage}_` : `Error: ${errorMessage}`;
 }
 
 /**
@@ -113,6 +133,7 @@ export interface HITLConfirmation {
     context: {
         url?: string;
         files?: string[];
+        workflowId?: string;
     };
     /**
      * Discriminator for the HITL card shape. `"save_approval"` renders a code
@@ -125,6 +146,11 @@ export interface HITLConfirmation {
     testCode?: string;
     /** Default file path the agent wants to save to. */
     suggestedPath?: string;
+    /**
+     * True when `suggestedPath` is an existing spec the run deliberately
+     * targeted, so approving must overwrite it rather than dedupe.
+     */
+    overwriteTarget?: boolean;
     /** Display name (without extension) for the pending test. */
     testName?: string;
     /** Path of the already-saved test awaiting a run (kind === "run_approval"). */
@@ -141,13 +167,112 @@ export function computeHitlPending(
     messages: Pick<Message, "id" | "isUser" | "hitlData">[],
     savedApprovals: Record<string, unknown>,
     runApprovals: Record<string, unknown>,
+    activeWorkflows: Pick<HitlWorkflowRecord, "status">[] = [],
 ): boolean {
-    return messages.some((msg) => {
-        if (msg.isUser || !msg.hitlData) return false;
-        if (msg.hitlData.kind === "save_approval") return !savedApprovals[msg.id];
-        if (msg.hitlData.kind === "run_approval") return !runApprovals[msg.id];
-        return false;
+    return (
+        activeWorkflows.length > 0 ||
+        messages.some((msg) => {
+            if (msg.isUser || !msg.hitlData) return false;
+            if (msg.hitlData.kind === "save_approval") return !savedApprovals[msg.id];
+            if (msg.hitlData.kind === "run_approval") return !runApprovals[msg.id];
+            return false;
+        })
+    );
+}
+
+export function rehydrateWorkflowHitlCards(
+    messages: Message[],
+    workflows: HitlWorkflowRecord[],
+): Message[] {
+    const represented = new Set(
+        messages
+            .map((message) => message.hitlData?.context.workflowId)
+            .filter((id): id is string => Boolean(id)),
+    );
+    const recovered = workflows.flatMap((workflow): Message[] => {
+        if (represented.has(workflow.id)) return [];
+        const context = { workflowId: workflow.id };
+        const timestamp = new Date(workflow.updatedAt).toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+        if (workflow.status === "await_save_approval" && workflow.testDraft) {
+            return [
+                {
+                    id: `workflow-${workflow.id}`,
+                    content: "Recovered a generated test that is awaiting your approval.",
+                    timestamp,
+                    isUser: false,
+                    hitlData: {
+                        kind: "save_approval",
+                        type: "save",
+                        title: "Approve test save",
+                        message: "Review and save this recovered test draft, or reject it.",
+                        reasons: [],
+                        options: [
+                            {
+                                id: "save_approve",
+                                label: "Save",
+                                description: "Write the recovered test to disk.",
+                            },
+                            {
+                                id: "save_reject",
+                                label: "Reject",
+                                description: "Discard the recovered draft.",
+                            },
+                        ],
+                        context,
+                        testCode: workflow.testDraft,
+                        suggestedPath: workflow.savedTestPath,
+                        testName: workflow.testName,
+                    },
+                },
+            ];
+        }
+        if (workflow.status === "await_run_approval" && workflow.savedTestPath) {
+            return [
+                {
+                    id: `workflow-${workflow.id}`,
+                    content: "Recovered a saved test that is awaiting run approval.",
+                    timestamp,
+                    isUser: false,
+                    hitlData: {
+                        kind: "run_approval",
+                        type: "run",
+                        title: "Approve test run",
+                        message: "Run the recovered saved test, or skip it.",
+                        reasons: [],
+                        options: [
+                            {
+                                id: "run_approve",
+                                label: "Run",
+                                description: "Run the recovered test.",
+                            },
+                            {
+                                id: "run_reject",
+                                label: "Skip",
+                                description: "Do not run it now.",
+                            },
+                        ],
+                        context,
+                        testFile: workflow.savedTestPath,
+                        testName: workflow.testName,
+                    },
+                },
+            ];
+        }
+        return [
+            {
+                id: `workflow-${workflow.id}`,
+                content:
+                    workflow.statusMessage ??
+                    `Test workflow for \`${workflow.savedTestPath ?? "unknown test"}\` needs attention.`,
+                timestamp,
+                isUser: false,
+            },
+        ];
     });
+    return recovered.length > 0 ? [...messages, ...recovered] : messages;
 }
 
 // localStorage key for persisting resolved save-approval cards across reloads.
@@ -221,6 +346,7 @@ export function Sidebar({
     // Controls the in-flight /api/generate-test SSE fetch so the user can
     // interrupt a running agent (Stop button, Esc, or /stop).
     const abortControllerRef = useRef<AbortController | null>(null);
+    const resumedWorkflowIdsRef = useRef(new Set<string>());
 
     // Whether the message list is scrolled (roughly) to the bottom. When the
     // user scrolls up to read history we stop auto-pinning to the bottom and
@@ -283,6 +409,9 @@ export function Sidebar({
     const { data: chatData } = trpc.getChatMessages.useQuery(undefined, {
         refetchOnWindowFocus: false,
     });
+    const { data: activeWorkflows = [] } = trpc.listActiveHitlWorkflows.useQuery(undefined, {
+        refetchOnWindowFocus: true,
+    });
 
     // Mutation to save messages
     const addMessageMutation = trpc.addChatMessage.useMutation();
@@ -293,8 +422,14 @@ export function Sidebar({
     // through the LLM (which would re-classify "approve" as a new prompt
     // and risk losing the test draft entirely).
     const saveTestMutation = trpc.saveGeneratedTest.useMutation();
-    const updateConfigMutation = trpc.updateConfig.useMutation();
+    const updateConfigMutation = trpc.updateConfig.useMutation({
+        onSuccess: async (result) => {
+            if (result.success) await trpcUtils.getConfig.invalidate();
+        },
+    });
     const runTestMutation = trpc.runTests.useMutation();
+    const continueHitlMutation = trpc.continueHitlWorkflow.useMutation();
+    const advanceHitlMutation = trpc.advanceHitlWorkflow.useMutation();
     // Read once so the auto-open heuristic below can tell whether the AGENT
     // already persisted the spec (autoSaveTests). Without this, an auto-saved
     // spec that is also streamed back would get saved a SECOND time here,
@@ -334,7 +469,10 @@ export function Sidebar({
      * a pass/fail outcome instead of a saved path).
      */
     const [runApprovals, setRunApprovals] = useState<
-        Record<string, { status: "ran" | "skipped"; passed?: boolean; error?: string }>
+        Record<
+            string,
+            { status: "ran" | "skipped" | "cancelled"; passed?: boolean; error?: string }
+        >
     >(() => {
         try {
             const raw = localStorage.getItem(RUN_APPROVALS_KEY);
@@ -366,8 +504,27 @@ export function Sidebar({
     // background tab (user navigated to discovery/quality/settings) is
     // invisible until they happen to click back into chat.
     useEffect(() => {
-        onHitlPendingChange?.(computeHitlPending(messages, savedApprovals, runApprovals));
-    }, [messages, savedApprovals, runApprovals, onHitlPendingChange]);
+        onHitlPendingChange?.(
+            computeHitlPending(messages, savedApprovals, runApprovals, activeWorkflows),
+        );
+    }, [messages, savedApprovals, runApprovals, activeWorkflows, onHitlPendingChange]);
+
+    useEffect(() => {
+        if (!messagesLoaded || activeWorkflows.length === 0) return;
+        setMessages((current) => rehydrateWorkflowHitlCards(current, activeWorkflows));
+    }, [activeWorkflows, messagesLoaded]);
+
+    useEffect(() => {
+        for (const workflow of activeWorkflows) {
+            if (workflow.status !== "repairing" || resumedWorkflowIdsRef.current.has(workflow.id)) {
+                continue;
+            }
+            resumedWorkflowIdsRef.current.add(workflow.id);
+            void advanceHitlMutation
+                .mutateAsync({ workflowId: workflow.id })
+                .finally(() => trpcUtils.listActiveHitlWorkflows.invalidate());
+        }
+    }, [activeWorkflows, advanceHitlMutation, trpcUtils.listActiveHitlWorkflows]);
 
     // Load messages from server on mount
     useEffect(() => {
@@ -472,11 +629,12 @@ export function Sidebar({
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
+        let accumulated = "";
 
         try {
             const response = await fetch("/api/generate-test", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: serverAuthHeaders({ "Content-Type": "application/json" }),
                 signal: controller.signal,
                 body: JSON.stringify({
                     prompt: hitlMessage,
@@ -489,79 +647,54 @@ export function Sidebar({
                 throw new Error("Failed to process action");
             }
 
-            const reader = response.body?.getReader();
-            const decoder = new TextDecoder();
-            let accumulated = "";
-
-            if (!reader) {
+            if (!response.body) {
                 throw new Error("No response body");
             }
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+            for await (const data of readSseJsonStream<AgentStreamEvent>(response.body)) {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
 
-                const text = decoder.decode(value, { stream: true });
-                const lines = text.split("\n");
+                if (data.chunk) {
+                    accumulated += data.chunk;
 
-                for (const line of lines) {
-                    if (line.startsWith("data: ")) {
-                        // Mirrors the main chat path's SSE parsing: a JSON.parse
-                        // failure means a partial chunk (skip it), but a
-                        // server-sent {error} must propagate to the outer catch.
-                        let data: { error?: string; chunk?: string; done?: boolean } | null = null;
-                        try {
-                            data = JSON.parse(line.slice(6));
-                        } catch {
-                            continue;
-                        }
+                    // Strip the live activity trail out of the visible
+                    // content and surface it separately, same as the
+                    // main chat path — approval round-trips run tools
+                    // too (saving, running, repairing) and deserve the
+                    // same "what's happening now" feedback.
+                    const { clean: withoutEvents, activity } = parseAgentActivity(accumulated);
 
-                        if (data?.error) {
-                            throw new Error(data.error);
-                        }
+                    const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
+                    let hitlData: HITLConfirmation | undefined;
+                    let displayContent = withoutEvents;
 
-                        if (data?.chunk) {
-                            accumulated += data.chunk;
-
-                            // Strip the live activity trail out of the visible
-                            // content and surface it separately, same as the
-                            // main chat path — approval round-trips run tools
-                            // too (saving, running, repairing) and deserve the
-                            // same "what's happening now" feedback.
-                            const { clean: withoutEvents, activity } =
-                                parseAgentActivity(accumulated);
-
-                            const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
-                            let hitlData: HITLConfirmation | undefined;
-                            let displayContent = withoutEvents;
-
-                            if (hitlMatch) {
-                                const parsed = decodeHitlPayload(hitlMatch[1]);
-                                if (parsed) {
-                                    hitlData = parsed;
-                                    displayContent = "";
-                                } else {
-                                    console.warn("Failed to parse HITL data");
-                                }
-                            }
-
-                            const hasText = displayContent.trim().length > 0;
-
-                            setMessages((prev) =>
-                                prev.map((msg) =>
-                                    msg.id === aiMessageId
-                                        ? {
-                                              ...msg,
-                                              content: displayContent,
-                                              isLoading: !hasText && !hitlData,
-                                              hitlData,
-                                              activity,
-                                          }
-                                        : msg,
-                                ),
-                            );
+                    if (hitlMatch) {
+                        const parsed = decodeHitlPayload(hitlMatch[1]);
+                        if (parsed) {
+                            hitlData = parsed;
+                            displayContent = "";
+                        } else {
+                            console.warn("Failed to parse HITL data");
                         }
                     }
+
+                    const hasText = displayContent.trim().length > 0;
+
+                    setMessages((prev) =>
+                        prev.map((msg) =>
+                            msg.id === aiMessageId
+                                ? {
+                                      ...msg,
+                                      content: displayContent,
+                                      isLoading: !hasText && !hitlData,
+                                      hitlData,
+                                      activity,
+                                  }
+                                : msg,
+                        ),
+                    );
                 }
             }
 
@@ -594,19 +727,33 @@ export function Sidebar({
         } catch (error) {
             const stopped = error instanceof DOMException && error.name === "AbortError";
             if (!stopped) console.error("HITL action failed:", error);
+            const errorMessage = error instanceof Error ? error.message : "Action failed";
+            const interruptedContent = formatInterruptedAssistantMessage(
+                accumulated,
+                errorMessage,
+                stopped,
+            );
+
             setMessages((prev) =>
                 prev.map((msg) =>
                     msg.id === aiMessageId
                         ? {
                               ...msg,
-                              content: stopped
-                                  ? "_Stopped._"
-                                  : `Error: ${error instanceof Error ? error.message : "Action failed"}`,
+                              content: interruptedContent,
                               isLoading: false,
                           }
                         : msg,
                 ),
             );
+            persistMessage({
+                id: aiMessageId,
+                content: interruptedContent,
+                timestamp: new Date().toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                isUser: false,
+            });
         } finally {
             abortControllerRef.current = null;
             setIsGenerating(false);
@@ -629,6 +776,48 @@ export function Sidebar({
         hitl: HITLConfirmation,
     ) => {
         if (savedApprovals[messageId]) return;
+        const workflowId = hitl.context.workflowId;
+        if (workflowId) {
+            try {
+                const result = await continueHitlMutation.mutateAsync({
+                    workflowId,
+                    action: "save",
+                    decision: actionId === "save_reject" ? "reject" : "approve",
+                    filePath:
+                        actionId === "save_reject"
+                            ? undefined
+                            : (pathEdits[messageId] ?? hitl.suggestedPath ?? "").trim() ||
+                              undefined,
+                });
+                await trpcUtils.listActiveHitlWorkflows.invalidate();
+                if (actionId === "save_approve_remember") {
+                    await updateConfigMutation.mutateAsync({
+                        config: { autonomy: { autoSaveTests: true } },
+                    });
+                }
+                const rejected = result.workflow.status === "cancelled";
+                setSavedApprovals((prev) => ({
+                    ...prev,
+                    [messageId]: rejected
+                        ? { status: "rejected" }
+                        : { status: "saved", filePath: result.savedPath },
+                }));
+                if (result.savedPath) {
+                    void refetchTestFiles();
+                    onFileSelect?.(result.savedPath);
+                }
+                return;
+            } catch (error) {
+                setSavedApprovals((prev) => ({
+                    ...prev,
+                    [messageId]: {
+                        status: "rejected",
+                        error: error instanceof Error ? error.message : "Save failed",
+                    },
+                }));
+                return;
+            }
+        }
 
         if (actionId === "save_reject") {
             setSavedApprovals((prev) => ({ ...prev, [messageId]: { status: "rejected" } }));
@@ -671,9 +860,11 @@ export function Sidebar({
                 fileName,
                 content: testCode,
                 testDir,
-                // The path is auto-suggested (or lightly edited) — never silently
-                // clobber a different existing spec; dedup to a unique name.
-                avoidOverwrite: true,
+                avoidOverwrite: shouldAvoidOverwrite({
+                    suggestedPath: hitl.suggestedPath,
+                    requestedPath,
+                    overwriteTarget: hitl.overwriteTarget,
+                }),
             });
 
             if (actionId === "save_approve_remember") {
@@ -744,6 +935,44 @@ export function Sidebar({
         hitl: HITLConfirmation,
     ) => {
         if (runApprovals[messageId] || runningTestFor) return;
+        const workflowId = hitl.context.workflowId;
+        if (workflowId) {
+            if (actionId === "run_approve_remember") {
+                await updateConfigMutation.mutateAsync({
+                    config: { autonomy: { autoRunTests: true } },
+                });
+            }
+            setRunningTestFor(messageId);
+            try {
+                const result = await continueHitlMutation.mutateAsync({
+                    workflowId,
+                    action: "run",
+                    decision: actionId === "run_reject" ? "reject" : "approve",
+                });
+                await trpcUtils.listActiveHitlWorkflows.invalidate();
+                const passed = result.run?.success;
+                setRunApprovals((prev) => ({
+                    ...prev,
+                    [messageId]:
+                        result.workflow.status === "cancelled"
+                            ? { status: "skipped" }
+                            : { status: "ran", passed },
+                }));
+                if (passed === false && hitl.testFile) onFileSelect?.(hitl.testFile);
+                return;
+            } catch (error) {
+                setRunApprovals((prev) => ({
+                    ...prev,
+                    [messageId]: {
+                        status: "ran",
+                        error: error instanceof Error ? error.message : "Test run failed",
+                    },
+                }));
+                return;
+            } finally {
+                setRunningTestFor(null);
+            }
+        }
 
         if (actionId === "run_reject") {
             setRunApprovals((prev) => ({ ...prev, [messageId]: { status: "skipped" } }));
@@ -773,7 +1002,26 @@ export function Sidebar({
         try {
             const result = (await runTestMutation.mutateAsync({ testFile })) as {
                 success?: boolean;
+                cancelled?: boolean;
             };
+            if (result.cancelled) {
+                setRunApprovals((prev) => ({
+                    ...prev,
+                    [messageId]: { status: "cancelled" },
+                }));
+                const cancelledMessage: Message = {
+                    id: `sys-run-${Date.now()}`,
+                    content: `⏹️ \`${testFile}\` run cancelled.`,
+                    timestamp: new Date().toLocaleTimeString("en-US", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                    }),
+                    isUser: false,
+                };
+                setMessages((prev) => [...prev, cancelledMessage]);
+                persistMessage(cancelledMessage);
+                return;
+            }
             const passed = Boolean(result.success);
             setRunApprovals((prev) => ({ ...prev, [messageId]: { status: "ran", passed } }));
             const resultMsg: Message = {
@@ -808,7 +1056,7 @@ export function Sidebar({
      * than resuming the LLM). Results are summarized inline; on failure we point
      * the user to the editor where "Fix with AI" lives.
      */
-    const handleRunSavedTest = async (messageId: string, filePath: string) => {
+    const handleRunSavedTest = async (messageId: string, filePath: string, workflowId?: string) => {
         if (runningTestFor) return;
         setRunningTestFor(messageId);
         const runningMsg: Message = {
@@ -823,10 +1071,19 @@ export function Sidebar({
         setMessages((prev) => [...prev, runningMsg]);
 
         try {
-            const result = (await runTestMutation.mutateAsync({ testFile: filePath })) as {
-                success?: boolean;
-            };
-            const passed = Boolean(result.success);
+            let passed: boolean;
+            if (workflowId) {
+                const result = await continueHitlMutation.mutateAsync({
+                    workflowId,
+                    action: "run",
+                    decision: "approve",
+                });
+                passed = Boolean(result.run?.success);
+                await trpcUtils.listActiveHitlWorkflows.invalidate();
+            } else {
+                const result = await runTestMutation.mutateAsync({ testFile: filePath });
+                passed = Boolean(result.success);
+            }
             const summary = passed
                 ? `✅ \`${filePath}\` passed.`
                 : `❌ \`${filePath}\` failed. Open it in the editor and use **Fix with AI** to repair the spec.`;
@@ -1474,7 +1731,7 @@ export function Sidebar({
         try {
             const response = await fetch("/api/generate-test", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: serverAuthHeaders({ "Content-Type": "application/json" }),
                 signal: controller.signal,
                 body: JSON.stringify({
                     prompt,
@@ -1493,93 +1750,57 @@ export function Sidebar({
                 throw new Error("Failed to generate test");
             }
 
-            const reader = response.body?.getReader();
-            const decoder = new TextDecoder();
-
-            if (!reader) {
+            if (!response.body) {
                 throw new Error("No response body");
             }
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+            for await (const data of readSseJsonStream<AgentStreamEvent>(response.body)) {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
 
-                const text = decoder.decode(value, { stream: true });
-                const lines = text.split("\n");
+                if (data.chunk) {
+                    accumulated += data.chunk;
+                    setStreamedContent(accumulated);
 
-                for (const line of lines) {
-                    if (line.startsWith("data: ")) {
-                        // Parse the SSE JSON separately from handling it: a
-                        // JSON.parse failure means a partial chunk we can skip,
-                        // but a server-sent {error} must propagate to the outer
-                        // catch instead of being swallowed as "incomplete".
-                        let data: {
-                            error?: string;
-                            chunk?: string;
-                            done?: boolean;
-                        } | null = null;
-                        try {
-                            data = JSON.parse(line.slice(6));
-                        } catch {
-                            // Incomplete/partial SSE chunk — wait for more.
-                            continue;
-                        }
+                    // Strip the live activity trail out of the visible
+                    // content and surface it separately.
+                    const { clean: withoutEvents, activity } = parseAgentActivity(accumulated);
 
-                        if (data) {
-                            if (data.error) {
-                                throw new Error(data.error);
-                            }
+                    // Check for HITL marker
+                    const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
+                    let hitlData: HITLConfirmation | undefined;
+                    let displayContent = withoutEvents;
 
-                            if (data.chunk) {
-                                accumulated += data.chunk;
-                                setStreamedContent(accumulated);
-
-                                // Strip the live activity trail out of the visible
-                                // content and surface it separately.
-                                const { clean: withoutEvents, activity } =
-                                    parseAgentActivity(accumulated);
-
-                                // Check for HITL marker
-                                const hitlMatch = withoutEvents.match(/<!--HITL:([\s\S]+?)-->/);
-                                let hitlData: HITLConfirmation | undefined;
-                                let displayContent = withoutEvents;
-
-                                if (hitlMatch) {
-                                    const parsed = decodeHitlPayload(hitlMatch[1]);
-                                    if (parsed) {
-                                        hitlData = parsed;
-                                        // Remove the HITL marker from display content
-                                        displayContent = "";
-                                    } else {
-                                        console.warn("Failed to parse HITL data");
-                                    }
-                                }
-
-                                // Still "loading" until real text arrives; the
-                                // activity trail shows progress in the meantime.
-                                const hasText = displayContent.trim().length > 0;
-
-                                // Update AI message with accumulated content and remove loading state
-                                setMessages((prev) =>
-                                    prev.map((msg) =>
-                                        msg.id === aiMessageId
-                                            ? {
-                                                  ...msg,
-                                                  content: displayContent,
-                                                  isLoading: !hasText && !hitlData,
-                                                  hitlData,
-                                                  activity,
-                                              }
-                                            : msg,
-                                    ),
-                                );
-                            }
-
-                            if (data.done) {
-                                // stream complete
-                            }
+                    if (hitlMatch) {
+                        const parsed = decodeHitlPayload(hitlMatch[1]);
+                        if (parsed) {
+                            hitlData = parsed;
+                            // Remove the HITL marker from display content
+                            displayContent = "";
+                        } else {
+                            console.warn("Failed to parse HITL data");
                         }
                     }
+
+                    // Still "loading" until real text arrives; the
+                    // activity trail shows progress in the meantime.
+                    const hasText = displayContent.trim().length > 0;
+
+                    // Update AI message with accumulated content and remove loading state
+                    setMessages((prev) =>
+                        prev.map((msg) =>
+                            msg.id === aiMessageId
+                                ? {
+                                      ...msg,
+                                      content: displayContent,
+                                      isLoading: !hasText && !hitlData,
+                                      hitlData,
+                                      activity,
+                                  }
+                                : msg,
+                        ),
+                    );
                 }
             }
 
@@ -1619,10 +1840,7 @@ export function Sidebar({
             // the spec to disk. Re-saving here would duplicate it (and possibly
             // under a different derived name), so just refresh the file list and
             // let the agent-saved file surface instead of saving again.
-            const agentAlreadySaved = Boolean(
-                (raikenConfig as { autonomy?: { autoSaveTests?: boolean } } | undefined)?.autonomy
-                    ?.autoSaveTests,
-            );
+            const agentAlreadySaved = Boolean(raikenConfig?.config.autonomy?.autoSaveTests);
 
             if (isCompleteTestFile) {
                 if (agentAlreadySaved) {
@@ -1634,6 +1852,12 @@ export function Sidebar({
         } catch (error) {
             const stopped = error instanceof DOMException && error.name === "AbortError";
             if (!stopped) console.error("Test generation failed:", error);
+            const errorMessage = error instanceof Error ? error.message : "Failed to generate test";
+            const interruptedContent = formatInterruptedAssistantMessage(
+                accumulated,
+                errorMessage,
+                stopped,
+            );
 
             // Update AI message with a stopped notice or the error.
             setMessages((prev) =>
@@ -1641,16 +1865,21 @@ export function Sidebar({
                     msg.id === aiMessageId
                         ? {
                               ...msg,
-                              content: stopped
-                                  ? accumulated
-                                      ? `${accumulated}\n\n_Stopped._`
-                                      : "_Stopped._"
-                                  : `Error: ${error instanceof Error ? error.message : "Failed to generate test"}`,
+                              content: interruptedContent,
                               isLoading: false,
                           }
                         : msg,
                 ),
             );
+            persistMessage({
+                id: aiMessageId,
+                content: interruptedContent,
+                timestamp: new Date().toLocaleTimeString("en-US", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                isUser: false,
+            });
         } finally {
             abortControllerRef.current = null;
             setIsGenerating(false);
@@ -1902,6 +2131,8 @@ export function Sidebar({
                                                                                     handleRunSavedTest(
                                                                                         msg.id,
                                                                                         decision.filePath as string,
+                                                                                        hitl.context
+                                                                                            .workflowId,
                                                                                     )
                                                                                 }
                                                                                 disabled={Boolean(
@@ -2018,6 +2249,12 @@ export function Sidebar({
                                                                 !decision.error && (
                                                                     <p className="hitl-resolved hitl-resolved-warn">
                                                                         Skipped.
+                                                                    </p>
+                                                                )}
+                                                            {decision?.status === "cancelled" &&
+                                                                !decision.error && (
+                                                                    <p className="hitl-resolved hitl-resolved-warn">
+                                                                        Test run cancelled.
                                                                     </p>
                                                                 )}
                                                         </div>

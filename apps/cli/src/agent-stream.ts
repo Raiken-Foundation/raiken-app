@@ -78,7 +78,14 @@ export function renderToolCall(toolName: string, args: unknown): void {
         (typeof a.path === "string" && a.path) ||
         (typeof a.filePath === "string" && a.filePath) ||
         "";
-    const value = typeof a.value === "string" ? dim(` = "${a.value}"`) : "";
+    const value =
+        typeof a.value === "string"
+            ? dim(
+                  ` = "${
+                      toolName === "fillInput" || toolName === "typeText" ? "[REDACTED]" : a.value
+                  }"`,
+              )
+            : "";
     const bullet = chalk.hex("#a78bfa")("⏺");
     process.stderr.write(
         `  ${bullet} ${chalk.bold.white(toolName)}${detail ? `  ${dim(detail)}` : ""}${value}\n`,

@@ -3,5 +3,8 @@ export * from "./ast-parser";
 export * from "./code-graph";
 export * from "./entry-points";
 export * from "./graph-query";
+export * from "./markup-selectors";
 export * from "./project-context";
+export * from "./sfc";
+export * from "./source-analysis";
 export * from "./symbol-extractor";

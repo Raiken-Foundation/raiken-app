@@ -1,11 +1,17 @@
 import { BrowserSession } from "../../../browser/session";
+import {
+    describeAuthStateProblem,
+    inspectAuthState,
+    mapAuthCredentialsToFields,
+    resolveAuthCredentials,
+    resolveAuthStorageStateDestination,
+} from "../../../config";
 import { AgentMemory } from "../../memory";
 import type { GraphStateType } from "../state";
 import {
     extractPageTitle,
     getRequestedInputFields,
     getStructuralSignals,
-    goalTargetsUnauthedPage,
     parseSummaryElements,
     shouldClassifyInterruption,
 } from "../utils";
@@ -19,6 +25,18 @@ import {
 import type { AgentNodeDeps } from "./types";
 
 const AUTH_INTERRUPTION_TYPES = new Set(["auth", "otp"]);
+
+function canFillWithConfiguredCredentials(
+    projectPath: string,
+    requestedFields: NonNullable<GraphStateType["interruption"]>["requestedFields"],
+): boolean {
+    const fields = requestedFields ?? [];
+    const configuredValues = mapAuthCredentialsToFields(
+        fields,
+        resolveAuthCredentials(projectPath),
+    );
+    return fields.length > 0 && fields.every((field) => configuredValues[field.key]);
+}
 
 /**
  * Fill an input using DOM-derived selectors. The full array is passed
@@ -112,6 +130,11 @@ export const createDetectInterruptionNode =
             const signals = getStructuralSignals(elements, pageTitle, hasOverlay);
 
             if (shouldClassifyInterruption(signals)) {
+                const requestedFields = getRequestedInputFields(elements);
+                const configuredValues = mapAuthCredentialsToFields(
+                    requestedFields,
+                    resolveAuthCredentials(projectPath),
+                );
                 interruption = await classifyInterruption(
                     pageTitle,
                     elements,
@@ -123,6 +146,7 @@ export const createDetectInterruptionNode =
                     // to our field request — accept a bare value for a single
                     // field instead of re-asking.
                     state.resumeBlocker === true,
+                    configuredValues,
                 );
             }
 
@@ -170,7 +194,7 @@ export const createDetectInterruptionNode =
             if (
                 interruption &&
                 AUTH_INTERRUPTION_TYPES.has(interruption.type) &&
-                goalTargetsUnauthedPage(state.userPrompt)
+                state.authPrecondition === "unauthenticated"
             ) {
                 interruption = null;
             }
@@ -186,6 +210,7 @@ export const createDetectInterruptionNode =
             interruption &&
             AUTH_INTERRUPTION_TYPES.has(interruption.type) &&
             !state.resumeBlocker &&
+            state.authPrecondition === "authenticated" &&
             hasAuthSession(projectPath)
         ) {
             try {
@@ -202,22 +227,42 @@ export const createDetectInterruptionNode =
                 /* recovery is best-effort — fall through to the stale-session hint */
             }
 
-            // A reusable session exists but EVERY protected route still hit the
-            // login wall — the saved session is almost certainly expired. Guide
-            // the user to refresh it via `raiken auth` rather than trying to type
-            // SSO/OTP credentials into chat (which we usually can't complete).
-            // Generic across apps; the credential path still works if they reply
-            // with values (that arrives as resumeBlocker and skips this branch).
-            const staleMsg =
-                "Your saved login session looks expired — every protected route is redirecting to the " +
-                "login page. Refresh it by running `raiken auth` to capture a fresh session, then try again. " +
-                "Or reply with the credentials here and I'll sign in now.";
-            return {
-                domSummary: summary,
-                interruption: { ...interruption, requiresUser: true, message: staleMsg },
-                awaitUserMessage: staleMsg,
-                resumeBlocker: false,
-            };
+            if (!canFillWithConfiguredCredentials(projectPath, interruption.requestedFields)) {
+                // The snapshot is structurally valid but the server rejected it.
+                // Without configured credentials, refresh via the explicit auth
+                // flow instead of guessing values or repeatedly probing routes.
+                const staleMsg =
+                    "Your saved login session looks expired — every protected route is redirecting to the " +
+                    "login page. Refresh it by running `raiken auth` to capture a fresh session, then try again. " +
+                    "Or reply with the credentials here and I'll sign in now.";
+                return {
+                    domSummary: summary,
+                    interruption: { ...interruption, requiresUser: true, message: staleMsg },
+                    awaitUserMessage: staleMsg,
+                    resumeBlocker: false,
+                };
+            }
+        }
+
+        if (
+            interruption &&
+            AUTH_INTERRUPTION_TYPES.has(interruption.type) &&
+            !state.resumeBlocker &&
+            state.authPrecondition === "authenticated" &&
+            !hasAuthSession(projectPath)
+        ) {
+            if (!canFillWithConfiguredCredentials(projectPath, interruption.requestedFields)) {
+                const destination = resolveAuthStorageStateDestination(projectPath);
+                const problem =
+                    describeAuthStateProblem(inspectAuthState(destination)) ??
+                    "Saved auth state is not usable. Run `raiken auth` to refresh it.";
+                return {
+                    domSummary: summary,
+                    interruption: { ...interruption, requiresUser: true, message: problem },
+                    awaitUserMessage: problem,
+                    resumeBlocker: false,
+                };
+            }
         }
 
         try {
@@ -235,7 +280,7 @@ export const createDetectInterruptionNode =
 
         // Remember a good authenticated entry route when the page is clean, so the
         // next run enters there directly instead of bouncing off the login wall.
-        if (!interruption) {
+        if (!interruption && state.authPrecondition === "authenticated") {
             try {
                 let curUrl: string | null = state.currentUrl ?? null;
                 if (!curUrl) {
@@ -291,7 +336,7 @@ function stillCredentialBlocked(elements: ReturnType<typeof parseSummaryElements
 }
 
 export const createResolveInterruptionNode =
-    ({ callTool, model, signal }: AgentNodeDeps) =>
+    ({ callTool, model, projectPath, signal }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
         const interruption = state.interruption;
         if (!interruption) return {};
@@ -358,7 +403,13 @@ export const createResolveInterruptionNode =
                     model,
                     // resolveInterruption only runs after the user has provided
                     // input, so a bare single value is a valid one-field reply.
-                    { isReply: true },
+                    {
+                        isReply: true,
+                        presetValues: mapAuthCredentialsToFields(
+                            requestedFields,
+                            resolveAuthCredentials(projectPath),
+                        ),
+                    },
                 );
                 const fillable = requestedFields.filter((f) => mapped.values[f.key]);
                 const unmet = requestedFields.filter((f) => !mapped.values[f.key]);

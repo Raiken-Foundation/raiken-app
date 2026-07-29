@@ -24,6 +24,8 @@ import * as path from "node:path";
 
 import type { Browser, BrowserContext, Page } from "playwright";
 
+import { resolveAuthStorageStateDestination, writeValidatedAuthState } from "../config/auth-state";
+import { resolvePathWithinProject } from "../config/store";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "./db";
 import { looksLikeLoginUrl } from "./detectors/auth";
@@ -102,16 +104,10 @@ export async function runManualHandoff(
     options: ManualHandoffOptions,
 ): Promise<ManualHandoffResult> {
     const projectPath = options.projectPath;
-    // Resolution order:
-    //   1. Explicit `options.storageStatePath` (router.ts resolves this from
-    //      `auth.storageStatePath` in raiken.config.json before calling us).
-    //   2. Local config-aware default — re-implemented inline because
-    //      `libs/core` can't depend on `libs/shared` (shared depends on core,
-    //      so the import would be cyclic). The duplication is small (10 lines)
-    //      and worth it to keep direct callers (e.g. tests) honouring config.
-    //   3. `.raiken/auth-state.json` legacy fallback.
     const storageStatePath =
-        options.storageStatePath ?? resolveDefaultStorageStatePath(projectPath);
+        options.storageStatePath !== undefined
+            ? resolvePathWithinProject(projectPath, options.storageStatePath)
+            : resolveAuthStorageStateDestination(projectPath);
     const storageStateDir = path.dirname(storageStatePath);
     const timeoutMs = options.timeoutMs ?? DEFAULT_HANDOFF_TIMEOUT_MS;
     const headless = options.headless ?? false;
@@ -178,7 +174,10 @@ export async function runManualHandoff(
                 url: currentUrl,
             });
 
-            const detected = detectChange(baseline, storageState, currentUrl);
+            const detected =
+                detectChange(baseline, storageState, currentUrl) &&
+                ((options.category ?? "auth_required") !== "auth_required" ||
+                    !isLoginOrPreNavigation(currentUrl));
             const snapshot = snapshotKey(storageState, currentUrl);
             if (detected) {
                 if (lastSnapshot === snapshot) {
@@ -224,7 +223,7 @@ export async function runManualHandoff(
         };
     }
 
-    fs.writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
+    writeValidatedAuthState(storageStatePath, storageState);
 
     const blockersResolved = markBlockersResolved(projectPath, {
         storageStatePath,
@@ -393,32 +392,4 @@ function markBlockersResolved(
         // Best-effort — the saved storage state is the important artifact.
         return 0;
     }
-}
-
-/**
- * Read `auth.storageStatePath` directly from `raiken.config.json` and
- * resolve it (relative paths are resolved against `projectPath`). Falls
- * back to `.raiken/auth-state.json` when the config is missing, the
- * file is unparseable, or the field is empty.
- *
- * Mirror of `resolveAuthStorageStateDestination` in `libs/shared` —
- * duplicated intentionally because `libs/core` cannot depend on
- * `libs/shared` (the dependency graph runs the other way). Production
- * callers (router.ts, raiken auth) resolve via the shared helper and
- * pass an explicit `storageStatePath`, so this fallback is only hit by
- * direct callers (tests, third-party scripts).
- */
-function resolveDefaultStorageStatePath(projectPath: string): string {
-    try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const raw = fs.readFileSync(configPath, "utf-8");
-        const parsed = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
-        const configured = parsed.auth?.storageStatePath;
-        if (typeof configured === "string" && configured.length > 0) {
-            return path.isAbsolute(configured) ? configured : path.join(projectPath, configured);
-        }
-    } catch {
-        // config missing or invalid — fall through to legacy default
-    }
-    return path.join(projectPath, ".raiken", "auth-state.json");
 }

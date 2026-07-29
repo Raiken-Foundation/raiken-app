@@ -9,7 +9,14 @@
  * that something was left over from before. This module gathers anything
  * worth flagging up front, once, at REPL startup.
  */
-import { getProvider, resolveAIConfig } from "@raiken/core";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import {
+    formatActiveWorkflowAttention,
+    getProvider,
+    resolveAIConfig,
+    WorkflowStore,
+} from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
@@ -26,18 +33,30 @@ export async function gatherAttentionItems(
 ): Promise<string[]> {
     const items: string[] = [];
 
-    try {
-        const ai = resolveAIConfig(projectPath);
-        const provider = getProvider(ai.provider);
-        if (provider.envVars.length > 0 && !ai.apiKey) {
-            items.push(
-                `No AI provider key configured for ${provider.label} — set ` +
-                    `${provider.envVars[0]}, run \`/config\`, or add it in the dashboard's ` +
-                    "Settings view. Test generation and chat won't work until then.",
-            );
+    const initialized = fs.existsSync(path.join(projectPath, "raiken.config.json"));
+    if (!initialized) {
+        items.push(
+            "This project has not been initialized — run `raiken init` to set up test defaults, " +
+                "generated-file ignores, and its AI provider.",
+        );
+    }
+
+    // Before init there is no project-level provider choice yet. Showing an
+    // additional OpenRouter-key warning at this point is both redundant and
+    // misleading, so defer provider readiness until after initialization.
+    if (initialized) {
+        try {
+            const ai = resolveAIConfig(projectPath);
+            const provider = getProvider(ai.provider);
+            if (provider.envVars.length > 0 && !ai.apiKey) {
+                items.push(
+                    `${provider.label} needs an API key before Raiken can run. Use \`/config\` to set ` +
+                        `one for this project, set ${provider.envVars[0]}, or open dashboard Settings.`,
+                );
+            }
+        } catch {
+            /* config unreadable — surfaced elsewhere (bootstrap), skip here */
         }
-    } catch {
-        /* config unreadable — surfaced elsewhere (bootstrap), skip here */
     }
 
     try {
@@ -66,6 +85,16 @@ export async function gatherAttentionItems(
         }
     } catch {
         /* discovery DB not initialized yet (fresh project) — nothing to report */
+    }
+
+    try {
+        const workflows = await new WorkflowStore(projectPath).listActive();
+        items.push(...workflows.slice(0, 3).map(formatActiveWorkflowAttention));
+        if (workflows.length > 3) {
+            items.push(`${workflows.length - 3} additional test workflows need attention.`);
+        }
+    } catch {
+        /* workflow directory missing or unreadable — nothing to report */
     }
 
     items.push(...bootstrapWarnings);

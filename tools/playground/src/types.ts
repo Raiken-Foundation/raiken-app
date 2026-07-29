@@ -49,7 +49,8 @@ export type ActivityKind =
     | "task_status_changed"
     | "task_assigned"
     | "comment_added"
-    | "member_added";
+    | "member_added"
+    | "member_removed";
 
 export interface ActivityEntry {
     id: string;

@@ -4,6 +4,8 @@ import fastifyStatic from "@fastify/static";
 import {
     BrowserSession,
     humanizeToolCall,
+    PathContainmentError,
+    ProjectArtifactService,
     ProjectContext,
     runOrchestrator,
     type ToolResult,
@@ -13,14 +15,68 @@ import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
 import { bootstrapProject } from "./bootstrap";
 import { detectProject } from "./project-detector";
+import {
+    createServerSession,
+    isAllowedDashboardOrigin,
+    isLoopbackAddress,
+    isSessionAuthorized,
+    redactRequestUrl,
+} from "./server-auth";
 
-export async function startServer(port = 7101) {
+export interface StartServerOptions {
+    port?: number;
+    /** Bind on all interfaces and require a per-process bearer token. */
+    remote?: boolean;
+}
+
+export async function startServer(options: StartServerOptions | number = 7101) {
+    const port = typeof options === "number" ? options : (options.port ?? 7101);
+    const session = createServerSession(
+        typeof options === "number" ? false : options.remote === true,
+    );
     // Fastify's default maxParamLength (100) truncates long tRPC batch
     // URLs like `/api/trpc/getA,getB,getC,...` and returns 404 before the
     // adapter sees the request. Bump it so realistic batches of dashboard
     // queries (commonly 8-15 procedures) resolve correctly.
-    const app = fastify({ logger: true, maxParamLength: 8192 });
+    const app = fastify({
+        logger: {
+            level: "info",
+            serializers: {
+                req(request) {
+                    return {
+                        method: request.method,
+                        url: redactRequestUrl(request.url),
+                    };
+                },
+            },
+        },
+        maxParamLength: 8192,
+    });
     const projectPath = process.cwd();
+    const artifactService = new ProjectArtifactService(projectPath);
+
+    // All API routes, including tRPC, artifacts, and the SSE endpoint, are
+    // token-protected in explicitly enabled remote mode. Loopback mode relies
+    // on its binding address and has no long-lived credential to manage.
+    app.addHook("onRequest", async (request, reply) => {
+        if (!request.url.startsWith("/api")) return;
+
+        if (
+            session.mode === "remote" &&
+            !isAllowedDashboardOrigin(request.headers.origin, request.headers.host)
+        ) {
+            return reply.code(403).send({ error: "origin not allowed" });
+        }
+
+        // A local operator can inspect the current session if a future
+        // development client needs to bootstrap it. Never expose a remote
+        // token to a LAN requester.
+        if (request.url.startsWith("/api/session") && isLoopbackAddress(request.ip)) return;
+
+        if (!isSessionAuthorized(request.headers, session)) {
+            return reply.code(401).send({ error: "authorization required" });
+        }
+    });
 
     // Initialize the code graph, ProjectContext, and AgentMemory. Shared with
     // `raiken chat` so both surfaces give the agent the same understanding.
@@ -44,9 +100,16 @@ export async function startServer(port = 7101) {
         trpcOptions: {
             router: appRouter,
             createContext: () => ({
-                projectPath: process.cwd(),
+                projectPath,
             }),
         },
+    });
+
+    app.get("/api/session", async (request, reply) => {
+        if (!isLoopbackAddress(request.ip)) {
+            return reply.code(403).send({ error: "loopback access required" });
+        }
+        return { mode: session.mode, token: session.token ?? null };
     });
 
     app.get("/api/artifact", async (request, reply) => {
@@ -54,11 +117,11 @@ export async function startServer(port = 7101) {
         if (!filePath) {
             return reply.code(400).send({ error: "path query parameter is required" });
         }
-        const resolved = path.resolve(projectPath, filePath);
-        if (
-            !resolved.startsWith(path.resolve(projectPath) + path.sep) &&
-            resolved !== path.resolve(projectPath)
-        ) {
+        let resolved: string;
+        try {
+            resolved = artifactService.resolve(filePath);
+        } catch (error) {
+            if (!(error instanceof PathContainmentError)) throw error;
             return reply.code(403).send({ error: "forbidden" });
         }
         if (!fs.existsSync(resolved)) {
@@ -104,7 +167,6 @@ export async function startServer(port = 7101) {
             reply.raw.setHeader("Content-Type", "text/event-stream");
             reply.raw.setHeader("Cache-Control", "no-cache");
             reply.raw.setHeader("Connection", "keep-alive");
-            reply.raw.setHeader("Access-Control-Allow-Origin", "*");
 
             // Stop doing work if the client navigates away or closes the tab.
             //
@@ -148,6 +210,7 @@ export async function startServer(port = 7101) {
                     targetTestFile,
                     fileContext,
                     signal: abortController.signal,
+                    origin: "dashboard",
                     onToolCall: (toolName) => {
                         writeToolEvent({
                             phase: "call",
@@ -219,6 +282,18 @@ export async function startServer(port = 7101) {
     });
 
     const publicDir = path.join(__dirname, "public");
+    const renderDashboardIndex = () => {
+        const index = fs.readFileSync(path.join(publicDir, "index.html"), "utf-8");
+        // Never inject the remote token into a static page: unauthenticated
+        // LAN clients can fetch assets. A remote operator supplies it once via
+        // `?raiken_token=…`, and the dashboard immediately stores and removes
+        // it from the visible URL.
+        return index.replace("<!--RAIKEN_AUTH_TOKEN-->", "");
+    };
+
+    app.get("/", async (_request, reply) => {
+        return reply.type("text/html; charset=utf-8").send(renderDashboardIndex());
+    });
 
     app.register(fastifyStatic, {
         root: publicDir,
@@ -231,8 +306,8 @@ export async function startServer(port = 7101) {
         if (isApiRoute) {
             reply.code(404).send({ error: "Not found" });
         } else {
-            // Serve index.html for client-side routing
-            reply.sendFile("index.html");
+            // Serve the SPA fallback with the in-memory remote session token.
+            reply.type("text/html; charset=utf-8").send(renderDashboardIndex());
         }
     });
 
@@ -278,8 +353,14 @@ export async function startServer(port = 7101) {
     });
 
     try {
-        await app.listen({ port, host: "0.0.0.0" });
+        await app.listen({ port, host: session.host });
         console.log(`\nRaiken is running at http://localhost:${port}`);
+        if (session.mode === "remote") {
+            console.warn(
+                "Remote mode is enabled. Open the dashboard with " +
+                    `?raiken_token=${session.token} once; API requests require this session token.\n`,
+            );
+        }
     } catch (err) {
         app.log.error(err);
         process.exit(1);

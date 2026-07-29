@@ -15,7 +15,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { looksLikeLoginUrl } from "@raiken/core";
+import {
+    acquireProjectOperation,
+    loadAuthConfig,
+    looksLikeLoginUrl,
+    runCustomLoginScript,
+    writeValidatedAuthState,
+} from "@raiken/core";
 import { resolveAuthStorageStateDestination } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -32,6 +38,10 @@ export interface AuthOptions {
     domain?: string;
     storage?: string[];
     fromStateFile?: string;
+    manual?: boolean;
+    script?: string;
+    timeout?: string | number;
+    headed?: boolean;
     /**
      * REPL integration hook. Standalone auth creates its own readline watcher;
      * the interactive shell supplies one backed by its existing interface so
@@ -68,6 +78,13 @@ const POLL_INTERVAL_MS = 1500;
 // for before saving — this avoids snapshotting in the middle of a redirect.
 const STABILITY_POLLS = 2;
 
+export function shouldRunCustomLogin(
+    options: Pick<AuthOptions, "manual" | "script">,
+    configuredScript: string | undefined,
+): boolean {
+    return !options.manual && Boolean(options.script || configuredScript);
+}
+
 export async function authCommand(options: AuthOptions): Promise<void> {
     const projectPath = process.cwd();
     // Honour `auth.storageStatePath` from raiken.config.json — pre-fix this
@@ -97,6 +114,48 @@ export async function authCommand(options: AuthOptions): Promise<void> {
         return;
     }
 
+    const configuredScript = loadAuthConfig(projectPath).customLoginScript;
+    if (shouldRunCustomLogin(options, configuredScript)) {
+        const timeoutMs =
+            options.timeout === undefined
+                ? undefined
+                : Number.parseInt(String(options.timeout), 10);
+        if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+            throw new Error("--timeout must be a positive number of milliseconds.");
+        }
+        const scriptSpinner = ora({
+            text: "Running custom login script...",
+            spinner: "dots",
+        }).start();
+        try {
+            const result = await runCustomLoginScript({
+                projectPath,
+                scriptPath: options.script,
+                storageStatePath: authStatePath,
+                url: options.url,
+                timeoutMs,
+                headed: options.headed,
+            });
+            const resolvedBlockers = await markAuthBlockersResolved(
+                projectPath,
+                result.storageStatePath,
+            );
+            scriptSpinner.succeed(chalk.green("Custom login completed"));
+            console.log(chalk.dim(`   Script:          ${result.scriptPath}`));
+            console.log(chalk.dim(`   File:            ${result.storageStatePath}`));
+            console.log(chalk.dim(`   Cookies:         ${result.cookies}`));
+            console.log(chalk.dim(`   Storage origins: ${result.origins}`));
+            if (resolvedBlockers > 0) {
+                console.log(chalk.dim(`   Blockers cleared: ${resolvedBlockers}`));
+            }
+            console.log();
+            return;
+        } catch (error) {
+            scriptSpinner.fail(chalk.red("Custom login failed"));
+            throw error;
+        }
+    }
+
     console.log(chalk.cyan("\nStarting authentication flow...\n"));
 
     const url = options.url ?? "about:blank";
@@ -117,180 +176,191 @@ export async function authCommand(options: AuthOptions): Promise<void> {
         }
     }
 
-    const browser = await chromium.launch({
-        headless: false,
-        args: ["--start-maximized"],
-    });
+    const operation = await acquireProjectOperation(projectPath, "browser");
+    try {
+        const browser = await chromium.launch({
+            headless: false,
+            args: ["--start-maximized"],
+        });
 
-    const context = await browser.newContext({ viewport: null });
-    const page = await context.newPage();
+        const context = await browser.newContext({ viewport: null });
+        const page = await context.newPage();
 
-    spinner.succeed(chalk.green("Browser launched"));
+        spinner.succeed(chalk.green("Browser launched"));
 
-    if (url !== "about:blank") {
-        console.log(chalk.dim(`Navigating to ${url}…\n`));
+        if (url !== "about:blank") {
+            console.log(chalk.dim(`Navigating to ${url}…\n`));
+            try {
+                await page.goto(url, { waitUntil: "domcontentloaded" });
+            } catch (err) {
+                console.log(
+                    chalk.yellow(
+                        `⚠ Navigation reported an error (${(err as Error).message}). Continuing anyway.`,
+                    ),
+                );
+            }
+        }
+
+        const baseline = await captureBaseline(context, page);
+
+        console.log(chalk.yellow("Log in to your application in the browser window."));
+        console.log(
+            chalk.dim("   Raiken will detect the successful login and save automatically."),
+        );
+        console.log(chalk.dim("   Press Enter to save manually, or close the browser to abort.\n"));
+
+        const watchSpinner = ora({
+            text: "Waiting for login…",
+            spinner: "dots",
+        }).start();
+
+        let aborted = false;
+        type SavedReason = "auto" | "manual" | "browser-closed";
+        let savedReason: SavedReason = "auto" as SavedReason;
+
+        // Manual override: pressing Enter resolves the watcher immediately.
+        // We hold onto `enterWatcher.cancel` so we can release the readline
+        // (and unref stdin) when the auto-detector or browser-closed handler
+        // wins the race — otherwise the CLI hangs after success because
+        // readline keeps stdin referenced.
+        const enterWatcher = options.createManualSaveWatcher?.() ?? waitForEnterKey();
+        const enterPromise = enterWatcher.promise.then(() => {
+            savedReason = "manual";
+        });
+
+        // Browser close: if the user dismisses the window, we save what we have.
+        const browserClosedPromise = new Promise<void>((resolve) => {
+            browser.once("disconnected", () => {
+                savedReason = "browser-closed";
+                resolve();
+            });
+        });
+
+        const autoDetectPromise = (async () => {
+            let stableHits = 0;
+            let lastSnapshot: string | null = null;
+
+            while (!aborted) {
+                await delay(POLL_INTERVAL_MS);
+                if (aborted) return;
+
+                let storageState: Awaited<ReturnType<typeof context.storageState>>;
+                try {
+                    storageState = await context.storageState();
+                } catch {
+                    // Browser likely closing — stop polling. Browser-close handler will save.
+                    return;
+                }
+
+                const currentUrl = safePageUrl(page);
+                const detected = detectLogin(baseline, storageState, currentUrl);
+                const snapshot = snapshotKey(storageState, currentUrl);
+
+                if (detected) {
+                    if (lastSnapshot === snapshot) {
+                        stableHits += 1;
+                        watchSpinner.text = `Login detected — confirming (${stableHits}/${STABILITY_POLLS})…`;
+                    } else {
+                        stableHits = 1;
+                        watchSpinner.text = "Login detected — confirming…";
+                    }
+                    lastSnapshot = snapshot;
+                    if (stableHits >= STABILITY_POLLS) {
+                        savedReason = "auto";
+                        return;
+                    }
+                } else {
+                    stableHits = 0;
+                    lastSnapshot = snapshot;
+                    watchSpinner.text = `Waiting for login… (${storageState.cookies.length} cookies, ${storageState.origins.length} origins)`;
+                }
+            }
+        })();
+
+        await Promise.race([autoDetectPromise, enterPromise, browserClosedPromise]);
+        aborted = true;
+        watchSpinner.stop();
+        // Release the readline / stdin reference. Idempotent — safe even if
+        // the user pressed Enter (manual save), in which case the readline is
+        // already closed and this is a no-op.
+        enterWatcher.cancel();
+
+        // Snapshot whatever state is currently in the context (works even if the
+        // browser is closing — we just may get an empty state in that case).
+        let storageState: Awaited<ReturnType<typeof context.storageState>> | null = null;
         try {
-            await page.goto(url, { waitUntil: "domcontentloaded" });
-        } catch (err) {
+            storageState = await context.storageState();
+        } catch {
+            storageState = null;
+        }
+
+        if (!storageState) {
+            console.log(chalk.red("\n✗ Could not read browser session state. Auth aborted."));
+            try {
+                await browser.close();
+            } catch {
+                // already closed
+            }
+            cliExit(1);
+        }
+
+        writeValidatedAuthState(authStatePath, storageState);
+
+        // Mark outstanding *auth* blockers resolved so the dashboard's auto-
+        // resume logic kicks in on the next poll. Captcha / 5xx / manual-pause
+        // blockers are deliberately left alone — saved auth state doesn't
+        // unblock them, and pre-fix this loop falsely cleared them with
+        // `resolvedVia: "auth_command"`, causing the dashboard to auto-resume
+        // straight back into the same captcha and confusing the timeline.
+        const resolvedBlockers = await markAuthBlockersResolved(projectPath, authStatePath);
+
+        const cookieCount = storageState.cookies.length;
+        const originCount = storageState.origins.length;
+
+        console.log();
+        if (savedReason === "manual") {
+            console.log(chalk.green("✓ Saved (manual)"));
+        } else if (savedReason === "browser-closed") {
+            console.log(chalk.green("✓ Saved (browser closed)"));
+        } else {
+            console.log(chalk.green("✓ Login detected — saved automatically"));
+        }
+        console.log(chalk.dim(`   File:           ${authStatePath}`));
+        console.log(chalk.dim(`   Cookies:        ${cookieCount}`));
+        console.log(chalk.dim(`   Storage origins: ${originCount}`));
+        if (resolvedBlockers > 0) {
             console.log(
-                chalk.yellow(
-                    `⚠ Navigation reported an error (${(err as Error).message}). Continuing anyway.`,
+                chalk.dim(
+                    `   Blockers cleared: ${resolvedBlockers} (dashboard will resume discovery automatically)`,
                 ),
             );
         }
-    }
+        console.log();
 
-    const baseline = await captureBaseline(context, page);
-
-    console.log(chalk.yellow("Log in to your application in the browser window."));
-    console.log(chalk.dim("   Raiken will detect the successful login and save automatically."));
-    console.log(chalk.dim("   Press Enter to save manually, or close the browser to abort.\n"));
-
-    const watchSpinner = ora({
-        text: "Waiting for login…",
-        spinner: "dots",
-    }).start();
-
-    let aborted = false;
-    type SavedReason = "auto" | "manual" | "browser-closed";
-    let savedReason: SavedReason = "auto" as SavedReason;
-
-    // Manual override: pressing Enter resolves the watcher immediately.
-    // We hold onto `enterWatcher.cancel` so we can release the readline
-    // (and unref stdin) when the auto-detector or browser-closed handler
-    // wins the race — otherwise the CLI hangs after success because
-    // readline keeps stdin referenced.
-    const enterWatcher = options.createManualSaveWatcher?.() ?? waitForEnterKey();
-    const enterPromise = enterWatcher.promise.then(() => {
-        savedReason = "manual";
-    });
-
-    // Browser close: if the user dismisses the window, we save what we have.
-    const browserClosedPromise = new Promise<void>((resolve) => {
-        browser.once("disconnected", () => {
-            savedReason = "browser-closed";
-            resolve();
-        });
-    });
-
-    const autoDetectPromise = (async () => {
-        let stableHits = 0;
-        let lastSnapshot: string | null = null;
-
-        while (!aborted) {
-            await delay(POLL_INTERVAL_MS);
-            if (aborted) return;
-
-            let storageState: Awaited<ReturnType<typeof context.storageState>>;
-            try {
-                storageState = await context.storageState();
-            } catch {
-                // Browser likely closing — stop polling. Browser-close handler will save.
-                return;
-            }
-
-            const currentUrl = safePageUrl(page);
-            const detected = detectLogin(baseline, storageState, currentUrl);
-            const snapshot = snapshotKey(storageState, currentUrl);
-
-            if (detected) {
-                if (lastSnapshot === snapshot) {
-                    stableHits += 1;
-                    watchSpinner.text = `Login detected — confirming (${stableHits}/${STABILITY_POLLS})…`;
-                } else {
-                    stableHits = 1;
-                    watchSpinner.text = "Login detected — confirming…";
-                }
-                lastSnapshot = snapshot;
-                if (stableHits >= STABILITY_POLLS) {
-                    savedReason = "auto";
-                    return;
-                }
-            } else {
-                stableHits = 0;
-                lastSnapshot = snapshot;
-                watchSpinner.text = `Waiting for login… (${storageState.cookies.length} cookies, ${storageState.origins.length} origins)`;
-            }
+        // Warn if we saved an empty state — almost always a sign that login wasn't
+        // actually completed before the browser closed.
+        if (cookieCount === 0 && originCount === 0) {
+            console.log(
+                chalk.yellow(
+                    "⚠ Saved state is empty — no cookies or storage entries were captured.",
+                ),
+            );
+            console.log(
+                chalk.dim("   Re-run `raiken auth` and complete the login before exiting.\n"),
+            );
         }
-    })();
 
-    await Promise.race([autoDetectPromise, enterPromise, browserClosedPromise]);
-    aborted = true;
-    watchSpinner.stop();
-    // Release the readline / stdin reference. Idempotent — safe even if
-    // the user pressed Enter (manual save), in which case the readline is
-    // already closed and this is a no-op.
-    enterWatcher.cancel();
-
-    // Snapshot whatever state is currently in the context (works even if the
-    // browser is closing — we just may get an empty state in that case).
-    let storageState: Awaited<ReturnType<typeof context.storageState>> | null = null;
-    try {
-        storageState = await context.storageState();
-    } catch {
-        storageState = null;
-    }
-
-    if (!storageState) {
-        console.log(chalk.red("\n✗ Could not read browser session state. Auth aborted."));
         try {
             await browser.close();
         } catch {
             // already closed
         }
-        cliExit(1);
-    }
 
-    fs.writeFileSync(authStatePath, JSON.stringify(storageState, null, 2));
-
-    // Mark outstanding *auth* blockers resolved so the dashboard's auto-
-    // resume logic kicks in on the next poll. Captcha / 5xx / manual-pause
-    // blockers are deliberately left alone — saved auth state doesn't
-    // unblock them, and pre-fix this loop falsely cleared them with
-    // `resolvedVia: "auth_command"`, causing the dashboard to auto-resume
-    // straight back into the same captcha and confusing the timeline.
-    const resolvedBlockers = await markAuthBlockersResolved(projectPath, authStatePath);
-
-    const cookieCount = storageState.cookies.length;
-    const originCount = storageState.origins.length;
-
-    console.log();
-    if (savedReason === "manual") {
-        console.log(chalk.green("✓ Saved (manual)"));
-    } else if (savedReason === "browser-closed") {
-        console.log(chalk.green("✓ Saved (browser closed)"));
-    } else {
-        console.log(chalk.green("✓ Login detected — saved automatically"));
-    }
-    console.log(chalk.dim(`   File:           ${authStatePath}`));
-    console.log(chalk.dim(`   Cookies:        ${cookieCount}`));
-    console.log(chalk.dim(`   Storage origins: ${originCount}`));
-    if (resolvedBlockers > 0) {
-        console.log(
-            chalk.dim(
-                `   Blockers cleared: ${resolvedBlockers} (dashboard will resume discovery automatically)`,
-            ),
-        );
-    }
-    console.log();
-
-    // Warn if we saved an empty state — almost always a sign that login wasn't
-    // actually completed before the browser closed.
-    if (cookieCount === 0 && originCount === 0) {
-        console.log(
-            chalk.yellow("⚠ Saved state is empty — no cookies or storage entries were captured."),
-        );
-        console.log(chalk.dim("   Re-run `raiken auth` and complete the login before exiting.\n"));
-    }
-
-    try {
-        await browser.close();
-    } catch {
-        // already closed
-    }
-
-    if (cookieCount === 0 && originCount === 0) {
-        cliExit(1);
+        if (cookieCount === 0 && originCount === 0) {
+            cliExit(1);
+        }
+    } finally {
+        await operation.release();
     }
 }
 
@@ -335,7 +405,7 @@ function detectLogin(
     // Best signal: a new cookie or storage entry shows up. URL change alone is
     // a weaker signal (could be intra-login redirects), so we require a
     // cred-bearing artifact OR an unambiguous redirect off the login URL.
-    if (newCookie || newOrigin) {
+    if ((newCookie || newOrigin) && (!initialIsLogin || !isLoginOrPreNavigation(currentUrl))) {
         return true;
     }
 
@@ -468,7 +538,7 @@ async function importFromStateFile(src: string, dest: string, projectPath: strin
         cliExit(1);
     }
 
-    fs.writeFileSync(dest, JSON.stringify(parsed, null, 2));
+    writeValidatedAuthState(dest, parsed);
     await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✓ Imported storage state"));
@@ -549,7 +619,7 @@ async function importFromFlags(
         origins: localStorage.length > 0 ? [{ origin, localStorage }] : [],
     };
 
-    fs.writeFileSync(dest, JSON.stringify(state, null, 2));
+    writeValidatedAuthState(dest, state);
     await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✓ Imported auth state"));

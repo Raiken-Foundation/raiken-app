@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import * as path from "node:path";
 import { BrowserSession, runOrchestrator } from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import chalk from "chalk";
@@ -33,24 +35,68 @@ interface RunSummary {
     skipped: number;
 }
 
+export interface OneShotOutcomeInput {
+    /**
+     * True when the agent actually produced test code this run — either an
+     * approval payload carrying a draft, or its own `saveFile` tool call. A
+     * prompt that only asked a question produces none, and must not be held
+     * to artifact expectations.
+     */
+    producedTest: boolean;
+    /** False only when `--no-save` was passed. */
+    saveRequested: boolean;
+    /** Path of an artifact CONFIRMED to exist on disk, or null. */
+    savedTest: string | null;
+    saveError: string | null;
+    /** True when `--run` was passed. */
+    runRequested: boolean;
+    runSummary: RunSummary | null;
+}
+
+export interface OneShotOutcome {
+    ok: boolean;
+    exitCode: number;
+    /** Why the run is not ok. Absent when it is. */
+    reason?: string;
+}
+
 /**
  * The agent responding without throwing does NOT mean the run did what was
- * asked: a requested save can fail, and a requested run can fail its tests.
- * `ok` (and the exit code) must reflect BOTH — not just "the LLM call
- * completed" — so a machine consumer checking only `ok`, or a script
- * checking only the exit code, never sees success reported for a run that
- * silently failed to save or that ran tests which failed.
+ * asked. `ok` (and the exit code) must reflect the whole request, because a
+ * machine consumer checking only `ok`, or a script checking only the exit
+ * code, has nothing else to go on.
  *
- * Extracted as a pure function so this contract is unit-testable without
+ * Four distinct ways a run can finish without doing what was asked, all
+ * observed in practice:
+ *
+ *   1. the save threw;
+ *   2. a test was generated and a save was wanted, but no file exists —
+ *      the case where a repair emitted tool tags, wrote nothing, ran
+ *      nothing, and still reported success;
+ *   3. `--run` was asked for and never happened (nothing to run);
+ *   4. the run happened and its tests failed.
+ *
+ * Extracted as a pure function so the contract is unit-testable without
  * driving the full orchestrator/browser stack.
  */
-export function computeOneShotOutcome(
-    saveError: string | null,
-    runSummary: RunSummary | null,
-): { ok: boolean; exitCode: number } {
-    const runFailed = !!(runSummary && !runSummary.success);
-    const ok = !saveError && !runFailed;
-    return { ok, exitCode: ok ? 0 : 1 };
+export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcome {
+    const notOk = (reason: string): OneShotOutcome => ({ ok: false, exitCode: 1, reason });
+
+    if (input.saveError) return notOk(input.saveError);
+    if (input.producedTest && input.saveRequested && !input.savedTest) {
+        return notOk(
+            "A test was generated but no file exists on disk for it. Nothing was saved, so nothing was verified.",
+        );
+    }
+    if (input.runRequested && input.producedTest && !input.runSummary) {
+        return notOk("--run was requested but the generated test was never executed.");
+    }
+    if (input.runSummary && !input.runSummary.success) {
+        return notOk(
+            `The test run failed (${input.runSummary.passed} passed, ${input.runSummary.failed} failed).`,
+        );
+    }
+    return { ok: true, exitCode: 0 };
 }
 
 /**
@@ -214,21 +260,30 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     // `true` after a save or run it explicitly asked for actually failed.
     let saveError: string | null = null;
 
+    const draftFromApproval =
+        pendingHITL && typeof pendingHITL.testCode === "string" ? pendingHITL.testCode : "";
+    // Whether the agent produced a test at all — the only signal that makes
+    // "a saved file must exist" a fair expectation. Asking a question, or
+    // exploring a site, legitimately leaves no artifact behind.
+    const producedTest = Boolean(draftFromApproval) || agentSavedPath !== null;
+
     let savedTest: string | null = null;
     if (pendingHITL && options.save) {
-        const testCode = typeof pendingHITL.testCode === "string" ? pendingHITL.testCode : "";
         const suggestedPath =
             typeof pendingHITL.suggestedPath === "string" ? pendingHITL.suggestedPath : "";
-        if (testCode && suggestedPath) {
+        if (draftFromApproval && suggestedPath) {
             const lastSlash = suggestedPath.lastIndexOf("/");
             const testDir = lastSlash >= 0 ? suggestedPath.slice(0, lastSlash) : undefined;
             const fileName = lastSlash >= 0 ? suggestedPath.slice(lastSlash + 1) : suggestedPath;
             try {
                 const result = await caller.saveGeneratedTest({
                     fileName,
-                    content: testCode,
+                    content: draftFromApproval,
                     testDir,
-                    avoidOverwrite: true,
+                    // Only dedupe to `name-2.spec.ts` for a path the agent
+                    // invented. When it deliberately targeted an existing
+                    // spec, redirecting the write is the bug, not the guard.
+                    avoidOverwrite: pendingHITL.overwriteTarget !== true,
                 });
                 savedTest = result.filePath;
                 if (!json && !streamJson) {
@@ -247,6 +302,20 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     }
 
     if (!savedTest && agentSavedPath) savedTest = agentSavedPath;
+
+    // A recorded path proves only that a save was ATTEMPTED: a `saveFile`
+    // call that hit the HITL gate returns `saved: false` and writes nothing,
+    // and a rejected draft never gets that far. `savedTest` is reported to
+    // the caller as an artifact it can open and run, so confirm it exists
+    // before claiming it — and drop it if it doesn't, so a run isn't
+    // attempted against a file that was never written.
+    if (savedTest && options.save && !existsSync(path.resolve(projectPath, savedTest))) {
+        saveError = `Expected a saved test at ${savedTest} but no file exists there.`;
+        savedTest = null;
+        if (!json && !streamJson) {
+            process.stderr.write(chalk.red(`\n  ✗ ${saveError}\n`));
+        }
+    }
 
     let runSummary: RunSummary | null = null;
     if (options.run && savedTest) {
@@ -287,7 +356,14 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         /* already closed */
     }
 
-    const { ok, exitCode } = computeOneShotOutcome(saveError, runSummary);
+    const { ok, exitCode, reason } = computeOneShotOutcome({
+        producedTest,
+        saveRequested: options.save,
+        savedTest,
+        saveError,
+        runRequested: options.run,
+        runSummary,
+    });
 
     if (streamJson) {
         events.emit({
@@ -296,6 +372,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             response: assistant.trim(),
             savedTest,
             saveError,
+            reason,
             run: runSummary,
             ts: nowTs(),
         });
@@ -312,12 +389,15 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                         toolCalls,
                         savedTest,
                         saveError,
+                        reason,
                         run: runSummary,
                     },
                     null,
                     2,
                 )}\n`,
             );
+        } else if (!ok && reason && reason !== saveError) {
+            process.stderr.write(chalk.red(`\n  ✗ ${reason}\n`));
         }
     }
 

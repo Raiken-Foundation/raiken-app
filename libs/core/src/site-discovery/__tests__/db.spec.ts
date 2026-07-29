@@ -201,6 +201,28 @@ describe("SiteKnowledgeDB", () => {
             expect(blockers[0].detectorId).toBe("manual:captcha_iframe");
         });
 
+        it("keeps log-only blockers as history without reporting them unresolved", () => {
+            siteDb.saveBlocker({
+                projectPath: testDir,
+                url: "http://localhost:3000/",
+                category: "consent_wall",
+                severity: "log",
+                detectorId: "manual:consent_wall_generic",
+                detectedElements: null,
+                evidenceJson: JSON.stringify({ selector: '[role="dialog"]' }),
+                screenshotPath: null,
+                resolution: null,
+                resolvedVia: null,
+                resolvedAt: null,
+                storageStatePath: null,
+                discoveredAt: Date.now(),
+            });
+
+            expect(siteDb.getUnresolvedBlockers()).toHaveLength(0);
+            expect(siteDb.getAllBlockers()).toHaveLength(1);
+            expect(siteDb.getStats().unresolvedBlockersCount).toBe(0);
+        });
+
         it("legacy saveAuthBlocker still works and produces an auth_required row", () => {
             const id = siteDb.saveAuthBlocker({
                 projectPath: testDir,

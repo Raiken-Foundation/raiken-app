@@ -2,6 +2,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
+import { resolveAuthPrecondition } from "../utils";
 import type { AgentNodeDeps } from "./types";
 
 const classifierSchema = z.object({
@@ -180,6 +181,17 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
             BLOCKER_PAUSE_REASONS.has(state.pauseReason) &&
             looksLikeCredentialReply(state.userPrompt);
         const isContinuation = result.isContinuation || forcedContinuation;
+        const authPrecondition =
+            isContinuation && (state.pauseReason === "auth" || state.pauseReason === "otp")
+                ? state.authPrecondition
+                : resolveAuthPrecondition({
+                      userPrompt: state.userPrompt,
+                      activeGoal: result.goal,
+                      targetFeature: result.targetFeature,
+                      targetAction: result.targetAction,
+                  });
+        stateUpdates["authPrecondition"] = authPrecondition;
+        deps.setAuthPrecondition?.(authPrecondition);
 
         if (state.pauseReason) {
             if (isContinuation) {

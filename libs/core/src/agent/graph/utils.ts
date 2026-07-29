@@ -1,4 +1,5 @@
 export type AgentIntent = "explore" | "generateTests" | "explain";
+export type AuthPrecondition = "authenticated" | "unauthenticated" | "login_flow";
 
 export type InterruptionType =
     | "auth"
@@ -211,6 +212,56 @@ export function goalTargetsUnauthedPage(prompt: string): boolean {
         return false;
     }
     return true;
+}
+
+export interface AuthPreconditionInput {
+    userPrompt: string;
+    activeGoal?: string | null;
+    targetFeature?: string | null;
+    targetAction?: string | null;
+}
+
+const EXPLICIT_AUTHENTICATED_RE =
+    /\b(?:already[-\s]?authenticated|reuse (?:the )?(?:saved )?(?:login )?session|with (?:an? )?(?:saved )?(?:authenticated|logged[-\s]?in|signed[-\s]?in) session|as (?:an? )?(?:authenticated|logged[-\s]?in|signed[-\s]?in) user)\b/i;
+// Both patterns match the gerund ("signing in") and the plural
+// ("credentials") on purpose. Requiring the bare stem let a plainly
+// login-shaped prompt — "test signing in with invalid credentials" — fall
+// through every branch to the `authenticated` default, which is precisely the
+// failure this precondition exists to prevent: the test would start from a
+// saved session with no login form on screen.
+const LOGIN_FLOW_RE =
+    /\b(?:mfa|otp|2fa|two[-\s]?factor|multi[-\s]?factor|verification code|one[-\s]?time (?:code|password)|credentials?|log(?:ging)?[\s-]?in flow|sign(?:ing)?[\s-]?in flow|authentication flow)\b/i;
+const AUTH_TASK_RE =
+    /\b(?:auth|authentication|log(?:ging)?[\s-]?in|login|log(?:ging)?[\s-]?out|logout|sign(?:ing)?[\s-]?in|sign(?:ing)?[\s-]?out|sign(?:ing)?[\s-]?up|register|registration|credentials?|session)\b/i;
+
+/**
+ * Resolve the browser/test authentication starting condition once per goal.
+ * Every browser and generation decision must use this value so live DOM
+ * grounding cannot start authenticated while the generated test starts logged
+ * out (or vice versa).
+ */
+export function resolveAuthPrecondition(input: AuthPreconditionInput): AuthPrecondition {
+    const text = [input.userPrompt, input.activeGoal, input.targetFeature, input.targetAction]
+        .filter(Boolean)
+        .join(" ");
+
+    const explicitlyUnauthenticated =
+        /\bunauthenticated\b/i.test(text) ||
+        /\bnot\s+(?:logged|signed)\s+in\b/i.test(text) ||
+        /\b(?:logged|signed)\s+out\b/i.test(text) ||
+        /\bwithout\s+(?:signing|logging)\s+in\b/i.test(text) ||
+        /\bdo\s+not\s+assume\s+a\s+logged[-\s]?in\b/i.test(text);
+    if (explicitlyUnauthenticated) return "unauthenticated";
+
+    if (EXPLICIT_AUTHENTICATED_RE.test(text)) return "authenticated";
+    if (LOGIN_FLOW_RE.test(text)) return "login_flow";
+    if (goalTargetsUnauthedPage(text)) return "unauthenticated";
+    if (AUTH_TASK_RE.test(text)) return "login_flow";
+    return "authenticated";
+}
+
+export function shouldUseStorageState(precondition: AuthPrecondition): boolean {
+    return precondition === "authenticated";
 }
 
 export function parseSummaryElements(summary: string): SummaryElement[] {
@@ -518,6 +569,11 @@ export function buildSummary(state: {
     targetUrl?: string | null;
     missingContext?: string[];
     nextTool?: string | null;
+    /**
+     * Locators the captured DOM could not confirm. Structural type (rather than
+     * importing `SelectorViolation`) keeps this module dependency-free.
+     */
+    groundingViolations?: Array<{ locator: string; reason: string }>;
 }): string {
     const lines: string[] = [];
     if (state.activeGoal) {
@@ -548,6 +604,19 @@ export function buildSummary(state: {
     }
     if (state.savedTestPath) {
         lines.push(`Saved test to ${state.savedTestPath}.`);
+    }
+    // Say so rather than logging it: an unconfirmed locator is the most likely
+    // reason the test fails on its first run.
+    if (state.groundingViolations && state.groundingViolations.length > 0) {
+        lines.push(
+            `${state.groundingViolations.length} selector(s) could not be confirmed against the captured DOM:`,
+        );
+        for (const violation of state.groundingViolations.slice(0, 5)) {
+            lines.push(`- ${violation.locator} — ${violation.reason}`);
+        }
+        if (state.groundingViolations.length > 5) {
+            lines.push(`- ...and ${state.groundingViolations.length - 5} more`);
+        }
     }
     return lines.length > 0 ? lines.join("\n") : "Exploration complete.";
 }

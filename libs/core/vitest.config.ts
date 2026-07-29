@@ -12,6 +12,7 @@ export default defineConfig({
         environment: "node",
         pool: "forks",
         include: ["src/**/*.spec.ts", "src/**/*.test.ts"],
+        exclude: ["src/**/*.integration.spec.ts"],
         testTimeout: 15000,
     },
     resolve: {

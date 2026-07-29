@@ -617,6 +617,12 @@ export class ProjectContext {
             keywords.push(...this.splitIdentifier(cls.name));
         }
 
+        // From template selectors — matches CodeGraph.buildKeywordIndex, so a
+        // file edited during a watch keeps the same searchability as a full scan.
+        for (const selector of node.parsed.templateSelectors ?? []) {
+            keywords.push(...this.splitIdentifier(selector.value));
+        }
+
         return [...new Set(keywords)];
     }
 

@@ -25,7 +25,7 @@ Raiken is a developer-centric CLI tool that uses AI to automatically generate, r
 npm install -g raiken
 ```
 
-Requires **Node.js 18+**
+Requires **Node.js 22.x** (see the workspace `.nvmrc`)
 
 ---
 
@@ -40,36 +40,43 @@ raiken init
 
 This creates a `raiken.config.json` and sets up the test directory.
 
-### 2. Set your API key
+### 2. Configure an AI provider
 
-Raiken uses [OpenRouter](https://openrouter.ai) to access AI models (Claude, GPT-4, etc.).
+The quickest safe setup is the interactive wizard. It lets you choose a provider, enter a key
+without echoing it, pick a model, and saves the result for both the CLI and dashboard:
 
 ```bash
-export OPENROUTER_API_KEY=your_api_key_here
+raiken config
 ```
 
-Or add it to a `.env` file in your project root:
+Raiken supports OpenRouter, OpenAI, Anthropic, Google, Groq, Mistral, DeepSeek, xAI, Together,
+Perplexity, Ollama, and custom OpenAI-compatible endpoints. Ollama does not require an API key.
 
-```
+For automation or CI, use the selected provider's environment variable instead. For example:
+
+```bash
 OPENROUTER_API_KEY=sk-or-v1-your-key-here
 ```
 
-Get a free API key at [openrouter.ai/keys](https://openrouter.ai/keys)
+Put it in your shell environment or a project-local `.env` file. Environment keys take precedence
+over a saved local key, so one CI secret can safely override a developer's local configuration.
 
-Prefer not to touch environment variables? `raiken config` sets the provider, key, and model
-from the terminal (same settings as the dashboard's Settings → AI Provider panel), and supports
-OpenAI, Anthropic, Google, Groq, Mistral, DeepSeek, xAI, Together, Perplexity, Ollama, and any
-custom OpenAI-compatible endpoint — not just OpenRouter:
+Useful non-interactive forms:
 
 ```bash
-raiken config                                    # interactive wizard
-raiken config sk-or-v1-...                       # just paste a key for the current provider
-raiken config --provider openai --api-key sk-...  # switch provider + set its key
-raiken config --list                             # show current setup
+raiken config deepseek                           # switch to DeepSeek and its defaults
+raiken config --provider anthropic --model claude-sonnet-4-5
+raiken config --list                             # show active provider, model, and key source
+raiken config --unset-key                        # remove only the saved local key
 ```
 
-Already set a key in the dashboard's Settings → AI Provider panel? Nothing to do — the CLI reads
-the same `raiken.config.json`, so it's picked up automatically.
+Avoid passing `--api-key` in regular use: command-line arguments may be retained in shell history
+or visible to other local processes. Use `raiken config` or an environment variable instead.
+
+The wizard and dashboard share `raiken.config.json`, which `raiken init` adds to `.gitignore`.
+Never commit this file when it contains a key.
+Raiken remembers local keys per provider, so changing from OpenAI to DeepSeek and back does not
+require entering the OpenAI key again.
 
 ### 3. Start the dashboard
 
@@ -98,7 +105,7 @@ Raiken will:
 | Command | Description |
 |---------|-------------|
 | `raiken init` | Initialize Raiken in your project |
-| `raiken config` | Set the AI provider, API key, and model (interactive wizard, or via flags) |
+| `raiken config` | Set the AI provider, key, model, and endpoint (interactive wizard, or via flags) |
 | `raiken start` | Start the server and dashboard on port 7101 |
 | `raiken start -p 8080` | Start on a custom port |
 
@@ -124,7 +131,10 @@ Create `raiken.config.json` in your project root:
 |--------|------|---------|-------------|
 | `testDirectory` | string | `"e2e"` | Where to save generated tests |
 | `baseUrl` | string | `"http://localhost:3000"` | Your app's development URL |
-| `ai.model` | string | `"anthropic/claude-sonnet-4.5"` | OpenRouter model to use |
+| `ai.provider` | string | `"openrouter"` | AI provider Raiken calls |
+| `ai.model` | string | Provider default | Model identifier |
+| `ai.apiKey` | string | — | Local fallback key; prefer the provider environment variable in CI |
+| `ai.baseURL` | string | Provider default | Endpoint override for local/custom gateways |
 
 ### Supported AI Models
 

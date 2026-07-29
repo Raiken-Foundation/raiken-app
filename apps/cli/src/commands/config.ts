@@ -4,25 +4,23 @@
  * dashboard's Settings → AI Provider panel does (via the same `updateConfig`
  * tRPC procedure, so both surfaces stay in sync and get the same validation).
  *
- * Three ways to use it:
- *   - Flags (scriptable): `raiken config --provider openai --api-key sk-...
- *     --model gpt-4o`, or just `raiken config <key>` to set a key for
- *     whichever provider is already active.
- *   - No flags on a real terminal: the full interactive wizard (provider →
- *     key → base URL → model), mirroring the dashboard panel's flow.
- *   - No flags inside the REPL (`/config`): a shorter REPL-native wizard
- *     (provider → key → model) — see {@link runReplConfigWizard}.
+ * Two intentional paths:
+ *   - Flags are kept for scripts and automation.
+ *   - `raiken config` and `/config` use one guided flow: provider → key →
+ *     model → review/save. Both persist the same per-project configuration
+ *     the dashboard uses.
  */
 
 import {
-    type AIProviderId,
     AI_PROVIDER_IDS,
+    type AIProviderId,
     getProvider,
     listProviderModels,
     listProviders,
     type ModelInfo,
     type ProviderDefinition,
     readApiKeyFromEnv,
+    readRawConfigSync,
     resolveAIConfig,
 } from "@raiken/core";
 import { appRouter } from "@raiken/shared";
@@ -32,6 +30,62 @@ import { accent, dim } from "../agent-stream";
 import { cliExit } from "../repl/exit";
 
 type Caller = ReturnType<typeof appRouter.createCaller>;
+type ReplAsk = (query: string) => Promise<string | null>;
+type StoredProviderKeys = Partial<Record<AIProviderId, string>>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read remembered provider keys while supporting the original one-key config
+ * shape. The active legacy key is folded into the map in memory, so the next
+ * provider change upgrades the file without losing a credential.
+ */
+function readStoredProviderKeys(config: unknown): StoredProviderKeys {
+    if (!isRecord(config) || !isRecord(config.ai)) return {};
+    const ai = config.ai;
+    const keys: StoredProviderKeys = {};
+    if (isRecord(ai.apiKeys)) {
+        for (const providerId of AI_PROVIDER_IDS) {
+            const key = ai.apiKeys[providerId];
+            if (typeof key === "string" && key.trim()) keys[providerId] = key;
+        }
+    }
+
+    const legacyKey = typeof ai.apiKey === "string" && ai.apiKey.trim() ? ai.apiKey : undefined;
+    const activeProvider =
+        typeof ai.provider === "string" &&
+        (AI_PROVIDER_IDS as readonly string[]).includes(ai.provider)
+            ? (ai.provider as AIProviderId)
+            : "openrouter";
+    if (legacyKey && !keys[activeProvider]) keys[activeProvider] = legacyKey;
+    return keys;
+}
+
+function getStoredProviderKeys(projectPath: string): StoredProviderKeys {
+    try {
+        return readStoredProviderKeys(readRawConfigSync(projectPath));
+    } catch {
+        return {};
+    }
+}
+
+function aiConfigWithRememberedKey(
+    ai: Record<string, unknown>,
+    providerId: AIProviderId,
+    keys: StoredProviderKeys,
+): Record<string, unknown> {
+    const key = ai.apiKey;
+    if (typeof key !== "string") return ai;
+    return {
+        ...ai,
+        apiKeys: {
+            ...keys,
+            [providerId]: key,
+        },
+    };
+}
 
 const KNOWN_KEY_PREFIXES = [
     "sk-or-v1-",
@@ -76,6 +130,10 @@ export interface ConfigCommandOptions {
     json?: boolean;
     /** Set by the REPL's `/config` (vs. a standalone `raiken config`). */
     fromRepl?: boolean;
+    /** Internal guided-flow preselection, e.g. `/config deepseek`. */
+    initialProvider?: AIProviderId;
+    /** Internal override used by `raiken init` without changing process.cwd(). */
+    projectPath?: string;
     /**
      * The REPL's own single-line, cancelable prompt (chat.ts's
      * `askCancelable`), used to run {@link runReplConfigWizard} when
@@ -86,7 +144,13 @@ export interface ConfigCommandOptions {
      * instead. Optional: without it, `/config` (no flags) falls back to the
      * static catalog + hint.
      */
-    replAsk?: (query: string) => Promise<string | null>;
+    replAsk?: ReplAsk;
+    /**
+     * A REPL-native prompt that does not echo its answer. The CLI uses this
+     * for API keys when available; tests and non-interactive callers can
+     * safely fall back to {@link replAsk}.
+     */
+    replAskSecret?: ReplAsk;
 }
 
 /**
@@ -95,7 +159,7 @@ export interface ConfigCommandOptions {
  */
 export function buildAiConfigPatch(
     options: ConfigCommandOptions,
-): { patch: Record<string, unknown> } | { error: string } {
+): { patch: Record<string, unknown>; clearSecrets?: string[] } | { error: string } {
     if (options.provider) {
         const id = options.provider.trim().toLowerCase();
         if (!(AI_PROVIDER_IDS as readonly string[]).includes(id)) {
@@ -111,9 +175,10 @@ export function buildAiConfigPatch(
     if (options.provider) patch.provider = options.provider.trim().toLowerCase();
     if (options.model) patch.model = options.model;
     if (options.baseUrl) patch.baseURL = options.baseUrl;
-    // `--unset-key` wins over a simultaneously-passed `--api-key` — clearing
-    // is the more deliberate, less-recoverable action of the two.
-    if (options.unsetKey) patch.apiKey = "";
+    // `--unset-key` wins over a simultaneously-passed `--api-key`. Secrets
+    // use explicit clear instructions so an empty dashboard/CLI draft can
+    // never erase a previously saved credential by accident.
+    if (options.unsetKey) return { patch, clearSecrets: ["ai.apiKey"] };
     else if (options.apiKey) patch.apiKey = options.apiKey;
 
     return { patch };
@@ -124,23 +189,36 @@ export async function configCommand(
     options: ConfigCommandOptions,
 ): Promise<void> {
     if (section && section !== "ai") {
-        // `/config sk-or-v1-...` or `raiken config sk-or-v1-...` — a bare key
-        // with no flags. Treat it as `--api-key` for whichever provider is
-        // already active instead of erroring on an "unknown section". If an
-        // explicit `--api-key` was *also* given, that wins and the redundant
-        // positional is just ignored (rather than treated as an error).
-        if (looksLikeApiKey(section)) {
-            if (!options.apiKey) options = { ...options, apiKey: section };
+        const providerId = section.trim().toLowerCase();
+        if ((AI_PROVIDER_IDS as readonly string[]).includes(providerId)) {
+            // A positional provider starts the guided flow with that provider
+            // selected. Scripts can still use `--provider` for an immediate,
+            // non-interactive update.
+            if (!options.provider) {
+                options = { ...options, initialProvider: providerId as AIProviderId };
+            }
+        } else if (looksLikeApiKey(section)) {
+            console.error(
+                chalk.yellow(
+                    "For security, do not put API keys in command arguments. " +
+                        "Run `raiken config` and paste it into the masked key prompt.",
+                ),
+            );
+            cliExit(1);
+            return;
         } else {
             console.error(
-                chalk.red(`✗ Unknown config section: "${section}". Only "ai" is supported.`),
+                chalk.red(
+                    `✗ Unknown provider or config section: "${section}". ` +
+                        `Use "ai" or a provider id.`,
+                ),
             );
             cliExit(1);
             return;
         }
     }
 
-    const projectPath = process.cwd();
+    const projectPath = options.projectPath ?? process.cwd();
     const caller = appRouter.createCaller({ projectPath });
 
     if (options.list) {
@@ -158,7 +236,13 @@ export async function configCommand(
     }
 
     if (options.fromRepl && options.replAsk) {
-        await runReplConfigWizard(caller, projectPath, options.replAsk);
+        await runReplConfigWizard(
+            caller,
+            projectPath,
+            options.replAsk,
+            options.replAskSecret ?? options.replAsk,
+            options.initialProvider,
+        );
         return;
     }
 
@@ -180,7 +264,7 @@ export async function configCommand(
         return;
     }
 
-    await runInteractiveWizard(caller, projectPath);
+    await runInteractiveWizard(caller, projectPath, options.initialProvider);
 }
 
 async function printProviderList(caller: Caller, json: boolean | undefined): Promise<void> {
@@ -219,14 +303,66 @@ async function applyDirectFlags(
     projectPath: string,
     options: ConfigCommandOptions,
 ): Promise<void> {
-    const built = buildAiConfigPatch(options);
+    const current = resolveAIConfig(projectPath);
+    const storedKeys = getStoredProviderKeys(projectPath);
+    const requestedProviderId = options.provider?.trim().toLowerCase();
+    const requestedProvider =
+        requestedProviderId && (AI_PROVIDER_IDS as readonly string[]).includes(requestedProviderId)
+            ? getProvider(requestedProviderId)
+            : undefined;
+    const switchingProvider = Boolean(
+        requestedProvider && requestedProvider.id !== current.provider,
+    );
+    const rememberedTargetKey = requestedProvider ? storedKeys[requestedProvider.id] : undefined;
+
+    if (requestedProvider?.id === "custom" && switchingProvider && !options.baseUrl) {
+        console.error(
+            chalk.red(
+                "✗ Custom providers require --base-url when switching providers. " +
+                    "Example: raiken config custom --base-url http://localhost:1234/v1 --model my-model",
+            ),
+        );
+        cliExit(1);
+        return;
+    }
+
+    // Provider defaults belong to the provider, not the previous config. On
+    // a direct provider switch, retain an explicitly supplied model/base URL
+    // but otherwise replace stale values with the new provider's defaults.
+    // The config has one shared key slot; clearing a persisted previous key
+    // prevents accidentally sending (say) an OpenRouter key to Anthropic.
+    const effectiveOptions: ConfigCommandOptions =
+        requestedProvider && switchingProvider
+            ? {
+                  ...options,
+                  model: options.model ?? requestedProvider.defaultModel,
+                  baseUrl: options.baseUrl ?? (requestedProvider.defaultBaseURL || undefined),
+                  apiKey: options.apiKey ?? rememberedTargetKey,
+                  unsetKey: options.unsetKey,
+              }
+            : options;
+
+    const built = buildAiConfigPatch(effectiveOptions);
     if ("error" in built) {
         console.error(chalk.red(`✗ ${built.error}`));
         cliExit(1);
         return;
     }
 
-    const result = await caller.updateConfig({ config: { ai: built.patch } });
+    const targetProviderId =
+        typeof built.patch.provider === "string" &&
+        (AI_PROVIDER_IDS as readonly string[]).includes(built.patch.provider)
+            ? (built.patch.provider as AIProviderId)
+            : current.provider;
+    const aiPatch = aiConfigWithRememberedKey(built.patch, targetProviderId, storedKeys);
+    const clearSecrets = [
+        ...(built.clearSecrets ?? []),
+        ...(options.unsetKey ? [`ai.apiKeys.${targetProviderId}`] : []),
+    ];
+    const result = await caller.updateConfig({
+        config: { ai: aiPatch },
+        ...(clearSecrets.length > 0 ? { clearSecrets } : {}),
+    });
     if (!result.success) {
         console.error(chalk.red("\n✗ Invalid configuration:"));
         for (const err of result.errors ?? []) console.error(chalk.red(`  - ${err}`));
@@ -271,6 +407,14 @@ async function applyDirectFlags(
             ),
         );
     }
+    if (options.apiKey) {
+        console.error(
+            chalk.yellow(
+                "  ⚠ This key was supplied on the command line, so it may be visible in your shell history " +
+                    "or process list. Prefer `raiken config` (interactive) or an environment variable next time.",
+            ),
+        );
+    }
     console.log(dim("\n  Run `raiken status` to verify.\n"));
 }
 
@@ -279,166 +423,315 @@ function maskApiKey(key: string): string {
     return `${key.slice(0, 4)}${"•".repeat(6)}${key.slice(-4)}`;
 }
 
-async function runInteractiveWizard(caller: Caller, projectPath: string): Promise<void> {
-    const { select, input, password, confirm } = await import("@inquirer/prompts");
+type ProviderKeyState =
+    | { kind: "environment"; label: string; envVar: string }
+    | { kind: "saved"; label: string; key: string }
+    | { kind: "not-required"; label: string }
+    | { kind: "missing"; label: string };
+
+interface ProviderSetupOption {
+    provider: ProviderDefinition;
+    keyState: ProviderKeyState;
+}
+
+interface ModelPrompt {
+    provider: ProviderDefinition;
+    models: ModelInfo[];
+    defaultModel: string;
+    fetchError?: string;
+    showingRecommendedOnly: boolean;
+}
+
+interface SetupSummary {
+    provider: ProviderDefinition;
+    model: string;
+    baseURL?: string;
+    keyDescription: string;
+}
+
+interface GuidedSetupPrompts {
+    chooseProvider: (input: {
+        providers: ProviderSetupOption[];
+        currentProvider: AIProviderId;
+        initialProvider?: AIProviderId;
+    }) => Promise<AIProviderId | null>;
+    confirmSavedKey: (provider: ProviderDefinition, key: string) => Promise<boolean | null>;
+    askApiKey: (provider: ProviderDefinition) => Promise<string | null>;
+    askBaseURL: (provider: ProviderDefinition, initialValue?: string) => Promise<string | null>;
+    chooseModel: (input: ModelPrompt) => Promise<string | null>;
+    confirmSave: (summary: SetupSummary) => Promise<boolean | null>;
+    fetchModels: (
+        load: () => Promise<{ models: ModelInfo[]; error?: string }>,
+    ) => Promise<{ models: ModelInfo[]; error?: string }>;
+    message: (message: string) => void;
+}
+
+function getProviderKeyState(
+    provider: ProviderDefinition,
+    storedKeys: StoredProviderKeys,
+): ProviderKeyState {
+    if (provider.envVars.length === 0) {
+        return { kind: "not-required", label: "no key needed" };
+    }
+    const envKey = readApiKeyFromEnv(provider.id);
+    if (envKey) {
+        return {
+            kind: "environment",
+            label: `using ${provider.envVars[0]}`,
+            envVar: provider.envVars[0],
+        };
+    }
+    const savedKey = storedKeys[provider.id];
+    if (savedKey) {
+        return { kind: "saved", label: "saved in this project", key: savedKey };
+    }
+    return { kind: "missing", label: "needs a key" };
+}
+
+/**
+ * One provider/key/model/save state machine shared by `raiken config` and
+ * `/config`. The two entry points only supply terminal-specific prompt
+ * adapters, so they cannot drift into different setup experiences.
+ */
+async function runGuidedConfigWizard(
+    caller: Caller,
+    projectPath: string,
+    prompts: GuidedSetupPrompts,
+    initialProvider?: AIProviderId,
+): Promise<void> {
     const current = resolveAIConfig(projectPath);
-    const currentProvider = getProvider(current.provider);
-
-    console.log(accent("\n  Configure AI provider"));
-    console.log(
-        dim(
-            `  Current: ${currentProvider.label} · ${current.model} · key ` +
-                `${current.apiKey ? `configured (${current.apiKeySource})` : "missing"}\n`,
-        ),
-    );
-
-    const providerId = await select<AIProviderId>({
-        message: "AI provider",
-        default: current.provider,
-        choices: listProviders().map((p) => ({
-            name: `${p.label}${p.id === current.provider ? "  (current)" : ""}`,
-            value: p.id,
-            description: p.description,
-        })),
+    const storedKeys = getStoredProviderKeys(projectPath);
+    const providers = listProviders();
+    const providerOptions = providers.map((provider) => ({
+        provider,
+        keyState: getProviderKeyState(provider, storedKeys),
+    }));
+    const providerId = await prompts.chooseProvider({
+        providers: providerOptions,
+        currentProvider: current.provider,
+        initialProvider,
     });
+    if (!providerId) return;
 
     const provider = getProvider(providerId);
-    const switchedProvider = providerId !== current.provider;
-    const envKey = readApiKeyFromEnv(provider.id);
-
-    // undefined => omit `apiKey` from the patch entirely (leave the saved
-    // value on disk untouched). Only ever set to a string we either just
-    // typed or are deliberately clearing — never to an env-sourced value,
-    // which would silently write an environment secret into
-    // raiken.config.json.
+    const switchedProvider = provider.id !== current.provider;
+    const keyState = getProviderKeyState(provider, storedKeys);
     let apiKeyPatch: string | undefined;
+    let keyDescription: string;
 
-    if (provider.envVars.length === 0) {
-        console.log(dim(`  ${provider.label} doesn't require an API key.`));
-        if (switchedProvider) apiKeyPatch = "";
-    } else {
-        if (envKey) {
-            console.log(
-                dim(
-                    `  ${provider.envVars[0]} is set in your environment — it will be used at ` +
-                        "runtime regardless of what you save here.",
-                ),
-            );
-        }
-        const wantsKey = await confirm({
-            message: envKey
-                ? "Save a key in raiken.config.json anyway (e.g. so the dashboard can use it too)?"
-                : "Set an API key now?",
-            default: !envKey,
-        });
-        if (wantsKey) {
-            const entered = await password({
-                message: `API key${provider.apiKeyPlaceholder ? ` (format: ${provider.apiKeyPlaceholder})` : ""}`,
-                mask: "*",
-            });
-            apiKeyPatch = entered.trim();
-            if (!apiKeyPatch && provider.apiKeyUrl) {
-                console.log(dim(`  Get a key at: ${provider.apiKeyUrl}`));
+    if (keyState.kind === "not-required") {
+        apiKeyPatch = switchedProvider ? "" : undefined;
+        keyDescription = "not required";
+        prompts.message(`${provider.label} does not require an API key.`);
+    } else if (keyState.kind === "environment") {
+        // Never copy environment credentials into raiken.config.json.
+        apiKeyPatch = switchedProvider ? "" : undefined;
+        keyDescription = `using ${keyState.envVar} from your environment`;
+        prompts.message(
+            `${keyState.envVar} is set. Raiken will use it without saving it to this project.`,
+        );
+    } else if (keyState.kind === "saved") {
+        const keepSavedKey = await prompts.confirmSavedKey(provider, keyState.key);
+        if (keepSavedKey === null) return;
+        if (keepSavedKey) {
+            apiKeyPatch = switchedProvider ? keyState.key : undefined;
+            keyDescription = "saved in this project's gitignored raiken.config.json";
+        } else {
+            const replacement = await prompts.askApiKey(provider);
+            if (replacement === null) return;
+            if (!replacement.trim()) {
+                prompts.message("No replacement key was entered. Setup was not changed.");
+                return;
             }
-        } else if (switchedProvider) {
-            // The saved `apiKey` field is shared across providers — leaving
-            // a stale key here would resolve as this (wrong) provider's key.
-            apiKeyPatch = "";
+            apiKeyPatch = replacement.trim();
+            keyDescription = "will be saved in this project's gitignored raiken.config.json";
         }
+    } else {
+        const entered = await prompts.askApiKey(provider);
+        if (entered === null) return;
+        apiKeyPatch = entered.trim() || undefined;
+        keyDescription = entered.trim()
+            ? "will be saved in this project's gitignored raiken.config.json"
+            : "not set — AI requests will not run until a key is added";
     }
 
     let baseURL = switchedProvider ? provider.defaultBaseURL || undefined : current.baseURL;
-    const isCustomProvider = provider.id === "custom";
-    const needsBaseURLPrompt =
-        isCustomProvider ||
-        (await confirm({
-            message: baseURL
-                ? `Override the base URL? (current: ${baseURL})`
-                : "Set a custom base URL?",
-            default: isCustomProvider,
-        }));
-    if (needsBaseURLPrompt) {
-        baseURL = await input({
-            message: "Base URL",
-            default: baseURL || provider.defaultBaseURL || undefined,
-            validate: (value) => (value.trim() ? true : "Base URL is required"),
-        });
+    if (provider.id === "custom") {
+        const enteredBaseURL = await prompts.askBaseURL(provider, baseURL);
+        if (enteredBaseURL === null) return;
+        if (!enteredBaseURL.trim()) {
+            prompts.message("A base URL is required for a custom provider. Setup was not changed.");
+            return;
+        }
+        baseURL = enteredBaseURL.trim();
     }
 
-    let model = switchedProvider ? provider.defaultModel : current.model;
+    const defaultModel = switchedProvider ? provider.defaultModel : current.model;
     const effectiveApiKey =
-        apiKeyPatch || envKey || (switchedProvider ? undefined : current.apiKey);
-    const spinner = ora({ text: "Fetching available models…", spinner: "dots" }).start();
-    const { models, error } = await listProviderModels({
-        provider: provider.id,
-        apiKey: effectiveApiKey,
-        baseURL,
-    });
-    if (error) spinner.warn(dim(`Could not fetch live models: ${error}`));
-    else spinner.stop();
+        apiKeyPatch ||
+        (keyState.kind === "environment" ? readApiKeyFromEnv(provider.id) : undefined) ||
+        (keyState.kind === "saved" ? keyState.key : undefined) ||
+        (switchedProvider ? undefined : current.apiKey);
+    const canFetchLiveModels = provider.publicCatalog || Boolean(effectiveApiKey);
+    let models = provider.recommendedModels;
+    let fetchError: string | undefined;
 
-    if (models.length > 0) {
-        const MANUAL = "__manual__";
-        const picked = await select({
-            message: "Model",
-            default: models.some((m) => m.id === model) ? model : models[0]?.id,
-            choices: [
-                ...models.map((m) => ({
-                    name: m.description ? `${m.name}  ${dim(m.description)}` : m.name,
-                    value: m.id,
-                })),
-                { name: "Enter manually…", value: MANUAL },
-            ],
-        });
-        model =
-            picked === MANUAL
-                ? await input({ message: "Model id", default: model || provider.defaultModel })
-                : picked;
+    if (canFetchLiveModels) {
+        const catalog = await prompts.fetchModels(() =>
+            listProviderModels({ provider: provider.id, apiKey: effectiveApiKey, baseURL }),
+        );
+        if (catalog.models.length > 0) models = catalog.models;
+        fetchError = catalog.error;
     } else {
-        model = await input({ message: "Model id", default: model || provider.defaultModel });
+        prompts.message(
+            "No key is configured yet, so Raiken is showing recommended models. You can change this later.",
+        );
     }
 
-    console.log(accent("\n  Summary"));
-    console.log(dim(`  Provider   ${provider.label} (${provider.id})`));
-    console.log(dim(`  Model      ${model}`));
-    console.log(dim(`  Base URL   ${baseURL || provider.defaultBaseURL || "(none)"}`));
-    console.log(
-        dim("  API key    ") +
-            (apiKeyPatch
-                ? maskApiKey(apiKeyPatch)
-                : envKey
-                  ? "(using env var)"
-                  : current.apiKey && !switchedProvider
-                    ? maskApiKey(current.apiKey)
-                    : "(none)"),
-    );
+    const model = await prompts.chooseModel({
+        provider,
+        models: shortlistModels(models, provider.recommendedModels, defaultModel),
+        defaultModel,
+        fetchError,
+        showingRecommendedOnly: !canFetchLiveModels || Boolean(fetchError),
+    });
+    if (model === null) return;
 
-    const proceed = await confirm({ message: "Save this configuration?", default: true });
-    if (!proceed) {
-        console.log(dim("\n  Not saved.\n"));
+    const shouldSave = await prompts.confirmSave({
+        provider,
+        model,
+        baseURL,
+        keyDescription,
+    });
+    if (shouldSave === null || !shouldSave) {
+        prompts.message("Setup was not changed.");
         return;
     }
 
     const result = await caller.updateConfig({
         config: {
-            ai: {
-                provider: provider.id,
-                model,
-                ...(baseURL ? { baseURL } : {}),
-                ...(apiKeyPatch !== undefined ? { apiKey: apiKeyPatch } : {}),
-            },
+            ai: aiConfigWithRememberedKey(
+                {
+                    provider: provider.id,
+                    model,
+                    ...(baseURL ? { baseURL } : {}),
+                    ...(apiKeyPatch !== undefined ? { apiKey: apiKeyPatch } : {}),
+                },
+                provider.id,
+                storedKeys,
+            ),
         },
     });
-
     if (!result.success) {
-        console.log(chalk.red("\n✗ Invalid configuration:"));
-        for (const err of result.errors ?? []) console.log(chalk.red(`  - ${err}`));
-        cliExit(1);
+        prompts.message("Invalid configuration:");
+        for (const error of result.errors ?? []) prompts.message(`  - ${error}`);
         return;
     }
 
-    console.log(chalk.green("\n✓ Saved to raiken.config.json"));
-    console.log(dim("  Run `raiken status` to verify.\n"));
+    prompts.message(
+        "✓ AI setup saved to this project's gitignored raiken.config.json. " +
+            "The dashboard uses this same setting.",
+    );
+}
+
+async function runInteractiveWizard(
+    caller: Caller,
+    projectPath: string,
+    initialProvider?: AIProviderId,
+): Promise<void> {
+    const { confirm, input, password, select } = await import("@inquirer/prompts");
+    await runGuidedConfigWizard(
+        caller,
+        projectPath,
+        {
+            chooseProvider: async ({ providers, currentProvider, initialProvider: initial }) =>
+                select<AIProviderId>({
+                    message: "1 of 4 — Choose an AI provider",
+                    default: initial ?? currentProvider,
+                    choices: providers.map(({ provider, keyState }) => ({
+                        name: `${provider.label} — ${keyState.label}`,
+                        value: provider.id,
+                        description: provider.description,
+                    })),
+                }),
+            confirmSavedKey: async (provider, key) =>
+                confirm({
+                    message: `2 of 4 — Keep the saved ${provider.label} key (${maskApiKey(key)})?`,
+                    default: true,
+                }),
+            askApiKey: async (provider) =>
+                password({
+                    message:
+                        `2 of 4 — Paste your ${provider.label} API key ` +
+                        "(saved only in this project's gitignored raiken.config.json; Enter to skip)",
+                    mask: "*",
+                }),
+            askBaseURL: async (provider, initialValue) =>
+                input({
+                    message: `Custom endpoint for ${provider.label}`,
+                    default: initialValue || undefined,
+                    validate: (value) => (value.trim() ? true : "Base URL is required"),
+                }),
+            chooseModel: async ({
+                provider,
+                models,
+                defaultModel,
+                fetchError,
+                showingRecommendedOnly,
+            }) => {
+                if (fetchError) {
+                    console.log(
+                        chalk.yellow(
+                            `  Couldn't load ${provider.label}'s live catalog. Showing recommended models instead.`,
+                        ),
+                    );
+                } else if (showingRecommendedOnly) {
+                    console.log(
+                        dim("  Recommended models are shown until an API key is configured."),
+                    );
+                }
+                const manual = "__manual__";
+                const selected = await select({
+                    message: "3 of 4 — Choose a model",
+                    default: models.some((model) => model.id === defaultModel)
+                        ? defaultModel
+                        : (models[0]?.id ?? manual),
+                    choices: [
+                        ...models.map((model) => ({
+                            name: model.description
+                                ? `${model.name} — ${model.description}`
+                                : model.name,
+                            value: model.id,
+                        })),
+                        { name: "Enter a model ID manually", value: manual },
+                    ],
+                });
+                return selected === manual
+                    ? input({ message: "Model ID", default: defaultModel })
+                    : selected;
+            },
+            confirmSave: async (summary) => {
+                console.log(accent("\n  4 of 4 — Review"));
+                console.log(dim(`  Provider   ${summary.provider.label}`));
+                console.log(dim(`  Model      ${summary.model}`));
+                if (summary.baseURL) console.log(dim(`  Endpoint   ${summary.baseURL}`));
+                console.log(dim(`  API key    ${summary.keyDescription}`));
+                return confirm({ message: "Save this configuration?", default: true });
+            },
+            fetchModels: async (load) => {
+                const spinner = ora({
+                    text: "Checking available models…",
+                    spinner: "dots",
+                }).start();
+                const result = await load();
+                if (result.error) spinner.stop();
+                else spinner.succeed("Models ready");
+                return result;
+            },
+            message: (message) => console.log(dim(`  ${message}`)),
+        },
+        initialProvider,
+    );
 }
 
 /** Match a `/config` provider-picker answer against a 1-based index or a provider id. */
@@ -474,6 +767,46 @@ function resolveModelAnswer(answer: string, models: ModelInfo[], defaultModel: s
     return trimmed;
 }
 
+function truncate(text: string, max: number): string {
+    return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+const MODEL_SHORTLIST_CAP = 12;
+
+/**
+ * Picks a terminal-friendly subset of `models` to print as a numbered list.
+ * Providers with a small catalog (most of them) just get everything back
+ * unchanged. Providers with a large public catalog (OpenRouter returns
+ * 300+) get the provider's own hand-curated `recommendedModels` first —
+ * matched by id, since a model already present in the live results keeps
+ * `source: "live"` after the live/recommended merge — padded out to the
+ * cap with whatever else came back live. Anything not shown is still
+ * reachable by typing its id directly at the prompt.
+ */
+function shortlistModels(
+    models: ModelInfo[],
+    recommended: ModelInfo[],
+    defaultModel: string,
+): ModelInfo[] {
+    if (models.length <= MODEL_SHORTLIST_CAP) return models;
+    const recommendedIds = new Set(recommended.map((m) => m.id));
+    const byId = new Map(models.map((m) => [m.id, m]));
+    const shortlist: ModelInfo[] = [];
+    const used = new Set<string>();
+    const add = (m: ModelInfo | undefined) => {
+        if (!m || used.has(m.id)) return;
+        used.add(m.id);
+        shortlist.push(m);
+    };
+    add(byId.get(defaultModel));
+    for (const id of recommendedIds) add(byId.get(id) ?? recommended.find((m) => m.id === id));
+    for (const m of models) {
+        if (shortlist.length >= MODEL_SHORTLIST_CAP) break;
+        add(m);
+    }
+    return shortlist;
+}
+
 /**
  * `/config` with no flags, run from inside the live REPL. A shorter version
  * of {@link runInteractiveWizard} (provider → key → model; base URL is only
@@ -486,149 +819,113 @@ function resolveModelAnswer(answer: string, models: ModelInfo[], defaultModel: s
 export async function runReplConfigWizard(
     caller: Caller,
     projectPath: string,
-    ask: (query: string) => Promise<string | null>,
+    ask: ReplAsk,
+    askSecret: ReplAsk = ask,
+    initialProvider?: AIProviderId,
 ): Promise<void> {
-    const current = resolveAIConfig(projectPath);
-    const currentProvider = getProvider(current.provider);
-    const providers = listProviders();
-
-    console.log(accent("\n  Configure AI provider"));
-    console.log(
-        dim(
-            `  Current: ${currentProvider.label} · ${current.model} · key ` +
-                `${current.apiKey ? `configured (${current.apiKeySource})` : "missing"}\n`,
-        ),
-    );
-    providers.forEach((p, i) => {
-        const marker = p.id === current.provider ? accent("›") : " ";
-        console.log(`  ${marker} ${dim(`${i + 1}.`.padEnd(4))}${p.label.padEnd(24)} ${dim(p.id)}`);
-    });
-
-    const providerAnswer = await ask(
-        dim(`\n  Provider [1-${providers.length}, id, or Enter to keep it] › `),
-    );
-    if (providerAnswer === null) return;
-    const providerId = resolveProviderAnswer(providerAnswer, providers, current.provider);
-    if (!providerId) {
-        console.log(chalk.red(`  Unknown provider: "${providerAnswer.trim()}". Not saved.\n`));
-        return;
-    }
-    const provider = getProvider(providerId);
-    const switchedProvider = providerId !== current.provider;
-
-    // undefined => omit `apiKey` from the patch entirely (leave the saved
-    // value on disk untouched); see the identical comment in
-    // `runInteractiveWizard` for why it's never set to an env-sourced value.
-    let apiKeyPatch: string | undefined;
-    const envKey = readApiKeyFromEnv(provider.id);
-
-    if (provider.envVars.length === 0) {
-        console.log(dim(`  ${provider.label} doesn't require an API key.`));
-        if (switchedProvider) apiKeyPatch = "";
-    } else {
-        if (envKey) {
-            console.log(
-                dim(
-                    `  ${provider.envVars[0]} is set in your environment — it will be used at ` +
-                        "runtime regardless of what you save here.",
-                ),
-            );
-        }
-        const keyAnswer = await ask(
-            dim(
-                `  API key${provider.apiKeyPlaceholder ? ` (${provider.apiKeyPlaceholder})` : ""} ` +
-                    "[Enter to skip] › ",
-            ),
-        );
-        if (keyAnswer === null) return;
-        if (keyAnswer.trim()) {
-            apiKeyPatch = keyAnswer.trim();
-        } else if (switchedProvider && current.apiKey && !envKey) {
-            // The saved `apiKey` field is shared across providers — leaving
-            // a stale key here would resolve as this (wrong) provider's key.
-            apiKeyPatch = "";
-        }
-    }
-
-    let baseURL = switchedProvider ? provider.defaultBaseURL || undefined : current.baseURL;
-    if (provider.id === "custom") {
-        const baseUrlAnswer = await ask(dim("  Base URL (required for a custom endpoint) › "));
-        if (baseUrlAnswer === null) return;
-        if (!baseUrlAnswer.trim()) {
-            console.log(chalk.red("  Base URL is required for a custom endpoint. Not saved.\n"));
-            return;
-        }
-        baseURL = baseUrlAnswer.trim();
-    }
-
-    const defaultModel = switchedProvider ? provider.defaultModel : current.model;
-    const effectiveApiKey = apiKeyPatch || envKey || (switchedProvider ? undefined : current.apiKey);
-    const spinner = ora({ text: "Fetching available models…", spinner: "dots" }).start();
-    const { models, error } = await listProviderModels({
-        provider: provider.id,
-        apiKey: effectiveApiKey,
-        baseURL,
-    });
-    if (error) spinner.warn(dim(`Could not fetch live models: ${error}`));
-    else spinner.stop();
-
-    let model: string;
-    if (models.length > 0) {
-        models.forEach((m, i) => {
-            const marker = m.id === defaultModel ? accent("›") : " ";
-            const label = m.description ? `${m.name}  ${dim(m.description)}` : m.name;
-            console.log(`  ${marker} ${dim(`${i + 1}.`.padEnd(4))}${label}`);
-        });
-        const modelAnswer = await ask(
-            dim(`\n  Model [1-${models.length}, id, or Enter for ${defaultModel}] › `),
-        );
-        if (modelAnswer === null) return;
-        model = resolveModelAnswer(modelAnswer, models, defaultModel);
-    } else {
-        const modelAnswer = await ask(dim(`  Model [Enter for ${defaultModel}] › `));
-        if (modelAnswer === null) return;
-        model = modelAnswer.trim() || defaultModel;
-    }
-
-    console.log(accent("\n  Summary"));
-    console.log(dim(`  Provider   ${provider.label} (${provider.id})`));
-    console.log(dim(`  Model      ${model}`));
-    if (baseURL) console.log(dim(`  Base URL   ${baseURL}`));
-    console.log(
-        dim("  API key    ") +
-            (apiKeyPatch
-                ? maskApiKey(apiKeyPatch)
-                : envKey
-                  ? "(using env var)"
-                  : current.apiKey && !switchedProvider
-                    ? maskApiKey(current.apiKey)
-                    : "(none)"),
-    );
-
-    const confirmAnswer = await ask(dim("\n  Save this configuration? [Y/n] › "));
-    if (confirmAnswer === null) return;
-    if (["n", "no"].includes(confirmAnswer.trim().toLowerCase())) {
-        console.log(dim("  Not saved.\n"));
-        return;
-    }
-
-    const result = await caller.updateConfig({
-        config: {
-            ai: {
-                provider: provider.id,
-                model,
-                ...(baseURL ? { baseURL } : {}),
-                ...(apiKeyPatch !== undefined ? { apiKey: apiKeyPatch } : {}),
+    await runGuidedConfigWizard(
+        caller,
+        projectPath,
+        {
+            chooseProvider: async ({ providers, currentProvider, initialProvider: initial }) => {
+                console.log(accent("\n  1 of 4 — Choose an AI provider"));
+                providers.forEach(({ provider, keyState }, index) => {
+                    const marker = provider.id === (initial ?? currentProvider) ? accent("›") : " ";
+                    console.log(
+                        `  ${marker} ${dim(`${index + 1}.`.padEnd(4))}` +
+                            `${provider.label.padEnd(24)} ${dim(keyState.label)}`,
+                    );
+                });
+                const answer = await ask(
+                    dim(
+                        `\n  Provider [1-${providers.length}, id, or Enter to keep ${initial ?? currentProvider}] › `,
+                    ),
+                );
+                if (answer === null) return null;
+                const providerId = resolveProviderAnswer(
+                    answer,
+                    providers.map(({ provider }) => provider),
+                    initial ?? currentProvider,
+                );
+                if (!providerId) {
+                    console.log(
+                        chalk.red(`  Unknown provider: "${answer.trim()}". Setup was not changed.`),
+                    );
+                }
+                return providerId;
             },
+            confirmSavedKey: async (provider, key) => {
+                const answer = await ask(
+                    dim(
+                        `  2 of 4 — Keep the saved ${provider.label} key (${maskApiKey(key)})? [Y/n] › `,
+                    ),
+                );
+                if (answer === null) return null;
+                return !["n", "no"].includes(answer.trim().toLowerCase());
+            },
+            askApiKey: (provider) =>
+                askSecret(
+                    dim(
+                        `  2 of 4 — Paste your ${provider.label} API key ` +
+                            "(saved only in this project's gitignored raiken.config.json; Enter to skip) › ",
+                    ),
+                ),
+            askBaseURL: (provider, initialValue) =>
+                ask(
+                    dim(
+                        `  Custom endpoint for ${provider.label}` +
+                            `${initialValue ? ` [${initialValue}]` : ""} › `,
+                    ),
+                ).then((answer) => answer?.trim() || initialValue || ""),
+            chooseModel: async ({
+                provider,
+                models,
+                defaultModel,
+                fetchError,
+                showingRecommendedOnly,
+            }) => {
+                if (fetchError) {
+                    console.log(
+                        chalk.yellow(
+                            `  Couldn't load ${provider.label}'s live catalog. Showing recommended models instead.`,
+                        ),
+                    );
+                } else if (showingRecommendedOnly) {
+                    console.log(
+                        dim("  Recommended models are shown until an API key is configured."),
+                    );
+                }
+                models.forEach((model, index) => {
+                    const marker = model.id === defaultModel ? accent("›") : " ";
+                    const label = model.description
+                        ? `${model.name}  ${dim(truncate(model.description, 70))}`
+                        : model.name;
+                    console.log(`  ${marker} ${dim(`${index + 1}.`.padEnd(4))}${label}`);
+                });
+                const answer = await ask(
+                    dim(
+                        `\n  3 of 4 — Model [1-${models.length}, id, or Enter for ${defaultModel}] › `,
+                    ),
+                );
+                if (answer === null) return null;
+                return resolveModelAnswer(answer, models, defaultModel);
+            },
+            confirmSave: async (summary) => {
+                console.log(accent("\n  4 of 4 — Review"));
+                console.log(dim(`  Provider   ${summary.provider.label}`));
+                console.log(dim(`  Model      ${summary.model}`));
+                if (summary.baseURL) console.log(dim(`  Endpoint   ${summary.baseURL}`));
+                console.log(dim(`  API key    ${summary.keyDescription}`));
+                const answer = await ask(dim("\n  Save this configuration? [Y/n] › "));
+                if (answer === null) return null;
+                return !["n", "no"].includes(answer.trim().toLowerCase());
+            },
+            fetchModels: async (load) => {
+                console.log(dim("  Checking available models…"));
+                return load();
+            },
+            message: (message) => console.log(dim(`  ${message}`)),
         },
-    });
-
-    if (!result.success) {
-        console.log(chalk.red("\n✗ Invalid configuration:"));
-        for (const err of result.errors ?? []) console.log(chalk.red(`  - ${err}`));
-        return;
-    }
-
-    console.log(chalk.green("\n✓ Saved to raiken.config.json"));
-    console.log(dim("  Run `raiken status` to verify.\n"));
+        initialProvider,
+    );
 }

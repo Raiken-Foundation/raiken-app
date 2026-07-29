@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
+import { fetchServerArtifact } from "../utils/api-auth";
 
 // Helper function to strip ANSI codes from error messages
 function stripAnsiCodes(str: string): string {
@@ -16,6 +17,106 @@ function safeMarkdownHref(href: string | undefined): string | null {
     } catch {
         return null;
     }
+}
+
+function AuthenticatedArtifactImage({ path, name }: { path: string; name: string }) {
+    const [objectUrl, setObjectUrl] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        let loadedUrl: string | null = null;
+        setObjectUrl(null);
+        setError(null);
+
+        void fetchServerArtifact(path, controller.signal)
+            .then((blob) => {
+                if (controller.signal.aborted) return;
+                loadedUrl = URL.createObjectURL(blob);
+                setObjectUrl(loadedUrl);
+            })
+            .catch((loadError) => {
+                if (controller.signal.aborted) return;
+                setError(
+                    loadError instanceof Error ? loadError.message : "Unable to load artifact",
+                );
+            });
+
+        return () => {
+            controller.abort();
+            if (loadedUrl) URL.revokeObjectURL(loadedUrl);
+        };
+    }, [path]);
+
+    if (error) {
+        return (
+            <div className="placeholder-image artifact-load-error" role="alert">
+                {error}
+            </div>
+        );
+    }
+    if (!objectUrl) {
+        return (
+            <output className="placeholder-image" aria-label={`Loading ${name}`}>
+                Loading…
+            </output>
+        );
+    }
+    return <img src={objectUrl} alt={name} />;
+}
+
+function AuthenticatedArtifactLink({
+    path,
+    label,
+    fileName,
+}: {
+    path: string;
+    label: string;
+    fileName: string;
+}) {
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const handleOpen = async () => {
+        if (isLoading) return;
+        setIsLoading(true);
+        setError(null);
+        let popup: Window | null = null;
+
+        try {
+            popup = window.open("about:blank", "_blank");
+            if (popup) popup.opener = null;
+            const blob = await fetchServerArtifact(path);
+            const objectUrl = URL.createObjectURL(blob);
+            if (popup) {
+                popup.location.assign(objectUrl);
+            } else {
+                const download = document.createElement("a");
+                download.href = objectUrl;
+                download.download = fileName;
+                download.click();
+            }
+            window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        } catch (openError) {
+            popup?.close();
+            setError(openError instanceof Error ? openError.message : "Unable to load artifact");
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    return (
+        <button
+            type="button"
+            className="view-btn"
+            onClick={handleOpen}
+            disabled={isLoading}
+            title={error ?? undefined}
+            aria-label={error ? `${label}: ${error}` : label}
+        >
+            {isLoading ? "Loading…" : error ? "Retry" : label}
+        </button>
+    );
 }
 
 export interface TestAttachment {
@@ -536,9 +637,9 @@ export function TestResults({
                                                         >
                                                             <div className="artifact-preview">
                                                                 {s.path ? (
-                                                                    <img
-                                                                        src={`/api/artifact?path=${encodeURIComponent(s.path)}`}
-                                                                        alt={s.name}
+                                                                    <AuthenticatedArtifactImage
+                                                                        path={s.path}
+                                                                        name={s.name}
                                                                     />
                                                                 ) : (
                                                                     <div className="placeholder-image">
@@ -607,14 +708,11 @@ export function TestResults({
                                                                 </span>
                                                             </div>
                                                             {v.path && (
-                                                                <a
-                                                                    href={`/api/artifact?path=${encodeURIComponent(v.path)}`}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="view-btn"
-                                                                >
-                                                                    View
-                                                                </a>
+                                                                <AuthenticatedArtifactLink
+                                                                    path={v.path}
+                                                                    label="View"
+                                                                    fileName={v.name}
+                                                                />
                                                             )}
                                                         </div>
                                                     ))}
@@ -661,14 +759,11 @@ export function TestResults({
                                                                 </span>
                                                             </div>
                                                             {t.path && (
-                                                                <a
-                                                                    href={`/api/artifact?path=${encodeURIComponent(t.path)}`}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="view-btn"
-                                                                >
-                                                                    Open Trace Viewer
-                                                                </a>
+                                                                <AuthenticatedArtifactLink
+                                                                    path={t.path}
+                                                                    label="Open Trace"
+                                                                    fileName={t.name}
+                                                                />
                                                             )}
                                                         </div>
                                                     ))}
@@ -717,6 +812,13 @@ export function TestResults({
                                                             <span className="item-type">
                                                                 {o.contentType}
                                                             </span>
+                                                            {o.path && (
+                                                                <AuthenticatedArtifactLink
+                                                                    path={o.path}
+                                                                    label="Open"
+                                                                    fileName={o.name}
+                                                                />
+                                                            )}
                                                         </div>
                                                     ))}
                                                 </div>
@@ -1755,6 +1857,16 @@ export function TestResults({
           background: var(--bg-hover);
           color: var(--accent);
           border-color: var(--accent-dim);
+        }
+        .view-btn:disabled {
+          cursor: wait;
+          opacity: 0.65;
+        }
+        .artifact-load-error {
+          padding: 0.75rem;
+          color: var(--danger);
+          font-size: 10.5px;
+          text-align: center;
         }
 
         .success-message {

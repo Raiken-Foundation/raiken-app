@@ -141,6 +141,7 @@ export async function classifyInterruption(
     // should be accepted for a single-field form. False during initial page
     // detection, where `userPrompt` is the original goal.
     isReply = false,
+    presetValues: Record<string, string> = {},
 ): Promise<InterruptionInfo | null> {
     const classificationPrompt = buildUserPrompt(pageTitle, elements, signals);
 
@@ -184,7 +185,7 @@ export async function classifyInterruption(
             userPrompt,
             conversationHistory,
             model,
-            { isReply },
+            { isReply, presetValues },
         );
         const unmet = requestedFields.filter((f) => !mapped.values[f.key]);
         info.requiresUser = requestedFields.length === 0 || unmet.length > 0;
@@ -237,7 +238,7 @@ export async function mapValuesToFields(
     userPrompt: string,
     conversationHistory: Array<{ role: string; content: string }>,
     model: BaseChatModel,
-    options: { isReply?: boolean } = {},
+    options: { isReply?: boolean; presetValues?: Record<string, string> } = {},
 ): Promise<{ values: Record<string, string> }> {
     const recentMessages = conversationHistory
         .slice(-6)
@@ -284,7 +285,13 @@ ${recentMessages}
 
 Current message: ${userPrompt}`;
 
-    const values: Record<string, string> = {};
+    const values: Record<string, string> = { ...options.presetValues };
+    if (
+        requestedFields.length > 0 &&
+        requestedFields.every((field) => Boolean(values[field.key]))
+    ) {
+        return { values };
+    }
     try {
         const structured = model.withStructuredOutput(schema, { name: "map_values_to_fields" });
         const result = (await structured.invoke(

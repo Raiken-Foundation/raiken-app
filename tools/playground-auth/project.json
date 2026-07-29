@@ -1,0 +1,45 @@
+{
+    "name": "@raiken/playground-auth",
+    "$schema": "../../node_modules/nx/schemas/project-schema.json",
+    "sourceRoot": "tools/playground-auth/src",
+    "projectType": "application",
+    "tags": ["type:fixture", "scope:playground"],
+    "targets": {
+        "serve": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-auth",
+                "command": "pnpm dev"
+            }
+        },
+        "auth-wall": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-auth",
+                "command": "pnpm serve"
+            }
+        },
+        "build": {
+            "executor": "nx:run-commands",
+            "outputs": ["{projectRoot}/dist"],
+            "options": {
+                "cwd": "tools/playground-auth",
+                "command": "pnpm build"
+            }
+        },
+        "typecheck": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-auth",
+                "command": "pnpm typecheck"
+            }
+        },
+        "test:e2e": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-auth",
+                "command": "pnpm test:e2e"
+            }
+        }
+    }
+}

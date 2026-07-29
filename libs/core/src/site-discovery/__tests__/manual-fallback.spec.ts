@@ -58,6 +58,7 @@ function makePage(opts: {
         reachableOutside: number;
         looksLikeAppShell: boolean;
     } | null;
+    consentBlocking?: boolean;
 }) {
     const locators = opts.locators ?? {};
     return {
@@ -71,6 +72,9 @@ function makePage(opts: {
         // the visible-text evaluate call and rejects the latter so tests
         // stay content()-driven, matching auth-detector.spec.ts.
         async evaluate(fn: (...args: unknown[]) => unknown) {
+            if (fn.toString().includes("consentCandidates")) {
+                return opts.consentBlocking ?? false;
+            }
             if (fn.toString().includes("innerWidth")) {
                 return opts.overlay ?? null;
             }
@@ -164,6 +168,7 @@ describe("manual fallback detector — consent_wall", () => {
             projectPath: PROJECT_PATH,
             url: "http://localhost:3000/",
             page: makePage({
+                consentBlocking: true,
                 locators: {
                     "#onetrust-banner-sdk": visibleLocator(),
                 },
@@ -197,11 +202,28 @@ describe("manual fallback detector — consent_wall", () => {
             projectPath: PROJECT_PATH,
             url: "http://localhost:3000/",
             page: makePage({
+                consentBlocking: true,
                 locators: { '[role="dialog"]': dialog },
             }),
         });
         expect(blocker?.category).toBe("consent_wall");
         expect(blocker?.detectorId).toBe("manual:consent_wall_generic");
+    });
+
+    it("does NOT flag a non-blocking consent banner over reachable page content", async () => {
+        const dialog = visibleLocator({
+            textContent: async () => "We use cookies to improve your experience. Accept all?",
+            locator: () => visibleLocator(),
+        });
+        const blocker = await detector.detect({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/auth/login",
+            page: makePage({
+                consentBlocking: false,
+                locators: { '[role="dialog"]': dialog },
+            }),
+        });
+        expect(blocker).toBeNull();
     });
 
     it("does NOT flag a generic role=dialog with consent copy but no accept button", async () => {

@@ -79,21 +79,64 @@ describe("CodeGraph reliability", () => {
         graph.destroy();
     });
 
-    it("does not attempt to parse .vue/.svelte files as JS/TS (no default extension entry)", async () => {
+    it("indexes an SFC by parsing its script block and scanning its template", async () => {
         const vuePath = writeFile(
             "src/App.vue",
-            "<template><div>hi</div></template>\n<script>export default {};</script>\n",
+            `<template><button data-testid="go">hi</button></template>
+<script setup lang="ts">
+function go(): void {}
+</script>
+`,
         );
         const graph = new CodeGraph(projectPath, {});
 
         await graph.updateFile(vuePath);
 
         const node = graph.getNode(vuePath);
-        // Still tracked (path/size/lines known) — just never handed to the
-        // Babel parser, so it has no misleading "parsed successfully" AST.
-        expect(node).not.toBeUndefined();
+        // Handing the raw SFC to Babel throws, which is why these files used to
+        // be indexed empty. The script block is split out first now, so the
+        // component contributes real symbols and its template contributes
+        // selectors.
+        expect(node?.ast).not.toBeUndefined();
+        expect(node?.parsed.functions.map((f) => f.name)).toEqual(["go"]);
+        expect(node?.parsed.templateSelectors?.map((s) => s.value)).toEqual(["go"]);
+        graph.destroy();
+    });
+
+    it("indexes selectors from a template whose backend it cannot parse", async () => {
+        const templatePath = writeFile(
+            "templates/settings.html",
+            `<h1>Settings</h1>
+<button data-testid="delete-workspace">Delete</button>
+<b data-testid="{{ dynamic }}">skip me</b>
+`,
+        );
+        const graph = new CodeGraph(projectPath, {});
+
+        await graph.updateFile(templatePath);
+
+        const node = graph.getNode(templatePath);
+        expect(node?.parsed.templateSelectors?.map((s) => s.value)).toEqual(["delete-workspace"]);
+        // A template carries no code, so nothing should claim otherwise.
         expect(node?.ast).toBeUndefined();
         expect(node?.symbols).toEqual([]);
+        graph.destroy();
+    });
+
+    it("makes a selector-only template findable by its test id wording", async () => {
+        writeFile(
+            "templates/settings.html",
+            `<button data-testid="delete-workspace">Delete</button>`,
+        );
+        const graph = new CodeGraph(projectPath, {});
+
+        await graph.scanProject();
+
+        // Keyword search reads function and class names, which a template has
+        // none of — without selector tokens this file is unreachable.
+        expect(graph.findRelevantFiles("delete workspace flow", 5)).toContain(
+            "templates/settings.html",
+        );
         graph.destroy();
     });
 

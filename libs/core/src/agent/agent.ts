@@ -2,16 +2,22 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fullAstToSearchableText } from "../analysis/ast-parser";
 import { EntryPointDetector } from "../analysis/entry-points";
+import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import { ProjectContext } from "../analysis/project-context";
 import { loadAutonomyConfig } from "../config";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
-import type { ParsedFile } from "../types";
+import type { ParsedFile, TemplateSelector } from "../types";
+import { persistHitlPauseWorkflow } from "../workflows";
 import { createLangChainModel, getProvider, resolveAIConfig } from "./ai-providers";
 import { createAgentGraph } from "./graph/graph";
-import type { AgentIntent } from "./graph/utils";
-import { buildSummary } from "./graph/utils";
+import {
+    type AgentIntent,
+    type AuthPrecondition,
+    buildSummary,
+    resolveAuthPrecondition,
+} from "./graph/utils";
 import { AgentMemory } from "./memory";
 import {
     buildAgentClassifierPrompt,
@@ -59,6 +65,28 @@ export interface GatherContextOptions {
     fileContext?: string[];
     /** Files that have changed (from orchestrator) */
     changedFiles?: string[];
+}
+
+/** Selectors the indexer distilled from this file's markup, if any. */
+function readTemplateSelectors(parsedAstJson: string | null | undefined): TemplateSelector[] {
+    if (!parsedAstJson) return [];
+    try {
+        return (JSON.parse(parsedAstJson) as ParsedFile).templateSelectors ?? [];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Context text for a file with no AST — a server-rendered template, most often.
+ *
+ * Leads with the distilled selectors and keeps only a short slice of raw markup
+ * behind them: the useful part of a 2000-line template is its test ids and
+ * labels, not its layout.
+ */
+function buildFallbackContext(rawContent: string, selectors: TemplateSelector[]): string {
+    if (selectors.length === 0) return rawContent.slice(0, 5000);
+    return `${describeTemplateSelectors(selectors)}\n---\n${rawContent.slice(0, 2000)}`;
 }
 
 /**
@@ -153,6 +181,9 @@ export async function gatherContext(
                         imports: parsed.imports || [],
                         fullContext: searchableText.slice(0, 3000),
                         relevanceScore: 1.0,
+                        ...(parsed.templateSelectors?.length
+                            ? { templateSelectors: parsed.templateSelectors }
+                            : {}),
                     });
 
                     totalTokens += estimatedTokens;
@@ -172,13 +203,17 @@ export async function gatherContext(
 
                         if (totalTokens + estimatedTokens > TOKEN_LIMIT) break;
 
+                        // A template has no AST but may still have indexed
+                        // selectors, which are the reason it is worth sending.
+                        const templateSelectors = readTemplateSelectors(file?.parsed_ast);
                         files.push({
                             path: filePath,
                             functions: [],
                             classes: [],
                             imports: [],
-                            fullContext: rawContent.slice(0, 5000), // Larger slice for raw content
+                            fullContext: buildFallbackContext(rawContent, templateSelectors),
                             relevanceScore: 0.8,
+                            ...(templateSelectors.length ? { templateSelectors } : {}),
                         });
 
                         totalTokens += estimatedTokens;
@@ -223,6 +258,9 @@ export async function gatherContext(
                         imports: parsed.imports || [],
                         fullContext: searchableText.slice(0, 3000),
                         relevanceScore: result.similarity,
+                        ...(parsed.templateSelectors?.length
+                            ? { templateSelectors: parsed.templateSelectors }
+                            : {}),
                     });
 
                     totalTokens += estimatedTokens;
@@ -240,13 +278,15 @@ export async function gatherContext(
 
                         if (totalTokens + estimatedTokens > TOKEN_LIMIT) break;
 
+                        const templateSelectors = readTemplateSelectors(file?.parsed_ast);
                         files.push({
                             path: result.filePath,
                             functions: [],
                             classes: [],
                             imports: [],
-                            fullContext: rawContent.slice(0, 5000),
+                            fullContext: buildFallbackContext(rawContent, templateSelectors),
                             relevanceScore: result.similarity * 0.9, // Slightly lower score for raw content
+                            ...(templateSelectors.length ? { templateSelectors } : {}),
                         });
 
                         totalTokens += estimatedTokens;
@@ -408,7 +448,10 @@ export function buildHITLMarker(payload: unknown): string {
  * `oneshot.ts`) so this branching is unit-testable without spinning up the
  * full graph/LLM stack.
  */
-export function buildPendingHitlMarker(hitlActions: HITLAction[]): string | null {
+export function buildPendingHitlMarker(
+    hitlActions: HITLAction[],
+    workflowId?: string,
+): string | null {
     const lastPendingAction = hitlActions[hitlActions.length - 1];
     if (!lastPendingAction) return null;
 
@@ -423,6 +466,9 @@ export function buildPendingHitlMarker(hitlActions: HITLAction[]): string | null
             testCode: lastPendingAction.testCode,
             suggestedPath: lastPendingAction.suggestedPath,
             testName: lastPendingAction.testName,
+            // Carried to the approving surface (CLI one-shot, dashboard) so it
+            // knows an existing file is the intended destination.
+            overwriteTarget: lastPendingAction.overwriteTarget === true,
             options: [
                 {
                     id: "save_approve",
@@ -441,7 +487,7 @@ export function buildPendingHitlMarker(hitlActions: HITLAction[]): string | null
                     description: "Discard the draft without saving.",
                 },
             ],
-            context: {},
+            context: workflowId ? { workflowId } : {},
         });
     }
 
@@ -472,7 +518,7 @@ export function buildPendingHitlMarker(hitlActions: HITLAction[]): string | null
                     description: "Don't run it now.",
                 },
             ],
-            context: {},
+            context: workflowId ? { workflowId } : {},
         });
     }
 
@@ -523,6 +569,28 @@ export function humanizeToolCall(toolName: string): string {
     return labels[toolName] ?? `Running ${toolName}...`;
 }
 
+const SECRET_TOOL_ARGUMENT = /password|passwd|secret|token|credential|api.?key|cookie/i;
+
+export function redactToolArgs(toolName: string, args: unknown): unknown {
+    const textEntryTool = toolName === "fillInput" || toolName === "typeText";
+    const visit = (value: unknown, key = ""): unknown => {
+        if (SECRET_TOOL_ARGUMENT.test(key) || (textEntryTool && /^(value|text)$/i.test(key))) {
+            return "[REDACTED]";
+        }
+        if (Array.isArray(value)) return value.map((entry) => visit(entry));
+        if (value && typeof value === "object") {
+            return Object.fromEntries(
+                Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [
+                    childKey,
+                    visit(childValue, childKey),
+                ]),
+            );
+        }
+        return value;
+    };
+    return visit(args);
+}
+
 /**
  * Options for the tool-based agent
  */
@@ -553,10 +621,14 @@ export interface ToolAgentOptions {
      * LangGraph checks it at step boundaries and stops the graph.
      */
     signal?: AbortSignal;
+    /** The caller already owns the project-operation lease for this run. */
+    operationHeld?: boolean;
     /** Callback for tool call events (for UI feedback) */
     onToolCall?: (toolName: string, args: unknown) => void;
     /** Callback for tool result events */
     onToolResult?: (toolName: string, result: ToolResult) => void;
+    /** Caller surface used for a durable manual-HITL continuation. */
+    origin?: "agent" | "dashboard" | "repl";
 }
 
 /**
@@ -566,6 +638,7 @@ export interface ToolAgentResult {
     text: string;
     toolCalls: Array<{ name: string; args: unknown; result: unknown }>;
     hitlActions: HITLAction[];
+    workflowId?: string;
 }
 
 /**
@@ -583,8 +656,10 @@ export async function* runToolAgent(
         config: configOverride,
         autonomyOverride,
         signal,
+        operationHeld,
         onToolCall,
         onToolResult,
+        origin = "agent",
     } = options;
 
     // Load configuration
@@ -623,14 +698,34 @@ export async function* runToolAgent(
 
     try {
         const autonomy = loadAutonomySettings(projectPath, autonomyOverride);
-        const tools = createAgentTools({ projectPath, autonomy });
+        let initialAuthPrecondition = resolveAuthPrecondition({ userPrompt });
+        try {
+            const pausedReason =
+                AgentMemory.getInstance(projectPath).getPreference("paused_reason");
+            if (pausedReason === "auth" || pausedReason === "otp") {
+                initialAuthPrecondition = "login_flow";
+            }
+        } catch {
+            // Memory is optional; prompt classification remains a safe fallback.
+        }
+        const authPreconditionRef: { current: AuthPrecondition } = {
+            current: initialAuthPrecondition,
+        };
+        const tools = createAgentTools({
+            projectPath,
+            autonomy,
+            signal,
+            operationHeld,
+            getAuthPrecondition: () => authPreconditionRef.current,
+        });
         const toolMap = tools as Record<
             string,
             { execute?: (args: unknown) => Promise<ToolResult> }
         >;
 
         const callTool = async (toolName: string, args: unknown): Promise<ToolResult> => {
-            onToolCall?.(toolName, args);
+            const safeArgs = redactToolArgs(toolName, args);
+            onToolCall?.(toolName, safeArgs);
             const activityLabel = humanizeToolCall(toolName);
             if (activityLabel) {
                 channel.push({ kind: "event", text: buildAgentEventMarker("tool", activityLabel) });
@@ -642,7 +737,7 @@ export async function* runToolAgent(
             } else {
                 result = { success: true, message: `${toolName} invoked` };
             }
-            toolCallsLog.push({ name: toolName, args, result });
+            toolCallsLog.push({ name: toolName, args: safeArgs, result });
             if (result?.hitlRequired && result.hitlAction) {
                 hitlActions.push(result.hitlAction);
             }
@@ -748,6 +843,9 @@ export async function* runToolAgent(
             getMemoryContext,
             getActiveIntent,
             setActiveIntent,
+            setAuthPrecondition: (precondition) => {
+                authPreconditionRef.current = precondition;
+            },
             getGoalState,
             setGoalState,
         });
@@ -755,6 +853,7 @@ export async function* runToolAgent(
         const seedState: Record<string, unknown> = {
             userPrompt,
             conversationHistory: conversationHistory || [],
+            authPrecondition: initialAuthPrecondition,
         };
 
         if (fileContext && fileContext.length > 0) {
@@ -832,6 +931,24 @@ export async function* runToolAgent(
 
         if (finalState.awaitUserMessage) {
             const userMessage = finalState.awaitUserMessage;
+            let workflowId: string | undefined;
+            try {
+                workflowId = (
+                    await persistHitlPauseWorkflow({
+                        projectPath,
+                        hitlActions,
+                        origin,
+                        repairAttempts: finalState.repairAttempts,
+                        shouldRunTests: finalState.shouldRunTests,
+                        autonomy,
+                    })
+                )?.id;
+            } catch (error) {
+                console.warn(
+                    "Failed to persist HITL continuation:",
+                    error instanceof Error ? error.message : error,
+                );
+            }
 
             // If we're paused because saveFile/runTest asked for HITL approval,
             // surface the actual pending action + structured data to the
@@ -839,7 +956,7 @@ export async function* runToolAgent(
             // sees only a bare "Waiting for approval to save/run X." with
             // nothing actionable — the content lives in `hitlActions[]` but is
             // never streamed on its own.
-            const marker = buildPendingHitlMarker(hitlActions);
+            const marker = buildPendingHitlMarker(hitlActions, workflowId);
             if (marker) {
                 yield marker;
                 fullText += marker;
@@ -874,6 +991,7 @@ export async function* runToolAgent(
                 text: fullText,
                 toolCalls: toolCallsLog,
                 hitlActions,
+                workflowId,
             };
         }
 

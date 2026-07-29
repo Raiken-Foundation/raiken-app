@@ -13,6 +13,8 @@ export interface StatusSnapshot {
     headed: boolean;
     planMode: boolean;
     discoverChip: string | null;
+    /** False only for providers that require a credential but lack one. */
+    aiReady: boolean;
 }
 
 /**
@@ -57,6 +59,7 @@ export async function gatherStatusSnapshot(
         headed: process.env.RAIKEN_HEADLESS !== "1",
         planMode,
         discoverChip: formatDiscoverChip(getBackgroundDiscoverStatus()),
+        aiReady: provider.envVars.length === 0 || Boolean(ai.apiKey),
     };
 }
 
@@ -91,6 +94,7 @@ export function renderStatusStrip(snap: StatusSnapshot): void {
     } else {
         parts.push(dim("no knowledge"));
     }
+    if (!snap.aiReady) parts.push(accent("no key"));
     parts.push(accent(permissionModeLabel(snap.mode)));
     if (snap.planMode) parts.push(accent("plan"));
     if (snap.discoverChip) parts.push(dim(snap.discoverChip));

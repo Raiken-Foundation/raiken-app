@@ -17,8 +17,20 @@ export default [
                     allow: ["^.*/eslint(\\.base)?\\.config\\.[cm]?[jt]s$"],
                     depConstraints: [
                         {
-                            sourceTag: "*",
-                            onlyDependOnLibsWithTags: ["*"],
+                            sourceTag: "scope:dashboard",
+                            onlyDependOnLibsWithTags: ["scope:shared"],
+                        },
+                        {
+                            sourceTag: "scope:shared",
+                            onlyDependOnLibsWithTags: ["scope:core"],
+                        },
+                        {
+                            sourceTag: "scope:cli",
+                            onlyDependOnLibsWithTags: ["scope:shared", "scope:core"],
+                        },
+                        {
+                            sourceTag: "scope:core",
+                            onlyDependOnLibsWithTags: [],
                         },
                     ],
                 },

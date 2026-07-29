@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import path from "node:path";
+import { getRaikenVersion } from "@raiken/shared/lib/version";
 import chalk from "chalk";
 import { Command } from "commander";
 import dotenv from "dotenv";
@@ -66,34 +66,25 @@ async function checkApiKey(): Promise<void> {
     // Success is the common case and isn't worth a line every startup —
     // `raiken status` / `/status` already show provider, model, and key
     // state on demand. Only the actionable failure case prints here.
-    if (resolved.apiKey) return;
+    if (provider.envVars.length === 0 || resolved.apiKey) return;
 
     const envHint = provider.envVars[0] ?? "AI_API_KEY";
     console.warn(chalk.yellow(`⚠ No ${provider.label} API key found. AI features will not work.`));
-    console.log(
-        chalk.dim(`   Set ${envHint} in .env, run \`raiken config\`, or configure in Settings → AI Provider.`),
+    console.warn(
+        chalk.dim(
+            `   Set ${envHint} in .env, run \`raiken config\`, or configure in Settings → AI Provider.`,
+        ),
     );
     if (provider.apiKeyUrl) {
-        console.log(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
+        console.warn(chalk.dim(`   Get a key at: ${provider.apiKeyUrl}`));
     }
 }
-
-const resolveVersion = (): string => {
-    try {
-        const pkgPath = path.join(__dirname, "package.json");
-        const raw = fs.readFileSync(pkgPath, "utf-8");
-        const pkg = JSON.parse(raw) as { version?: string };
-        return pkg.version || "0.0.0";
-    } catch {
-        return "0.0.0";
-    }
-};
 
 const program = new Command();
 program
     .name("raiken")
     .description("AI QA Agent for Developers")
-    .version(resolveVersion(), "-v, --version");
+    .version(getRaikenVersion(), "-v, --version");
 
 // Non-interactive one-shot mode (à la `claude -p`) is handled BEFORE commander
 // parses, so its flags (--json, --run, …) don't have to be declared globally —
@@ -116,6 +107,11 @@ program
     .command("start")
     .description("Start the Raiken Dashboard & Agent")
     .option("-p, --port <number>", "Port to run on", "7101")
+    .option(
+        "--remote",
+        "Expose the dashboard on the local network (requires a session token)",
+        false,
+    )
     .action(async (options) => {
         const port = parseInt(options.port, 10);
         if (Number.isNaN(port) || port < 1 || port > 65535) {
@@ -124,12 +120,12 @@ program
             );
             process.exit(1);
         }
-        await printBanner(resolveVersion());
+        await printBanner(getRaikenVersion());
         await checkApiKey();
         console.log(chalk.cyan("Initializing Raiken..."));
         try {
             const { startServer } = await import("./server");
-            await startServer(port);
+            await startServer({ port, remote: options.remote });
         } catch (error) {
             console.error(
                 chalk.red("Failed to start Raiken:"),
@@ -142,7 +138,7 @@ program
 // Default action: bare `raiken` launches the interactive testing agent (live
 // browser). One-shot (`raiken -p`) is intercepted before commander parses.
 program.action(async () => {
-    await printBanner(resolveVersion());
+    await printBanner(getRaikenVersion());
     await checkApiKey();
     try {
         const { chatCommand } = await import("./commands/chat");
@@ -160,7 +156,7 @@ program
     .command("resume [name]")
     .description("Resume a saved interactive session (latest if name omitted)")
     .action(async (name: string | undefined) => {
-        await printBanner(resolveVersion());
+        await printBanner(getRaikenVersion());
         await checkApiKey();
         try {
             const { chatCommand } = await import("./commands/chat");
@@ -196,9 +192,9 @@ program
     });
 
 program
-    .command("config [section]")
+    .command("config [provider-or-key]")
     .description(
-        "Set the AI provider, API key, and model (same settings as the dashboard's Settings view)",
+        "Configure the AI provider, key, model, and endpoint (same settings as the dashboard)",
     )
     .option(
         "--provider <id>",
@@ -255,6 +251,10 @@ program
     .command("auth")
     .description("Authenticate to save browser session state")
     .option("--url <url>", "URL to navigate to for authentication")
+    .option("--script <path>", "Run this project-local custom login script")
+    .option("--manual", "Ignore the configured login script and use an interactive browser", false)
+    .option("--headed", "Show the browser while running a custom login script", false)
+    .option("--timeout <ms>", "Custom login script timeout in milliseconds")
     .option(
         "--cookie <pairs>",
         'Skip the browser and import cookies directly (e.g. "sid=abc; csrf=xyz"). Requires --domain.',
@@ -271,7 +271,7 @@ program
     )
     .option(
         "--from-state-file <path>",
-        "Copy an existing Playwright storage-state JSON into .raiken/auth-state.json",
+        "Copy an existing Playwright storage-state JSON into the configured auth state path",
     )
     .action(async (options) => {
         try {
@@ -362,14 +362,16 @@ program
     .command("eval")
     .description(
         "Run agent eval scenarios: 'playground' (fixture ground-truth suite, from the raiken " +
-            "repo) or 'flakiness <testFile>' (run a spec N times, score stability)",
+            "repo), 'benchmark' (accuracy regression gates against the playground-auth " +
+            "fixture) or 'flakiness <testFile>' (run a spec N times, score stability)",
     )
-    .argument("<suite>", "Eval suite: playground | flakiness")
+    .argument("<suite>", "Eval suite: playground | benchmark | flakiness")
     .argument("[target]", "Suite argument (flakiness: the spec file to exercise)")
     .option("--repeat <n>", "Attempts per scenario", "1")
     .option("--filter <substring>", "Only run scenarios whose id contains this")
     .option("--runs <n>", "flakiness: consecutive runs to compare", "3")
-    .option("--dir <path>", "playground: directory containing the fixture apps")
+    .option("--expect-tests <n>", "flakiness: fail unless each run reports exactly this many tests")
+    .option("--dir <path>", "playground/benchmark: directory containing the fixture apps")
     .option("--out <path>", "Also write the JSON report to this file")
     .option("--json", "Emit the report as JSON on stdout", false)
     .option("--keep-work-dirs", "Keep per-attempt temp directories for debugging", false)
@@ -693,6 +695,10 @@ async function runOneShotFromArgv(argv: string[]): Promise<void> {
         }
         timeoutMs = parsed;
     }
+
+    // Match the REPL/startup experience while keeping machine-readable
+    // one-shot output on stdout clean (checkApiKey writes guidance to stderr).
+    await checkApiKey();
 
     const { runOneShotCommand } = await import("./commands/oneshot");
     await runOneShotCommand({

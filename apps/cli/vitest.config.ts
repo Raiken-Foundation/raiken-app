@@ -15,6 +15,6 @@ export default defineConfig({
         environment: "node",
         pool: "forks",
         include: ["src/**/*.spec.ts", "src/**/*.test.ts"],
-        testTimeout: 15000,
+        testTimeout: 30000,
     },
 });

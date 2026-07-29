@@ -1,7 +1,7 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { AgentClassifierResult, ContextData, MemoryContext } from "../../prompts";
 import type { AutonomySettings, ToolResult } from "../../tools";
-import type { AgentIntent } from "../utils";
+import type { AgentIntent, AuthPrecondition } from "../utils";
 
 export type CallTool = (toolName: string, args: unknown) => Promise<ToolResult>;
 
@@ -56,6 +56,7 @@ export interface AgentNodeDeps {
     getMemoryContext: () => MemoryContext | undefined;
     getActiveIntent?: () => "explore" | "generateTests" | "explain" | null;
     setActiveIntent?: (intent: "explore" | "generateTests" | "explain") => void;
+    setAuthPrecondition?: (precondition: AuthPrecondition) => void;
     getGoalState?: () => {
         activeGoal: string | null;
         targetFeature: string | null;

@@ -10,6 +10,7 @@ import { createGenerateTestsNode } from "../agent/graph/nodes/context";
 import type { AgentNodeDeps } from "../agent/graph/nodes/types";
 import type { GraphStateType } from "../agent/graph/state";
 import type { ContextData } from "../agent/prompts";
+import { formatDOMContext } from "../browser/dom-capture";
 
 function baseContext(): ContextData {
     return {
@@ -29,8 +30,19 @@ function baseState(overrides: Partial<GraphStateType> = {}): GraphStateType {
     } as GraphStateType;
 }
 
-function makeDeps(modelResponseContent: string, overrides: Partial<AgentNodeDeps> = {}) {
-    const model = { invoke: vi.fn(async () => ({ content: modelResponseContent })) };
+function makeDeps(modelResponseContent: string | string[], overrides: Partial<AgentNodeDeps> = {}) {
+    // An array supplies one response per generation pass, so a test can assert
+    // what the node does when the first draft is rejected and regenerated.
+    const responses = Array.isArray(modelResponseContent)
+        ? [...modelResponseContent]
+        : [modelResponseContent];
+    const systemPrompts: string[] = [];
+    const model = {
+        invoke: vi.fn(async (messages: Array<{ content: unknown }>) => {
+            systemPrompts.push(String(messages[0]?.content ?? ""));
+            return { content: responses.length > 1 ? (responses.shift() as string) : responses[0] };
+        }),
+    };
     const deps = {
         gatherContext: vi.fn(async () => baseContext()),
         projectPath: "/tmp/project",
@@ -39,7 +51,7 @@ function makeDeps(modelResponseContent: string, overrides: Partial<AgentNodeDeps
         getMemoryContext: () => undefined,
         ...overrides,
     } as unknown as AgentNodeDeps;
-    return { deps, model };
+    return { deps, model, systemPrompts };
 }
 
 const VALID_TEST = `import { test, expect } from '@playwright/test';
@@ -95,5 +107,115 @@ test('signs in successfully', async ({ page }) => {
 
         expect(result.testDraft).toBe("");
         expect(result.summary).toMatch(/does not parse as valid/i);
+    });
+});
+
+/**
+ * A draft whose locators contradict the captured DOM fails at runtime for a
+ * reason that has nothing to do with the application, so it must never reach
+ * `hitlSave`. The captured page below exposes the modal as `alertdialog`, which
+ * is the exact shape of the bug this gate exists for.
+ */
+const DIALOG_DOM_SUMMARY = formatDOMContext({
+    url: "http://127.0.0.1:5100/projects",
+    title: "Projects",
+    accessibilityTree: null,
+    timestamp: 0,
+    formFields: [],
+    interactiveElements: [
+        {
+            tagName: "div",
+            role: "alertdialog",
+            name: "Delete project",
+            suggestedSelectors: ["getByRole('alertdialog', { name: 'Delete project' })"],
+        },
+        {
+            tagName: "button",
+            role: "button",
+            name: "Delete",
+            suggestedSelectors: ["getByRole('button', { name: 'Delete' })"],
+        },
+    ],
+});
+
+function draftUsingRole(role: string): string {
+    return `\`\`\`typescript
+import { test, expect } from '@playwright/test';
+
+test('deletes a project', async ({ page }) => {
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByRole('${role}', { name: 'Delete project' })).toBeVisible();
+});
+\`\`\``;
+}
+
+describe("createGenerateTestsNode — grounding gate", () => {
+    it("regenerates once with the violations fed back, then accepts the grounded draft", async () => {
+        const { deps, model, systemPrompts } = makeDeps([
+            draftUsingRole("dialog"),
+            draftUsingRole("alertdialog"),
+        ]);
+        const node = createGenerateTestsNode(deps);
+        const result = await node(
+            baseState({ context: baseContext(), domSummary: DIALOG_DOM_SUMMARY }),
+        );
+
+        expect(model.invoke).toHaveBeenCalledTimes(2);
+        expect(systemPrompts[1]).toContain("GROUNDING VIOLATIONS");
+        expect(systemPrompts[1]).toContain("getByRole('alertdialog', { name: 'Delete project' })");
+
+        expect(result.testDraft).toContain("getByRole('alertdialog', { name: 'Delete project' })");
+        expect(result.summary).toBeUndefined();
+    });
+
+    it("rejects the draft when the same violation survives regeneration", async () => {
+        const { deps, model } = makeDeps(draftUsingRole("dialog"));
+        const node = createGenerateTestsNode(deps);
+        const result = await node(
+            baseState({ context: baseContext(), domSummary: DIALOG_DOM_SUMMARY }),
+        );
+
+        expect(model.invoke).toHaveBeenCalledTimes(2);
+        expect(result.testDraft).toBe("");
+        expect(result.summary).toMatch(/contradict the captured DOM/i);
+        expect(result.summary).toContain("getByRole('dialog', { name: 'Delete project' })");
+        expect(result.groundingViolations).toHaveLength(1);
+        expect(result.groundingViolations?.[0].kind).toBe("role_mismatch");
+    });
+
+    it("keeps a draft whose only problem is an unconfirmable locator, and reports it", async () => {
+        // A test id for a state that was never captured (an error banner that
+        // only renders after a failed submit) can't be proven wrong. Blocking it
+        // would refuse most negative-path tests, so it is surfaced instead.
+        const draft = `\`\`\`typescript
+import { test, expect } from '@playwright/test';
+
+test('shows an error', async ({ page }) => {
+    await page.getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByTestId('delete-error')).toBeVisible();
+});
+\`\`\``;
+        const { deps, model } = makeDeps(draft);
+        const node = createGenerateTestsNode(deps);
+        const result = await node(
+            baseState({ context: baseContext(), domSummary: DIALOG_DOM_SUMMARY }),
+        );
+
+        expect(model.invoke).toHaveBeenCalledTimes(2);
+        expect(result.testDraft).toContain("getByTestId('delete-error')");
+        expect(result.summary).toBeUndefined();
+        expect(result.groundingViolations?.map((v) => v.kind)).toEqual(["unknown_test_id"]);
+    });
+
+    it("does not regenerate when the first draft is already grounded", async () => {
+        const { deps, model } = makeDeps(draftUsingRole("alertdialog"));
+        const node = createGenerateTestsNode(deps);
+        const result = await node(
+            baseState({ context: baseContext(), domSummary: DIALOG_DOM_SUMMARY }),
+        );
+
+        expect(model.invoke).toHaveBeenCalledTimes(1);
+        expect(result.testDraft).toContain("alertdialog");
+        expect(result.groundingViolations).toEqual([]);
     });
 });

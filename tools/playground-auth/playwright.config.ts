@@ -2,15 +2,16 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
     testDir: "./tests",
-    fullyParallel: true,
+    testMatch: ["**/*.spec.ts"],
+    fullyParallel: false,
     forbidOnly: !!process.env.CI,
     retries: process.env.CI ? 2 : 0,
-    workers: process.env.CI ? 1 : undefined,
-    reporter: "html",
+    workers: 1,
+    reporter: [["list"], ["html", { open: "never", outputFolder: "test-reports/html" }]],
     preserveOutput: "always",
     use: {
-        baseURL: "http://localhost:5100",
-        trace: "on-first-retry",
+        baseURL: "http://127.0.0.1:5100",
+        trace: "retain-on-failure",
         video: "retain-on-failure",
         screenshot: "only-on-failure",
     },
@@ -19,19 +20,11 @@ export default defineConfig({
             name: "chromium",
             use: { ...devices["Desktop Chrome"] },
         },
-        // Additional browsers can be enabled by uncommenting:
-        // {
-        //   name: 'firefox',
-        //   use: { ...devices['Desktop Firefox'] },
-        // },
-        // {
-        //   name: 'webkit',
-        //   use: { ...devices['Desktop Safari'] },
-        // },
     ],
     webServer: {
-        command: "npm run dev",
-        port: 5100,
+        command: "pnpm dev --host 127.0.0.1 --port 5100 --strictPort",
+        url: "http://127.0.0.1:5100/auth/login",
         reuseExistingServer: !process.env.CI,
+        timeout: 120_000,
     },
 });

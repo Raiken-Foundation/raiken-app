@@ -13,7 +13,8 @@ import type {
     UpdateEvent,
 } from "../types";
 import { isBinaryFile, isTestDirectory, isTestFile } from "../utils";
-import { parseSourceFile } from "./ast-parser";
+import { isMarkupFile } from "./markup-selectors";
+import { analyzeSourceFile } from "./source-analysis";
 import { extractSymbolsFromAst } from "./symbol-extractor";
 
 export class CodeGraph {
@@ -40,13 +41,10 @@ export class CodeGraph {
         this.rootPath = path.resolve(rootPath);
         this.options = {
             maxDepth: options.maxDepth ?? 10,
-            // NOTE: .vue/.svelte are intentionally excluded — the parser
-            // below is Babel (JS/TS only), so SFC files (with <template>/
-            // <script>/<style> blocks) always fail to parse. They're still
-            // walked and tracked as graph nodes (path/size/lines), just
-            // never handed to the JS/TS parser, which would otherwise throw
-            // on every single one and produce a misleadingly "indexed" file
-            // with an empty AST.
+            // Includes SFCs: `analyzeSourceFile` splits their `<script>` out
+            // before Babel sees it, so they now produce real symbols instead of
+            // an empty node. Listing them here also lets `import Foo from
+            // './Foo.vue'` resolve to a graph edge.
             extensions: options.extensions ?? [
                 ".ts",
                 ".tsx",
@@ -56,6 +54,8 @@ export class CodeGraph {
                 ".cjs",
                 ".mts",
                 ".cts",
+                ".vue",
+                ".svelte",
             ],
             excludeDirs: options.excludeDirs,
             includeTests: options.includeTests ?? true,
@@ -731,20 +731,35 @@ export class CodeGraph {
             let symbols: ParsedSymbol[] = [];
             let intraFileEdges: GraphEdge[] = [];
 
-            if (isCodeFile) {
+            // Markup files carry no code but do carry selectors, which is the
+            // only source-side grounding a repo whose backend we cannot parse
+            // will ever contribute.
+            if (isCodeFile || isMarkupFile(filePath)) {
                 try {
-                    const result = parseSourceFile(code, filePath);
-                    parsed = result.parsed;
-                    ast = result.ast;
+                    const result = analyzeSourceFile(code, filePath, {
+                        unknownAsScript: isCodeFile,
+                    });
+                    parsed = result?.parsed ?? emptyParsed;
+                    ast = result?.ast;
+
+                    if (result?.parseError) {
+                        const rel = path.relative(this.rootPath, filePath);
+                        console.warn(
+                            `[CodeGraph] Script block in ${rel} did not parse (${result.parseError}); indexed its template only.`,
+                        );
+                    }
+
                     resolvedImports = await this.resolveImports(
                         parsed.imports.map((imp) => imp.source),
                         filePath,
                     );
 
                     try {
-                        const extracted = extractSymbolsFromAst(ast, filePath);
-                        symbols = extracted.symbols;
-                        intraFileEdges = extracted.intraFileEdges;
+                        if (ast) {
+                            const extracted = extractSymbolsFromAst(ast, filePath);
+                            symbols = extracted.symbols;
+                            intraFileEdges = extracted.intraFileEdges;
+                        }
                     } catch (symErr) {
                         // Always warn (not just under DEBUG) — a file silently
                         // ending up with zero symbols looks identical to a
@@ -1412,6 +1427,12 @@ export class CodeGraph {
             }
             for (const cls of node.parsed.classes) {
                 keywords.push(...this.splitIdentifier(cls.name));
+            }
+            // Selector text is often the only searchable content a template has:
+            // a Django page with no parseable code is reachable by "delete
+            // workspace" only because its `data-testid` says so.
+            for (const selector of node.parsed.templateSelectors ?? []) {
+                keywords.push(...this.splitIdentifier(selector.value));
             }
 
             // Index each keyword

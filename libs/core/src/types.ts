@@ -34,12 +34,34 @@ export interface ParsedType {
     line: number;
 }
 
+/**
+ * A locator-shaped fact read out of markup in the repository.
+ *
+ * Only literal attribute values are recorded. `data-testid="{{ id }}"` and
+ * `:data-testid="row.id"` are computed at render time, so treating them as
+ * selectors would hand the model a string that never appears in a real page.
+ */
+export interface TemplateSelector {
+    /** How Playwright would address the element this came from. */
+    kind: "testId" | "label" | "placeholder" | "role";
+    value: string;
+    /** Which attribute supplied a `testId` (projects vary: `data-test`, `data-cy`, …). */
+    attribute?: string;
+    line: number;
+}
+
 export interface ParsedFile {
     functions: ParsedFunction[];
     classes: ParsedClass[];
     imports: ParsedImport[];
     exports: string[];
     types: ParsedType[];
+    /**
+     * Selectors found in this file's markup — a component template, or a
+     * server-rendered template in a repo whose backend we cannot parse at all.
+     * Optional because the field post-dates persisted indexes.
+     */
+    templateSelectors?: TemplateSelector[];
 }
 
 export interface ParsedFileWithAst {

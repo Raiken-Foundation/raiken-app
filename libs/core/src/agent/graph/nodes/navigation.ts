@@ -4,6 +4,7 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { BrowserSession } from "../../../browser/session";
+import { mapAuthCredentialsToFields, resolveAuthCredentials } from "../../../config";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
 import type { ActionResult, InterruptionInfo, SummaryElement } from "../utils";
@@ -11,8 +12,8 @@ import {
     expandActionSynonyms,
     extractPageTitle,
     extractUrlFromText,
+    getRequestedInputFields,
     getStructuralSignals,
-    goalTargetsUnauthedPage,
     matchesAction,
     normalizeExploreUrl,
     parseSummaryElements,
@@ -108,6 +109,7 @@ async function checkForInterruption(
 
     const signals = getStructuralSignals(elements, pageTitle, hasOverlay);
     if (!shouldClassifyInterruption(signals)) return null;
+    const requestedFields = getRequestedInputFields(elements);
     return classifyInterruption(
         pageTitle,
         elements,
@@ -115,6 +117,8 @@ async function checkForInterruption(
         userPrompt,
         conversationHistory,
         model,
+        false,
+        mapAuthCredentialsToFields(requestedFields, resolveAuthCredentials(projectPath)),
     );
 }
 
@@ -173,7 +177,7 @@ export const createNavigateNode =
         // content routes, enter there instead of capturing the login page. Only
         // applies to inferred entry (remembered origin) — an explicit user URL is
         // always respected.
-        if (url) {
+        if (url && state.authPrecondition === "authenticated") {
             const explicitTarget = !!(state.targetUrl || extractedUrl);
             try {
                 url = await resolveEntryUrl(projectPath, url, explicitTarget);
@@ -460,7 +464,7 @@ export const createExploreNode =
         // wanders into the identity provider (registration/authenticate routes),
         // re-triggering the auth interruption and never reaching test generation.
         // Pass the captured entry page straight through to the generate step.
-        if (goalTargetsUnauthedPage(state.userPrompt) && state.domSummary) {
+        if (state.authPrecondition === "unauthenticated" && state.domSummary) {
             return {
                 pagesVisited: state.currentUrl ? [state.currentUrl] : [],
                 pageSummaries: [state.domSummary],

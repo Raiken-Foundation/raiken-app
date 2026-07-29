@@ -1,3 +1,4 @@
+import { useSession } from "../auth/useSession";
 import Nav from "../Nav";
 
 const MEMBERS = [
@@ -28,6 +29,9 @@ const MEMBERS = [
 ];
 
 export default function Members() {
+    const { session, loading, hasPermission } = useSession();
+    const canManageMembers = hasPermission("manage:members");
+
     return (
         <div className="app-shell" data-testid="members-page">
             <Nav />
@@ -37,36 +41,47 @@ export default function Members() {
                     <p>People with access to this workspace.</p>
                 </div>
 
-                <div className="card">
-                    <table data-testid="members-table">
-                        <thead>
-                            <tr>
-                                <th>Name</th>
-                                <th>Email</th>
-                                <th>Role</th>
-                                <th>Joined</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {MEMBERS.map((m) => (
-                                <tr key={m.id} data-testid={`member-row-${m.id}`}>
-                                    <td>{m.name}</td>
-                                    <td>
-                                        <a href={`mailto:${m.email}`}>{m.email}</a>
-                                    </td>
-                                    <td>
-                                        <span
-                                            className={`badge badge-${m.role === "admin" ? "active" : m.role === "member" ? "in-progress" : "archived"}`}
-                                        >
-                                            {m.role}
-                                        </span>
-                                    </td>
-                                    <td>{m.joined}</td>
+                {!loading && !canManageMembers ? (
+                    <div className="card permission-denied" data-testid="members-access-denied">
+                        <h2>Members management unavailable</h2>
+                        <p>
+                            Your role (<strong>{session?.role ?? "unknown"}</strong>) does not
+                            include permission to manage workspace members. Only admins can invite,
+                            remove, or change member roles.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="card">
+                        <table data-testid="members-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Email</th>
+                                    <th>Role</th>
+                                    <th>Joined</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+                            </thead>
+                            <tbody>
+                                {MEMBERS.map((m) => (
+                                    <tr key={m.id} data-testid={`member-row-${m.id}`}>
+                                        <td>{m.name}</td>
+                                        <td>
+                                            <a href={`mailto:${m.email}`}>{m.email}</a>
+                                        </td>
+                                        <td>
+                                            <span
+                                                className={`badge badge-${m.role === "admin" ? "active" : m.role === "member" ? "in-progress" : "archived"}`}
+                                            >
+                                                {m.role}
+                                            </span>
+                                        </td>
+                                        <td>{m.joined}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
             </main>
         </div>
     );

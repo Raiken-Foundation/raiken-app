@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useSession } from "../auth/useSession";
+import WelcomeModal, { shouldShowWelcomeModal } from "../components/WelcomeModal";
 import Nav from "../Nav";
 
 const RECENT_PROJECTS = [
@@ -15,6 +18,21 @@ const ACTIVITY = [
 ];
 
 export default function Dashboard() {
+    const { session, loading } = useSession();
+    const [showWelcome, setShowWelcome] = useState(false);
+
+    useEffect(() => {
+        if (!loading && session && shouldShowWelcomeModal()) {
+            setShowWelcome(true);
+        }
+    }, [loading, session]);
+
+    useEffect(() => {
+        const onDismiss = () => setShowWelcome(false);
+        window.addEventListener("welcome-dismissed", onDismiss);
+        return () => window.removeEventListener("welcome-dismissed", onDismiss);
+    }, []);
+
     return (
         <div className="app-shell" data-testid="dashboard-page">
             <Nav />
@@ -81,8 +99,8 @@ export default function Dashboard() {
                     <div className="card">
                         <h2 style={{ fontSize: "1rem", marginBottom: "1rem" }}>Recent Activity</h2>
                         <div className="activity-list" data-testid="recent-activity">
-                            {ACTIVITY.map((a, i) => (
-                                <div key={i} className="activity-item">
+                            {ACTIVITY.map((a) => (
+                                <div key={`${a.time}:${a.text}`} className="activity-item">
                                     <div className="activity-dot" />
                                     <div>
                                         <div className="activity-text">{a.text}</div>
@@ -101,6 +119,8 @@ export default function Dashboard() {
                     </div>
                 </div>
             </main>
+
+            {showWelcome && session && <WelcomeModal username={session.user} role={session.role} />}
         </div>
     );
 }

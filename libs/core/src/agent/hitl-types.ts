@@ -26,6 +26,14 @@ export interface HITLSaveAction extends HITLActionBase {
     testCode: string;
     suggestedPath: string;
     testName: string;
+    /**
+     * True when `suggestedPath` is a file the run deliberately targeted (the
+     * spec the user had open, or one named in the prompt) rather than a name
+     * derived from the draft. Approvers must not dedupe such a path to
+     * `name-2.spec.ts`: the whole point of the request was to update that
+     * file, and writing a near-duplicate beside it silently loses the edit.
+     */
+    overwriteTarget?: boolean;
 }
 
 /**
@@ -105,6 +113,7 @@ export function createSaveAction(
     testCode: string,
     suggestedPath: string,
     testName: string,
+    overwriteTarget = false,
 ): HITLSaveAction {
     return {
         type: "save",
@@ -112,6 +121,7 @@ export function createSaveAction(
         testCode,
         suggestedPath,
         testName,
+        overwriteTarget,
     };
 }
 

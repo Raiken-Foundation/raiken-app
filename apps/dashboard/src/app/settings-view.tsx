@@ -1,3 +1,4 @@
+import type { PublicRaikenConfig } from "@raiken/shared";
 import { cloneElement, isValidElement, type ReactElement, useEffect, useId, useState } from "react";
 import { AIProviderPanel } from "../components/ai-provider-panel";
 import { Header } from "../components/header";
@@ -17,7 +18,6 @@ interface RaikenConfig {
     ai: {
         provider: string;
         model: string;
-        apiKey?: string;
         baseURL?: string;
         maxTokens?: number;
         temperature?: number;
@@ -58,9 +58,108 @@ interface RaikenConfig {
         provider?: "github" | "jira" | "linear";
         github?: { token?: string; owner?: string; repo?: string };
         jira?: { host?: string; email?: string; apiToken?: string; projectKey?: string };
-        linear?: { apiKey?: string; teamKey?: string };
+        linear?: { teamKey?: string };
         branchPatterns?: string[];
     };
+}
+
+export interface SecretDrafts {
+    aiKeys: Record<string, string>;
+    linearApiKey: string;
+}
+
+interface MutableAiPatch extends Record<string, unknown> {
+    apiKey?: string;
+    apiKeyPresent?: unknown;
+    apiKeys?: Record<string, string>;
+    apiKeysPresent?: unknown;
+    provider?: unknown;
+}
+
+interface MutableCredentialsPatch extends Record<string, unknown> {
+    passwordPresent?: unknown;
+    usernamePresent?: unknown;
+}
+
+interface MutableAuthPatch extends Record<string, unknown> {
+    credentials?: MutableCredentialsPatch;
+}
+
+interface MutableIntegrationPatch extends Record<string, unknown> {
+    apiKeyPresent?: unknown;
+    apiTokenPresent?: unknown;
+    tokenPresent?: unknown;
+}
+
+interface MutableIntegrationsPatch extends Record<string, unknown> {
+    github?: MutableIntegrationPatch;
+    jira?: MutableIntegrationPatch;
+    linear?: MutableIntegrationPatch;
+}
+
+interface MutableSettingsPatch extends Record<string, unknown> {
+    ai?: MutableAiPatch;
+    auth?: MutableAuthPatch;
+    integrations?: MutableIntegrationsPatch;
+}
+
+/**
+ * Build the write-only save payload. Public configuration data never contains
+ * secret values, so only an explicitly typed draft can add a credential back
+ * to this patch. Blank drafts are omitted and therefore preserve saved keys.
+ */
+export function createSettingsConfigPatch(
+    form: Partial<PublicRaikenConfig>,
+    secretDrafts: SecretDrafts,
+): Record<string, unknown> {
+    const patch = structuredClone(form) as MutableSettingsPatch;
+    const ai = patch.ai;
+    if (ai && typeof ai === "object" && !Array.isArray(ai)) {
+        const aiPatch = ai as MutableAiPatch;
+        delete aiPatch.apiKeyPresent;
+        delete aiPatch.apiKeysPresent;
+        const drafts = Object.fromEntries(
+            Object.entries(secretDrafts.aiKeys).filter(([, key]) => key.trim().length > 0),
+        );
+        if (Object.keys(drafts).length > 0) {
+            aiPatch.apiKeys = drafts;
+            const provider = aiPatch.provider;
+            if (typeof provider === "string" && drafts[provider]) {
+                aiPatch.apiKey = drafts[provider];
+            }
+        }
+    }
+
+    const auth = patch.auth;
+    if (auth && typeof auth === "object" && !Array.isArray(auth)) {
+        const credentials = auth.credentials;
+        if (credentials && typeof credentials === "object" && !Array.isArray(credentials)) {
+            delete credentials.usernamePresent;
+            delete credentials.passwordPresent;
+        }
+    }
+
+    const integrations = patch.integrations;
+    if (integrations && typeof integrations === "object" && !Array.isArray(integrations)) {
+        const integrationPatch = integrations as MutableIntegrationsPatch;
+        if (integrationPatch.github) delete integrationPatch.github.tokenPresent;
+        if (integrationPatch.jira) delete integrationPatch.jira.apiTokenPresent;
+        if (integrationPatch.linear) delete integrationPatch.linear.apiKeyPresent;
+        if (secretDrafts.linearApiKey.trim()) {
+            const linear =
+                integrationPatch.linear &&
+                typeof integrationPatch.linear === "object" &&
+                !Array.isArray(integrationPatch.linear)
+                    ? integrationPatch.linear
+                    : {};
+            integrationPatch.linear = {
+                ...linear,
+                apiKey: secretDrafts.linearApiKey,
+            };
+        }
+    }
+
+    return patch;
 }
 
 const defaultConfig: RaikenConfig = {
@@ -162,7 +261,11 @@ const SECTIONS: { id: Section; label: string; icon: string }[] = [
 
 export function SettingsView() {
     const [activeSection, setActiveSection] = useState<Section>("general");
-    const [form, setForm] = useState<Partial<RaikenConfig>>({});
+    const [form, setForm] = useState<Partial<PublicRaikenConfig>>({});
+    const [secretDrafts, setSecretDrafts] = useState<SecretDrafts>({
+        aiKeys: {},
+        linearApiKey: "",
+    });
     const [dirty, setDirty] = useState(false);
     const [saved, setSaved] = useState(false);
 
@@ -196,11 +299,16 @@ export function SettingsView() {
 
     useEffect(() => {
         if (configQuery.data && !dirty) {
-            setForm(configQuery.data as Partial<RaikenConfig>);
+            setForm(configQuery.data.config);
+            setSecretDrafts({ aiKeys: {}, linearApiKey: "" });
         }
     }, [configQuery.data, dirty]);
 
-    const update = <K extends keyof RaikenConfig>(section: K, field: string, value: unknown) => {
+    const update = <K extends keyof PublicRaikenConfig>(
+        section: K,
+        field: string,
+        value: unknown,
+    ) => {
         setForm((prev) => ({
             ...prev,
             [section]:
@@ -212,22 +320,23 @@ export function SettingsView() {
         setSaved(false);
     };
 
-    const updateTop = (field: keyof RaikenConfig, value: unknown) => {
+    const updateTop = (field: keyof PublicRaikenConfig, value: unknown) => {
         setForm((prev) => ({ ...prev, [field]: value }));
         setDirty(true);
         setSaved(false);
     };
 
     const handleSave = () => {
-        saveMutation.mutate({ config: form as Record<string, unknown> });
+        saveMutation.mutate({ config: createSettingsConfigPatch(form, secretDrafts) });
     };
 
     const handleReset = () => {
-        setForm(configQuery.data as Partial<RaikenConfig>);
+        setForm(configQuery.data?.config ?? {});
+        setSecretDrafts({ aiKeys: {}, linearApiKey: "" });
         setDirty(false);
     };
 
-    const val = <K extends keyof RaikenConfig>(section: K, field: string): unknown => {
+    const val = <K extends keyof PublicRaikenConfig>(section: K, field: string): unknown => {
         const s = form[section];
         if (s && typeof s === "object") {
             return (s as Record<string, unknown>)[field];
@@ -258,7 +367,7 @@ export function SettingsView() {
                 obj = obj[key] as Record<string, unknown>;
             }
             obj[path[path.length - 1]] = value;
-            return next as Partial<RaikenConfig>;
+            return next as Partial<PublicRaikenConfig>;
         });
         setDirty(true);
         setSaved(false);
@@ -274,6 +383,20 @@ export function SettingsView() {
             }
         }
         return obj;
+    };
+
+    const activeAiProvider =
+        (val("ai", "provider") as string | undefined) ?? defaultConfig.ai.provider;
+    const updateAiKeyDraft = (value: string) => {
+        setSecretDrafts((previous) => ({
+            ...previous,
+            aiKeys: {
+                ...previous.aiKeys,
+                [activeAiProvider]: value,
+            },
+        }));
+        setDirty(true);
+        setSaved(false);
     };
 
     if (configQuery.isLoading) {
@@ -480,9 +603,10 @@ export function SettingsView() {
                             <>
                                 <AIProviderPanel
                                     provider={val("ai", "provider") as string | undefined}
-                                    apiKey={val("ai", "apiKey") as string | undefined}
+                                    apiKeyDraft={secretDrafts.aiKeys[activeAiProvider]}
                                     model={val("ai", "model") as string | undefined}
                                     baseURL={val("ai", "baseURL") as string | undefined}
+                                    onApiKeyDraftChange={updateAiKeyDraft}
                                     onChange={(field, value) => update("ai", field, value)}
                                 />
                                 <FieldGroup
@@ -1116,18 +1240,20 @@ export function SettingsView() {
                                     <input
                                         type="password"
                                         autoComplete="off"
-                                        value={
-                                            (valAt(["integrations", "linear", "apiKey"]) as
-                                                | string
-                                                | undefined) ?? ""
+                                        value={secretDrafts.linearApiKey}
+                                        onChange={(e) => {
+                                            setSecretDrafts((previous) => ({
+                                                ...previous,
+                                                linearApiKey: e.target.value,
+                                            }));
+                                            setDirty(true);
+                                            setSaved(false);
+                                        }}
+                                        placeholder={
+                                            valAt(["integrations", "linear", "apiKeyPresent"])
+                                                ? "Saved — enter a replacement"
+                                                : "lin_api_…"
                                         }
-                                        onChange={(e) =>
-                                            updateAt(
-                                                ["integrations", "linear", "apiKey"],
-                                                e.target.value,
-                                            )
-                                        }
-                                        placeholder="lin_api_…"
                                     />
                                 </FieldGroup>
                                 <FieldGroup

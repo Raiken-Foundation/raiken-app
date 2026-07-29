@@ -2,6 +2,16 @@ export { silenceCrawleeLogging } from "./logging";
 export { formatEvalReport } from "./report";
 export { runEvalScenarios } from "./runner";
 export {
+    type BenchmarkEvalOptions,
+    buildBenchmarkScenarios,
+    buildFixtureStorageState,
+    evaluatePreconditionCases,
+    PRECONDITION_CASES,
+    PROTECTED_ROUTES,
+    type PreconditionCase,
+    type PreconditionResult,
+} from "./scenarios/benchmark";
+export {
     buildFlakinessScenario,
     type FlakinessEvalOptions,
 } from "./scenarios/flakiness";

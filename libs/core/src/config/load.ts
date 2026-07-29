@@ -8,7 +8,18 @@
  */
 import * as fsSync from "node:fs";
 import * as path from "node:path";
-import { type AutonomyConfig, defaultConfig } from "./schema";
+import { type AuthConfig, type AutonomyConfig, authConfigSchema, defaultConfig } from "./schema";
+
+export function loadAuthConfig(projectPath: string): AuthConfig {
+    try {
+        const raw = fsSync.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8");
+        const parsed = JSON.parse(raw) as { auth?: unknown };
+        const result = authConfigSchema.safeParse(parsed.auth ?? {});
+        return result.success ? result.data : {};
+    } catch {
+        return {};
+    }
+}
 
 /**
  * Resolve the `autonomy` section of `raiken.config.json`, merged with

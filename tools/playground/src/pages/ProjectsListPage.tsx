@@ -33,6 +33,7 @@ export default function ProjectsListPage() {
 
     useEffect(() => {
         let cancelled = false;
+        void reloadToken;
         async function load() {
             setLoading(true);
             setError(null);

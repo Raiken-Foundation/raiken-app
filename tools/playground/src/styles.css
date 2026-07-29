@@ -1614,6 +1614,19 @@ h3 {
     gap: 0.5rem;
     font-weight: 600;
 }
+.task-title-button {
+    border: 0;
+    background: transparent;
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+    padding: 0;
+    text-align: left;
+}
+.task-title-button:hover {
+    text-decoration: underline;
+}
 .task-row-desc {
     color: var(--color-muted);
     margin-top: 0.25rem;
@@ -1641,6 +1654,19 @@ h3 {
 
 /* Members & activity -------------------------------------------------- */
 
+.member-manager {
+    align-items: end;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    padding: 1rem;
+}
+.member-manager .toolbar-field {
+    flex: 1;
+}
 .member-list {
     list-style: none;
     margin: 0;
@@ -1678,6 +1704,55 @@ h3 {
     font-size: 0.7rem;
     font-weight: 700;
     text-transform: uppercase;
+}
+.task-detail-summary {
+    align-items: center;
+    color: var(--color-muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+.task-detail-description {
+    border-bottom: 1px solid var(--color-border);
+    margin: 1rem 0;
+    padding-bottom: 1rem;
+}
+.comment-section h4 {
+    margin-bottom: 0.75rem;
+}
+.comment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    list-style: none;
+    margin: 0 0 1rem;
+    padding: 0;
+}
+.comment-item {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: 0.75rem;
+}
+.comment-item > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+}
+.comment-item time {
+    color: var(--color-muted);
+    font-size: 0.8rem;
+}
+.comment-item p {
+    margin-top: 0.35rem;
+}
+.comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+.comment-form .btn {
+    align-self: flex-end;
 }
 .activity-feed {
     list-style: none;

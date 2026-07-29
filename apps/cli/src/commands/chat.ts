@@ -1,13 +1,6 @@
 import fs from "node:fs";
 import readline from "node:readline";
-import {
-    BrowserSession,
-    type DOMContext,
-    formatDOMContext,
-    getProvider,
-    resolveAIConfig,
-    runOrchestrator,
-} from "@raiken/core";
+import { BrowserSession, type DOMContext, formatDOMContext, runOrchestrator } from "@raiken/core";
 import { appRouter } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -187,6 +180,18 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     // Set while a cancelable prompt (HITL) is waiting, so Ctrl-C cancels just
     // that prompt instead of tearing down the session.
     let promptCancel: (() => void) | null = null;
+    // A single input dispatcher for every REPL-native wizard/HITL prompt.
+    // Register its receiver before writing the prompt so an answer can never
+    // land in `pendingLines` during the handoff between adjacent prompts.
+    let activePromptAnswer: ((line: string) => void) | null = null;
+    // Lines typed while no `askCancelable` prompt is actively listening (e.g.
+    // the split second between one wizard question and the next, while an
+    // `await` in between — like a live model-catalog fetch — hasn't resumed
+    // yet) get buffered here instead of silently dropped. The next
+    // `askCancelable` call drains from this before waiting for a fresh
+    // keystroke, so answering "ahead" of a prompt still lands on the right
+    // question instead of vanishing into a prompt nobody's listening for yet.
+    const pendingLines: string[] = [];
     let closing = false;
     let exitArmedUntil = 0;
     /** True while an agent turn is streaming — stdin lines go to the queue. */
@@ -349,41 +354,107 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     rl.on("SIGINT", handleInterrupt);
 
     // While a turn is active, lines typed at the terminal are queued for the
-    // next turn (Codex Tab-queue pattern) instead of being lost.
+    // next turn (Codex Tab-queue pattern) instead of being lost. Otherwise —
+    // no turn running, and no `askCancelable` prompt currently attached to
+    // listen for it — buffer it (see `pendingLines` above) rather than
+    // dropping it on the floor.
     rl.on("line", (line: string) => {
-        if (!turnActive || promptCancel) return;
-        const n = inputQueue.enqueue(line);
-        if (n > 0) {
-            const preview = line.trim().slice(0, 48);
-            console.log(dim(`  ↳ queued (${n}): ${preview}${line.trim().length > 48 ? "…" : ""}`));
+        if (activePromptAnswer) {
+            activePromptAnswer(line);
+            return;
         }
+        // `readUserInput` has its own `rl.question` listener. Do not also
+        // buffer its just-submitted chat command/message here: it is already
+        // being delivered to the main loop, and treating it as the first
+        // answer of the next interactive command would misroute `/config`
+        // into the provider picker.
+        if (readingUserInput) return;
+        if (turnActive) {
+            const n = inputQueue.enqueue(line);
+            if (n > 0) {
+                const preview = line.trim().slice(0, 48);
+                console.log(
+                    dim(`  ↳ queued (${n}): ${preview}${line.trim().length > 48 ? "…" : ""}`),
+                );
+            }
+            return;
+        }
+        pendingLines.push(line);
     });
 
     rl.on("close", () => {
         void shutdown();
     });
 
-    const askCancelable = (query: string): Promise<string | null> =>
-        new Promise((resolve) => {
-            process.stdout.write(query);
-            const onLine = (line: string) => {
-                cleanup();
-                resolve(line);
-            };
-            const cleanup = () => {
-                rl.off("line", onLine);
+    const askCancelable = (query: string, secret = false): Promise<string | null> => {
+        const buffered = pendingLines.shift();
+        if (buffered !== undefined) {
+            process.stdout.write(`${query}${secret ? "••••" : buffered}\n`);
+            return Promise.resolve(buffered);
+        }
+        return new Promise((resolve) => {
+            let settled = false;
+            const settle = (answer: string | null) => {
+                if (settled) return;
+                settled = true;
+                activePromptAnswer = null;
                 promptCancel = null;
+                resolve(answer);
             };
+            // The dispatcher is active before the prompt is rendered. The old
+            // per-prompt `rl.on("line")` listener left a small but real gap
+            // after `process.stdout.write(query)`: a line received there was
+            // buffered and this prompt then waited forever.
+            activePromptAnswer = (line) => settle(line);
             promptCancel = () => {
-                cleanup();
+                settle(null);
                 console.log(chalk.yellow("\n  ⏹  Cancelled."));
-                resolve(null);
             };
-            rl.on("line", onLine);
+            process.stdout.write(query);
         });
+    };
+
+    /**
+     * Ask for a secret through the existing readline instance. A second
+     * readline (for example Inquirer's `password`) cannot safely coexist with
+     * the REPL, because it takes raw-mode ownership and leaves the slash menu
+     * / main input out of sync. Readline's output hook is the supported Node
+     * escape hatch for password-style input; it keeps the actual answer in
+     * memory while replacing terminal echo with bullets.
+     */
+    const askSecret = async (query: string): Promise<string | null> => {
+        type ReadlineWithOutputHook = typeof rl & {
+            _writeToOutput?: (value: string) => void;
+        };
+        const mutableReadline = rl as ReadlineWithOutputHook;
+        const originalWrite = mutableReadline._writeToOutput;
+        if (!originalWrite || !process.stdin.isTTY) return askCancelable(query, true);
+
+        mutableReadline._writeToOutput = (value: string) => {
+            // Readline writes the editable row (and cursor-control escape
+            // sequences) through this hook. Never forward the original value:
+            // it contains the API key. A bullet keeps the field visibly
+            // active while masking the key itself.
+            if (value.includes("\n") || value.includes("\r")) {
+                originalWrite.call(rl, "\n");
+            } else if (value.length > 0) {
+                originalWrite.call(rl, "•");
+            }
+        };
+        try {
+            return await askCancelable(query, true);
+        } finally {
+            mutableReadline._writeToOutput = originalWrite;
+        }
+    };
 
     /** Read a prompt, supporting `\` + Enter for multiline continuation. */
     const readUserInput = async (): Promise<string | null> => {
+        // Back at the idle top-level prompt — any input a prior wizard's
+        // `askCancelable` steps left unclaimed (e.g. it ended before draining
+        // everything typed ahead of it) belongs to that command, not to
+        // whatever's typed next, so don't carry it forward.
+        pendingLines.length = 0;
         const snap = await gatherStatusSnapshot(projectPath, permissionMode, planMode);
         console.log("");
         renderStatusStrip(snap);
@@ -470,6 +541,11 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     const handleSaveApproval = async (hitl: Record<string, unknown>): Promise<void> => {
         const testCode = typeof hitl.testCode === "string" ? hitl.testCode : "";
         let suggestedPath = typeof hitl.suggestedPath === "string" ? hitl.suggestedPath : "";
+        const context =
+            hitl.context && typeof hitl.context === "object"
+                ? (hitl.context as Record<string, unknown>)
+                : {};
+        const workflowId = typeof context.workflowId === "string" ? context.workflowId : undefined;
         if (!testCode) return;
 
         if (shouldAutoSave(permissionMode)) {
@@ -503,6 +579,13 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         if (rawAnswer === null) return;
         const answer = rawAnswer.trim().toLowerCase();
         if (answer === "n" || answer === "no") {
+            if (workflowId) {
+                await caller.continueHitlWorkflow({
+                    workflowId,
+                    action: "save",
+                    decision: "reject",
+                });
+            }
             console.log(dim("  Discarded."));
             return;
         }
@@ -514,6 +597,23 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
             if (p.trim()) suggestedPath = p.trim();
         }
 
+        if (workflowId) {
+            const result = await caller.continueHitlWorkflow({
+                workflowId,
+                action: "save",
+                decision: "approve",
+                filePath: suggestedPath,
+            });
+            const saved = result.savedPath;
+            if (saved && alsoRun && result.workflow.status === "await_run_approval") {
+                await caller.continueHitlWorkflow({
+                    workflowId,
+                    action: "run",
+                    decision: "approve",
+                });
+            }
+            return;
+        }
         const saved = await saveTestToDisk(testCode, suggestedPath);
         if (saved && alsoRun) await runSavedTest(saved);
     };
@@ -529,6 +629,11 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     const handleRunApproval = async (hitl: Record<string, unknown>): Promise<void> => {
         const testFile = typeof hitl.testFile === "string" ? hitl.testFile : "";
         const testName = typeof hitl.testName === "string" ? hitl.testName : testFile;
+        const context =
+            hitl.context && typeof hitl.context === "object"
+                ? (hitl.context as Record<string, unknown>)
+                : {};
+        const workflowId = typeof context.workflowId === "string" ? context.workflowId : undefined;
         if (!testFile) return;
 
         if (shouldAutoRun(permissionMode)) {
@@ -548,7 +653,22 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         if (rawAnswer === null) return;
         const answer = rawAnswer.trim().toLowerCase();
         if (answer === "n" || answer === "no") {
+            if (workflowId) {
+                await caller.continueHitlWorkflow({
+                    workflowId,
+                    action: "run",
+                    decision: "reject",
+                });
+            }
             console.log(dim("  Skipped."));
+            return;
+        }
+        if (workflowId) {
+            await caller.continueHitlWorkflow({
+                workflowId,
+                action: "run",
+                decision: "approve",
+            });
             return;
         }
         await runSavedTest(testFile);
@@ -595,6 +715,7 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                 // autoSaveTests/autoRunTests happen to be on disk.
                 autonomyOverride: permissionModeToAutonomyOverride(permissionMode),
                 signal: abort.signal,
+                origin: "repl",
                 onToolCall: (name, args) => {
                     stopThinking();
                     tools.onToolCall(name, args);
@@ -655,34 +776,25 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
     };
 
     /**
-     * The user typed something that looks like a bare API key (no `/config`,
-     * no flags) while no key is configured — very likely they're trying to
-     * set one up and don't know (or don't want to bother with) the `/config`
-     * syntax. Offer to save it for the current provider on the spot instead
-     * of letting it fall through to `runAgentTurn` and dead-end on "API Key
-     * Required". Mirrors how OpenRouter/most providers onboard: paste the
-     * key, done — no flags, no re-entering it later.
+     * A key pasted into the main chat prompt is already visible in terminal
+     * scrollback, so never silently save or send it to the agent. Discard it
+     * and enter the canonical setup flow again through its masked prompt.
      */
-    const handlePastedApiKey = async (key: string): Promise<void> => {
-        const current = resolveAIConfig(projectPath);
-        const provider = getProvider(current.provider);
+    const startSecureConfigAfterPastedKey = async (): Promise<void> => {
         console.log(
-            dim(
-                `\n  That looks like an API key — save it as the ${provider.label} key in ` +
-                    "raiken.config.json?",
+            chalk.yellow(
+                "\n  API keys are entered through the masked `/config` prompt, not the chat prompt.",
             ),
         );
-        const rawAnswer = await askCancelable(
-            `  ${accent("[Y]es · [n]o, send as a message instead ›")} `,
-        );
-        if (rawAnswer === null) return;
-        const answer = rawAnswer.trim().toLowerCase();
-        if (answer === "n" || answer === "no") {
-            await runAgentTurn(key);
-            return;
-        }
+        console.log(dim("  The pasted value was not saved or sent to the AI provider.\n"));
         const { configCommand } = await import("./config");
-        await runParity("config", () => configCommand(undefined, { apiKey: key, fromRepl: true }));
+        await runParity("config", () =>
+            configCommand(undefined, {
+                fromRepl: true,
+                replAsk: askCancelable,
+                replAskSecret: askSecret,
+            }),
+        );
     };
 
     const handleShell = async (command: string): Promise<void> => {
@@ -1073,6 +1185,7 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
                         // No flags at all -> a real (REPL-native) wizard
                         // instead of just printing the catalog + a hint.
                         replAsk: askCancelable,
+                        replAskSecret: askSecret,
                     }),
                 );
                 return;
@@ -1245,8 +1358,8 @@ export async function chatCommand(options: ChatCommandOptions = {}): Promise<voi
         try {
             if (line.startsWith("!")) await handleShell(line.slice(1).trim());
             else if (line.startsWith("/")) await handleSlash(line);
-            else if (looksLikeApiKey(line) && !resolveAIConfig(projectPath).apiKey) {
-                await handlePastedApiKey(line.trim());
+            else if (looksLikeApiKey(line)) {
+                await startSecureConfigAfterPastedKey();
             } else await runAgentTurn(line);
         } catch (err) {
             console.log(chalk.red(`  ✗ ${err instanceof Error ? err.message : err}`));

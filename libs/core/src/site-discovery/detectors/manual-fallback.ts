@@ -197,6 +197,7 @@ async function checkConsentWall(ctx: BlockerDetectorContext): Promise<DiscoveryB
             const locator = page.locator(selector).first();
             if ((await locator.count()) === 0) continue;
             if (!(await locator.isVisible().catch(() => false))) continue;
+            if (!(await isBlockingConsentElement(page, selector, 0))) continue;
             return buildBlocker({
                 ctx,
                 detectorId: "manual:consent_wall",
@@ -237,11 +238,77 @@ async function checkGenericConsentDialog(
                     .count()
                     .catch(() => 0);
                 if (hasAcceptButton === 0) continue;
+                if (!(await isBlockingConsentElement(page, selector, i))) continue;
                 return { selector, text: text.slice(0, 200) };
             }
         } catch {}
     }
     return null;
+}
+
+/**
+ * Consent copy alone is not a wall. Verify that the candidate actually
+ * prevents interaction with usable page content outside itself. This keeps a
+ * bottom cookie banner from masking a login form while still detecting modal
+ * overlays whose backdrop intercepts the rest of the page.
+ */
+async function isBlockingConsentElement(
+    page: Page,
+    selector: string,
+    index: number,
+): Promise<boolean> {
+    try {
+        return await page.evaluate(
+            ({ candidateSelector, candidateIndex, contentSelector }) => {
+                const consentCandidates = Array.from(
+                    document.querySelectorAll(candidateSelector),
+                ) as HTMLElement[];
+                const consentCandidate = consentCandidates[candidateIndex];
+                if (!consentCandidate) return false;
+
+                const isRendered = (element: Element): boolean => {
+                    const style = window.getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return (
+                        style.display !== "none" &&
+                        style.visibility !== "hidden" &&
+                        rect.width > 0 &&
+                        rect.height > 0
+                    );
+                };
+
+                const viewportArea = window.innerWidth * window.innerHeight;
+                const candidateRect = consentCandidate.getBoundingClientRect();
+                const candidateArea =
+                    Math.max(0, candidateRect.width) * Math.max(0, candidateRect.height);
+                if (viewportArea > 0 && candidateArea / viewportArea >= 0.85) return true;
+
+                for (const element of Array.from(document.querySelectorAll(contentSelector))) {
+                    if (consentCandidate.contains(element) || !isRendered(element)) continue;
+                    const rect = element.getBoundingClientRect();
+                    const x = Math.min(
+                        Math.max(rect.left + rect.width / 2, 0),
+                        Math.max(window.innerWidth - 1, 0),
+                    );
+                    const y = Math.min(
+                        Math.max(rect.top + rect.height / 2, 0),
+                        Math.max(window.innerHeight - 1, 0),
+                    );
+                    const hit = document.elementFromPoint(x, y);
+                    if (hit && (hit === element || element.contains(hit))) return false;
+                }
+
+                return true;
+            },
+            {
+                candidateSelector: selector,
+                candidateIndex: index,
+                contentSelector: INTERACTIVE_CONTENT_SELECTOR,
+            },
+        );
+    } catch {
+        return false;
+    }
 }
 
 /**

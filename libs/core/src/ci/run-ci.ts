@@ -213,7 +213,9 @@ function summariseResults(results: TestRunResult[]): CiRunReport["summary"] {
     const summary = { total: results.length, passed: 0, failed: 0, timedOut: 0, errored: 0 };
     for (const r of results) {
         if (r.status === "passed") summary.passed++;
-        else if (r.status === "failed") summary.failed++;
+        // A flaky result is a failure for CI purposes: it did not pass every
+        // attempt, so the suite cannot be called green.
+        else if (r.status === "failed" || r.status === "flaky") summary.failed++;
         else if (r.status === "timeout") summary.timedOut++;
         else summary.errored++;
     }

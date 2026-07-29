@@ -3,29 +3,43 @@
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ParsedPlaywrightRun, ReportFormat } from "@raiken/core";
+import type {
+    DiscoveryPhase,
+    DiscoveryRuntimeEvent,
+    DiscoveryRuntimeState,
+    ProjectOperationLease,
+    ReportFormat,
+    ResolvedAIConfig,
+} from "@raiken/core";
 import {
     AgentMemory,
     AI_PROVIDER_IDS,
+    acquireProjectOperation,
+    advanceHitlWorkflow,
+    applyConfigPatch,
     CodeGraph,
     CodeGraphDB,
+    chatHistoryStore,
     cleanGeneratedTestCode,
+    continueHitlWorkflow as continueWorkflow,
     DiscoveryQueryService,
+    describeAuthStateProblem,
+    discoveryCoordinator,
     EmbeddingsGenerator,
     EntryPointDetector,
     extractReporterJson,
-    findPlaywrightConfigPath,
     formatBytes,
     fullAstToSearchableText,
     getCurrentBranch,
     getProvider,
     getQuickInterpretation,
     getTestRepair,
+    inspectAuthState,
     isCiRunReportShape,
-    killProcessTree,
     listProviderModels,
     listProviders,
     loadAutonomySettings,
+    MAX_DISCOVERY_EVENTS,
     ProjectContext,
     parseCiRunReport,
     parsePlaywrightReport,
@@ -36,7 +50,12 @@ import {
     readApiKeyFromEnv,
     readConfiguredTestDirectory,
     readPlaywrightBaseURL,
+    readPublicConfig,
+    readRawConfig,
+    readRawConfigSync,
     resolveAIConfig,
+    resolvePathWithinProject,
+    resolveUsableAuthStorageStatePath,
     runCi,
     runCover,
     runManualHandoff,
@@ -44,43 +63,21 @@ import {
     SiteKnowledgeDB,
     scanTests,
     syncCurrentTicket,
+    testExecutionService,
+    WorkflowStore,
+    writeConfigAtomic,
     writePlaywrightConfig,
     writeProjectContext,
     writeTestRunReport,
 } from "@raiken/core";
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import {
-    loadDiscoveryConfig,
-    resolveAuthStorageStateDestination,
-    resolveAuthStorageStatePath,
-} from "./config";
+import { loadDiscoveryConfig, resolveAuthStorageStateDestination } from "./config";
+import { getRaikenVersion } from "./version";
 
 // Context type for tRPC procedures
 export interface Context {
     projectPath: string;
-}
-
-interface ChatMessage {
-    id: string;
-    content: string;
-    sender: "user" | "assistant";
-    timestamp: number;
-    fileMentions?: string[];
-}
-
-// Chat history is persisted to disk under the project's `.raiken/` directory so
-// it survives dashboard refreshes AND server restarts. The in-memory Map is a
-// write-through cache keyed by project path (one server usually serves a single
-// project, but keying by path keeps it correct if that ever changes).
-const messageStore: Map<string, ChatMessage[]> = new Map();
-
-// Bound the on-disk history so a long-lived project doesn't grow the file
-// without limit. Keeps the most recent messages.
-const MAX_PERSISTED_MESSAGES = 500;
-
-function getChatHistoryPath(projectPath: string): string {
-    return path.join(projectPath, ".raiken", "chat-history.json");
 }
 
 /**
@@ -97,269 +94,32 @@ async function writeFileAtomic(filePath: string, data: string): Promise<void> {
     await fs.rename(tmp, filePath);
 }
 
-/**
- * Hard ceiling for a single `runTests` invocation. Playwright has its own
- * per-test timeout, but a wedged driver/browser or an unreachable baseURL can
- * hang the whole process indefinitely; this guarantees the request always
- * settles so the dashboard's run spinner can't get stuck forever.
- */
-const TEST_RUN_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
- * Projects with a Playwright run in flight. A per-project lock so rapid Run
- * clicks (or a run + an auto-repair run) can't spawn overlapping Playwright
- * processes that race on the same temp specs / reporter output.
- */
-const activeTestRuns = new Set<string>();
-
-/**
- * Remove orphaned scratch-run spec files (`*.raiken-run-<ts>.spec.ts`) that a
- * previous run failed to clean up — e.g. the server was SIGKILLed mid-run, so
- * the on-close cleanup never fired. Only files older than `maxAgeMs` are removed
- * so an in-flight concurrent run's temp file is never deleted out from under it.
- */
-async function sweepStaleTempSpecs(dirAbs: string, maxAgeMs = 10 * 60 * 1000): Promise<void> {
-    try {
-        const entries = await fs.readdir(dirAbs);
-        const now = Date.now();
-        for (const name of entries) {
-            const match = name.match(/\.raiken-run-(\d+)\.spec\.ts$/);
-            if (!match) continue;
-            const ts = Number(match[1]);
-            if (Number.isFinite(ts) && now - ts > maxAgeMs) {
-                await fs.rm(path.join(dirAbs, name), { force: true });
-            }
-        }
-    } catch {
-        // Best-effort; directory may not exist yet.
-    }
-}
-
-/**
- * Learning loop: attach a dashboard-triggered run to the outcome row created
- * when the file was saved (via `saveGeneratedTest`), gated by
- * `autonomy.autoLearn`. No-op for scratch/ad-hoc runs (no matching
- * generation row exists) and for whole-suite runs (no single test file to
- * attach the aggregate result to). Never throws — a memory-recording failure
- * must not affect the run result returned to the UI.
- */
-function recordDashboardRunOutcome(
-    projectPath: string,
-    testFile: string | undefined,
-    parsedRun: ParsedPlaywrightRun | null,
-): void {
-    if (!testFile || testFile.startsWith("scratch:") || !parsedRun) return;
-    if (parsedRun.tests.length === 0) return;
-    // An all-skipped run executed nothing — recording it would stamp the
-    // outcome row "passed" from a non-run.
-    if (parsedRun.tests.every((t) => t.status === "skipped")) return;
-    try {
-        const autonomy = loadAutonomySettings(projectPath);
-        if (autonomy.autoLearn === "off") return;
-
-        const durationMs = parsedRun.tests.reduce((sum, t) => sum + (t.duration || 0), 0);
-        const firstFailure = parsedRun.tests.find((t) => t.status === "failed");
-        const status: "passed" | "failed" = firstFailure ? "failed" : "passed";
-
-        AgentMemory.getInstance(projectPath).recordRunOutcome(testFile, {
-            status,
-            durationMs,
-            errorMessage: firstFailure?.error?.message,
-        });
-    } catch (err) {
-        console.warn("Failed to record test run outcome:", err);
-    }
-}
-
-function writeFileAtomicSync(filePath: string, data: string): void {
-    const dir = path.dirname(filePath);
-    fsSync.mkdirSync(dir, { recursive: true });
-    const tmp = path.join(dir, `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
-    fsSync.writeFileSync(tmp, data, "utf-8");
-    fsSync.renameSync(tmp, filePath);
-}
-
-/**
- * Throw if `candidate` resolves outside `projectPath`. Guards against absolute
- * paths and `..` traversal in user-influenced values (testDir, filenames).
- * Uses path.sep so a sibling dir with a shared prefix (…/foo-bar for root …/foo)
- * can't slip through a bare startsWith check.
- */
 function assertUnderProjectRoot(candidate: string, projectPath: string): string {
-    const root = path.resolve(projectPath);
-    const target = path.resolve(candidate);
-    if (target !== root && !target.startsWith(root + path.sep)) {
-        throw new Error("Path escapes the project directory.");
-    }
-    return target;
+    return resolvePathWithinProject(projectPath, candidate);
 }
 
-function loadMessagesFromDisk(projectPath: string): ChatMessage[] {
-    try {
-        const raw = fsSync.readFileSync(getChatHistoryPath(projectPath), "utf-8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed?.messages)) {
-            return parsed.messages as ChatMessage[];
-        }
-        // Tolerate a bare array as well.
-        if (Array.isArray(parsed)) {
-            return parsed as ChatMessage[];
-        }
-    } catch {
-        // Missing/corrupt file — start empty.
-    }
-    return [];
-}
-
-function persistMessagesToDisk(projectPath: string, messages: ChatMessage[]): void {
-    try {
-        writeFileAtomicSync(getChatHistoryPath(projectPath), JSON.stringify({ messages }, null, 2));
-    } catch (error) {
-        console.warn(
-            "Failed to persist chat history:",
-            error instanceof Error ? error.message : error,
-        );
-    }
-}
-
-function getMessages(projectPath: string): ChatMessage[] {
-    // Lazily hydrate the cache from disk on first access so a fresh server
-    // process picks up the previous session's chat.
-    if (!messageStore.has(projectPath)) {
-        messageStore.set(projectPath, loadMessagesFromDisk(projectPath));
-    }
-    return messageStore.get(projectPath) || [];
-}
-
-function addMessage(projectPath: string, message: ChatMessage): void {
-    const messages = getMessages(projectPath);
-    // Idempotent on message id: the dashboard can re-send the same message
-    // (retries, React re-renders, reconnects). Update in place instead of
-    // appending a duplicate row so the persisted history stays clean.
-    const existingIndex = message.id ? messages.findIndex((m) => m.id === message.id) : -1;
-    if (existingIndex >= 0) {
-        messages[existingIndex] = message;
-    } else {
-        messages.push(message);
-    }
-    if (messages.length > MAX_PERSISTED_MESSAGES) {
-        messages.splice(0, messages.length - MAX_PERSISTED_MESSAGES);
-    }
-    messageStore.set(projectPath, messages);
-    persistMessagesToDisk(projectPath, messages);
-}
-
-function clearMessages(projectPath: string): void {
-    messageStore.set(projectPath, []);
-    persistMessagesToDisk(projectPath, []);
-}
-
-type DiscoveryPhase = "idle" | "running" | "paused" | "completed" | "error";
-
-interface DiscoveryRuntimeEvent {
-    id: string;
-    timestamp: string;
-    type:
-        | "page_discovered"
-        | "auth_blocked"
-        | "session_completed"
-        | "error"
-        | "warning"
-        | "started"
-        | "continued"
-        | "stopped"
-        | "cleared";
-    message: string;
-    data?: Record<string, unknown>;
-}
-
-interface DiscoveryRuntimeState {
-    phase: DiscoveryPhase;
-    startedAt: string | null;
-    updatedAt: string;
-    currentUrl: string | null;
-    currentDepth: number;
-    pagesDiscovered: number;
-    linksFound: number;
-    authBlockersFound: number;
-    blockedAtUrl: string | null;
-    requiresAuth: boolean;
-    lastError: string | null;
-    lastEvents: DiscoveryRuntimeEvent[];
-    maxPages: number | null;
-    maxDepth: number | null;
-    completionReason: string | null;
-}
-
-interface DiscoveryJob {
-    discovery: SiteDiscovery;
-    promise: Promise<void>;
-}
-
-const discoveryRuntimeStore: Map<string, DiscoveryRuntimeState> = new Map();
-const discoveryJobStore: Map<string, DiscoveryJob> = new Map();
+const discoveryJobStore = discoveryCoordinator.jobStore;
 // Tracks an in-flight `requestBrowserHandoff`. We intentionally only allow
 // one headful handoff per project at a time — the user can't drive two
 // browsers at once and Playwright's chromium launcher is heavy.
-const handoffJobStore: Map<string, Promise<unknown>> = new Map();
-const MAX_DISCOVERY_EVENTS = 100;
-
-function createEmptyDiscoveryState(): DiscoveryRuntimeState {
-    return {
-        phase: "idle",
-        startedAt: null,
-        updatedAt: new Date().toISOString(),
-        currentUrl: null,
-        currentDepth: 0,
-        pagesDiscovered: 0,
-        linksFound: 0,
-        authBlockersFound: 0,
-        blockedAtUrl: null,
-        requiresAuth: false,
-        lastError: null,
-        lastEvents: [],
-        maxPages: null,
-        maxDepth: null,
-        completionReason: null,
-    };
-}
+const handoffJobStore = discoveryCoordinator.handoffStore;
 
 function getDiscoveryState(projectPath: string): DiscoveryRuntimeState {
-    const existing = discoveryRuntimeStore.get(projectPath);
-    if (existing) {
-        return existing;
-    }
-    const created = createEmptyDiscoveryState();
-    discoveryRuntimeStore.set(projectPath, created);
-    return created;
+    return discoveryCoordinator.getState(projectPath);
 }
 
 function patchDiscoveryState(
     projectPath: string,
     patch: Partial<DiscoveryRuntimeState>,
 ): DiscoveryRuntimeState {
-    const current = getDiscoveryState(projectPath);
-    const next: DiscoveryRuntimeState = {
-        ...current,
-        ...patch,
-        updatedAt: new Date().toISOString(),
-    };
-    discoveryRuntimeStore.set(projectPath, next);
-    return next;
+    return discoveryCoordinator.patchState(projectPath, patch);
 }
 
 function pushDiscoveryEvent(
     projectPath: string,
     event: Omit<DiscoveryRuntimeEvent, "id" | "timestamp">,
 ): void {
-    const state = getDiscoveryState(projectPath);
-    const nextEvent: DiscoveryRuntimeEvent = {
-        ...event,
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        timestamp: new Date().toISOString(),
-    };
-    const events = [...state.lastEvents, nextEvent].slice(-MAX_DISCOVERY_EVENTS);
-    patchDiscoveryState(projectPath, { lastEvents: events });
+    discoveryCoordinator.pushEvent(projectPath, event);
 }
 
 // Discovery config is loaded via loadDiscoveryConfig from ./config
@@ -460,22 +220,14 @@ async function hydrateDiscoveryState(projectPath: string): Promise<DiscoveryRunt
                     // state was just dropped on disk. See the discovery view
                     // logs that show "Resumed discovery at .../login" right
                     // after a successful handoff for the symptom this fixes.
-                    const allBlockers = queryService.getAllBlockers();
-                    const recentlyResolved = allBlockers.filter((b) => b.resolvedAt != null);
-                    const stateProvidingResolutions = new Set(["handoff", "provide_state"]);
-                    const resolvedViaState = recentlyResolved.some(
-                        (b) =>
-                            (b.resolution && stateProvidingResolutions.has(b.resolution)) ||
-                            Boolean(b.storageStatePath),
-                    );
                     // `clear` resolutions don't carry a storage path, but if
                     // an `auth-state.json` showed up on disk while the
                     // session was paused (e.g. user ran `raiken auth` out of
                     // band) we still want to re-crawl from startUrl so the
                     // post-login link graph becomes visible.
-                    const authStatePath = path.join(projectPath, ".raiken", "auth-state.json");
-                    const hasFreshAuthState = fsSync.existsSync(authStatePath);
-                    const purgeQueueOnResume = resolvedViaState || hasFreshAuthState;
+                    const hasFreshAuthState =
+                        resolveUsableAuthStorageStatePath(projectPath) !== null;
+                    const purgeQueueOnResume = hasFreshAuthState;
                     const resumeUrl = purgeQueueOnResume
                         ? session.startUrl
                         : session.blockedAtUrl || session.startUrl;
@@ -799,7 +551,7 @@ function startDiscoveryJob(options: {
     }
 
     const config = loadDiscoveryConfig(options.projectPath);
-    const storageStatePath = resolveAuthStorageStatePath(options.projectPath);
+    const storageStatePath = resolveUsableAuthStorageStatePath(options.projectPath);
     const discovery = new SiteDiscovery({
         projectPath: options.projectPath,
         startUrl: options.startUrl,
@@ -883,31 +635,41 @@ function startDiscoveryJob(options: {
     });
 }
 
-function deepMerge(
-    target: Record<string, unknown>,
-    source: Record<string, unknown>,
-): Record<string, unknown> {
-    const result = { ...target };
-    for (const key of Object.keys(source)) {
-        const srcVal = source[key];
-        const tgtVal = target[key];
-        if (
-            srcVal !== null &&
-            typeof srcVal === "object" &&
-            !Array.isArray(srcVal) &&
-            tgtVal !== null &&
-            typeof tgtVal === "object" &&
-            !Array.isArray(tgtVal)
-        ) {
-            result[key] = deepMerge(
-                tgtVal as Record<string, unknown>,
-                srcVal as Record<string, unknown>,
-            );
-        } else {
-            result[key] = srcVal;
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read only the key-presence metadata needed by the setup UIs. Never return
+ * the credentials themselves through the provider catalog.
+ */
+function readSavedProviderKeys(projectPath: string): {
+    keys: Record<string, string>;
+    activeProvider?: string;
+    legacyKey?: string;
+} {
+    try {
+        const parsed = readRawConfigSync(projectPath) as unknown;
+        const aiValue = isRecord(parsed) ? parsed["ai"] : undefined;
+        if (!isRecord(aiValue)) return { keys: {} };
+        const ai = aiValue;
+        const keys: Record<string, string> = {};
+        const apiKeys = ai["apiKeys"];
+        if (isRecord(apiKeys)) {
+            for (const [providerId, value] of Object.entries(apiKeys)) {
+                if (typeof value === "string" && value.trim()) keys[providerId] = value;
+            }
         }
+        const activeProvider = ai["provider"];
+        const legacyKey = ai["apiKey"];
+        return {
+            keys,
+            activeProvider: typeof activeProvider === "string" ? activeProvider : undefined,
+            legacyKey: typeof legacyKey === "string" && legacyKey.trim() ? legacyKey : undefined,
+        };
+    } catch {
+        return { keys: {} };
     }
-    return result;
 }
 
 const t = initTRPC.context<Context>().create();
@@ -917,7 +679,7 @@ export const appRouter = t.router({
         return {
             status: "ok",
             engine: "raiken",
-            version: "0.3.0",
+            version: getRaikenVersion(),
         };
     }),
 
@@ -928,45 +690,48 @@ export const appRouter = t.router({
         };
     }),
 
-    getConfig: t.procedure.query(async ({ ctx }) => {
-        const configPath = path.join(ctx.projectPath, "raiken.config.json");
-        try {
-            const raw = await fs.readFile(configPath, "utf-8");
-            const parsed = JSON.parse(raw) as Record<string, unknown>;
-            // Surface (but don't hide) an on-disk config that no longer matches
-            // the schema — e.g. hand-edited to an out-of-range value. We still
-            // return it so the UI can show/fix the current values, but log so
-            // the mismatch isn't silent.
-            const result = raikenConfigSchema.safeParse(parsed);
-            if (!result.success) {
-                console.warn(
-                    "raiken.config.json failed schema validation:",
-                    result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
-                );
-            }
-            return parsed;
-        } catch {
-            return {} as Record<string, unknown>;
-        }
-    }),
+    getConfig: t.procedure.query(({ ctx }) => readPublicConfig(ctx.projectPath)),
 
     updateConfig: t.procedure
         .input(
             z.object({
                 config: z.record(z.string(), z.unknown()),
+                clearSecrets: z
+                    .array(
+                        z
+                            .string()
+                            .refine(
+                                (value) =>
+                                    value === "ai.apiKey" ||
+                                    value === "auth.credentials.username" ||
+                                    value === "auth.credentials.password" ||
+                                    value === "integrations.github.token" ||
+                                    value === "integrations.jira.apiToken" ||
+                                    value === "integrations.linear.apiKey" ||
+                                    (value.startsWith("ai.apiKeys.") &&
+                                        (AI_PROVIDER_IDS as readonly string[]).includes(
+                                            value.slice("ai.apiKeys.".length),
+                                        )),
+                                "Unknown secret path",
+                            ),
+                    )
+                    .optional(),
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const configPath = path.join(ctx.projectPath, "raiken.config.json");
             let existing: Record<string, unknown> = {};
             try {
-                const raw = await fs.readFile(configPath, "utf-8");
-                existing = JSON.parse(raw) as Record<string, unknown>;
-            } catch {
-                // file doesn't exist yet — start fresh
+                existing = await readRawConfig(ctx.projectPath);
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                    return {
+                        success: false,
+                        errors: ["Unable to read the existing raiken.config.json safely."],
+                    };
+                }
             }
 
-            const merged = deepMerge(existing, input.config);
+            const merged = applyConfigPatch(existing, input.config, input.clearSecrets);
 
             // Validate the merged result BEFORE writing so an invalid update
             // (bad provider, out-of-range temperature, wrong type) is rejected
@@ -983,11 +748,45 @@ export const appRouter = t.router({
                 };
             }
 
-            // Atomic write so a crash mid-save can't corrupt raiken.config.json
-            // (which would otherwise read back as {} and reset AI keys/testDir).
-            await writeFileAtomic(configPath, JSON.stringify(merged, null, 4));
+            await writeConfigAtomic(ctx.projectPath, validation.data);
             return { success: true };
         }),
+
+    continueHitlWorkflow: t.procedure
+        .input(
+            z.discriminatedUnion("action", [
+                z.object({
+                    workflowId: z.string().uuid(),
+                    action: z.literal("save"),
+                    decision: z.enum(["approve", "reject"]),
+                    filePath: z.string().optional(),
+                }),
+                z.object({
+                    workflowId: z.string().uuid(),
+                    action: z.literal("run"),
+                    decision: z.enum(["approve", "reject"]),
+                }),
+            ]),
+        )
+        .mutation(({ input, ctx }) =>
+            continueWorkflow({
+                projectPath: ctx.projectPath,
+                ...input,
+            }),
+        ),
+
+    listActiveHitlWorkflows: t.procedure.query(({ ctx }) =>
+        new WorkflowStore(ctx.projectPath).listActive(),
+    ),
+
+    advanceHitlWorkflow: t.procedure
+        .input(z.object({ workflowId: z.string().uuid() }))
+        .mutation(({ input, ctx }) =>
+            advanceHitlWorkflow({
+                projectPath: ctx.projectPath,
+                workflowId: input.workflowId,
+            }),
+        ),
 
     // ============================================================================
     // AI provider catalog & model discovery
@@ -995,23 +794,40 @@ export const appRouter = t.router({
 
     listAIProviders: t.procedure.query(({ ctx }) => {
         const resolved = resolveAIConfig(ctx.projectPath);
+        const saved = readSavedProviderKeys(ctx.projectPath);
         return {
-            providers: listProviders().map((p) => ({
-                id: p.id,
-                label: p.label,
-                description: p.description,
-                defaultModel: p.defaultModel,
-                defaultBaseURL: p.defaultBaseURL,
-                envVars: p.envVars,
-                publicCatalog: p.publicCatalog,
-                apiKeyUrl: p.apiKeyUrl,
-                apiKeyPlaceholder: p.apiKeyPlaceholder,
-                recommendedModels: p.recommendedModels,
-                /** Whether this provider has a usable API key (env or saved config). */
-                hasKey:
-                    Boolean(readApiKeyFromEnv(p.id)) ||
-                    (resolved.provider === p.id && resolved.apiKeySource !== "none"),
-            })),
+            providers: listProviders().map((p) => {
+                const envKey = readApiKeyFromEnv(p.id);
+                const legacyKeyMatchesProvider =
+                    saved.legacyKey &&
+                    (saved.activeProvider === p.id ||
+                        (!saved.activeProvider && p.id === "openrouter"));
+                const hasProjectKey = Boolean(saved.keys[p.id] || legacyKeyMatchesProvider);
+                const keySource =
+                    p.envVars.length === 0
+                        ? "not-required"
+                        : envKey
+                          ? "environment"
+                          : hasProjectKey
+                            ? "project"
+                            : "missing";
+                return {
+                    id: p.id,
+                    label: p.label,
+                    description: p.description,
+                    defaultModel: p.defaultModel,
+                    defaultBaseURL: p.defaultBaseURL,
+                    envVars: p.envVars,
+                    publicCatalog: p.publicCatalog,
+                    apiKeyUrl: p.apiKeyUrl,
+                    apiKeyPlaceholder: p.apiKeyPlaceholder,
+                    recommendedModels: p.recommendedModels,
+                    /** Key state is metadata only; actual values stay in the project config endpoint. */
+                    keySource,
+                    keyEnvVar: envKey ? p.envVars[0] : null,
+                    hasKey: keySource !== "missing",
+                };
+            }),
             current: {
                 provider: resolved.provider,
                 model: resolved.model,
@@ -1023,21 +839,29 @@ export const appRouter = t.router({
         };
     }),
 
-    listAIModels: t.procedure
+    fetchAIModels: t.procedure
         .input(
             z.object({
                 provider: z.enum(AI_PROVIDER_IDS),
-                /** Optional override key — UI passes the freshly-typed key
-                 *  before save so users can browse models pre-commit. */
-                apiKey: z.string().optional(),
                 baseURL: z.string().optional(),
+                /**
+                 * An unsaved setup draft can be used to browse models before
+                 * saving. This is a mutation so it is carried in the POST
+                 * body, never serialized into a URL or query cache key.
+                 */
+                draftApiKey: z.string().min(1).optional(),
             }),
         )
-        .query(async ({ input }) => {
+        .mutation(async ({ input, ctx }) => {
+            const resolved = resolveAIConfig(ctx.projectPath, {
+                provider: input.provider,
+                baseURL: input.baseURL,
+                apiKey: input.draftApiKey,
+            });
             const result = await listProviderModels({
                 provider: input.provider,
-                apiKey: input.apiKey,
-                baseURL: input.baseURL,
+                apiKey: resolved.apiKey,
+                baseURL: resolved.baseURL,
             });
             return {
                 provider: input.provider,
@@ -1049,7 +873,7 @@ export const appRouter = t.router({
 
     // Chat message persistence endpoints
     getChatMessages: t.procedure.query(({ ctx }) => {
-        return { messages: getMessages(ctx.projectPath) };
+        return { messages: chatHistoryStore.list(ctx.projectPath) };
     }),
 
     addChatMessage: t.procedure
@@ -1063,12 +887,12 @@ export const appRouter = t.router({
             }),
         )
         .mutation(({ input, ctx }) => {
-            addMessage(ctx.projectPath, input);
-            return { success: true, messageCount: getMessages(ctx.projectPath).length };
+            const messageCount = chatHistoryStore.append(ctx.projectPath, input);
+            return { success: true, messageCount };
         }),
 
     clearChatMessages: t.procedure.mutation(({ ctx }) => {
-        clearMessages(ctx.projectPath);
+        chatHistoryStore.clear(ctx.projectPath);
         // Clearing the conversation should also reset the agent's working
         // memory (goal, remembered crawl, pause + observed login), otherwise a
         // "fresh" chat still drags in the previous task's state.
@@ -1589,17 +1413,11 @@ export const appRouter = t.router({
             // configured provider + its env var (not just OPENROUTER_API_KEY)
             // is honored.
             const resolved = resolveAIConfig(projectPath);
-            const aiConfig: { apiKey?: string; model?: string; baseURL?: string } = {
-                apiKey: resolved.apiKey,
-                model: resolved.model,
-                baseURL: resolved.baseURL,
-            };
-
             const result = await syncCurrentTicket({
                 projectPath,
                 config: integrationConfig as Parameters<typeof syncCurrentTicket>[0]["config"],
                 ticketId: input.ticketId,
-                ai: aiConfig,
+                ai: resolved,
             });
 
             return result;
@@ -1924,7 +1742,10 @@ export const appRouter = t.router({
                 // Use default or provided testDir
             }
 
-            const testDirPath = path.join(ctx.projectPath, testDirectory);
+            const testDirPath = assertUnderProjectRoot(
+                path.join(ctx.projectPath, testDirectory),
+                ctx.projectPath,
+            );
             const testFiles: Array<{
                 name: string;
                 path: string;
@@ -2062,231 +1883,14 @@ export const appRouter = t.router({
             }),
         )
         .mutation(async ({ input, ctx }) => {
-            const { spawn } = await import("node:child_process");
-
-            // Auto-create playwright.config.ts if one doesn't exist
-            let configPath = await findPlaywrightConfigPath(ctx.projectPath);
-            if (!configPath) {
-                const result = await writePlaywrightConfig(ctx.projectPath, {
-                    testDir: "./e2e",
-                });
-                if (result.success) {
-                    configPath = result.path;
-                    console.log("Auto-created playwright.config.ts");
-                }
-            }
-
-            // Resolve what path Playwright should actually execute. If the caller
-            // sent the live buffer, materialize it: a real (non-scratch) file is
-            // updated in place (save-on-run); a scratch draft is written to a
-            // throwaway temp spec that we delete after the run.
-            let runTargetFile = input.testFile;
-            let tempFileToCleanup: string | null = null;
-
-            if (input.inlineContent !== undefined) {
-                const cleaned = cleanGeneratedTestCode(input.inlineContent);
-                const isScratch = !input.testFile || input.testFile.startsWith("scratch:");
-
-                if (!isScratch && input.testFile) {
-                    const resolved = path.isAbsolute(input.testFile)
-                        ? input.testFile
-                        : path.join(ctx.projectPath, input.testFile);
-                    if (
-                        resolved === ctx.projectPath ||
-                        resolved.startsWith(`${ctx.projectPath}${path.sep}`)
-                    ) {
-                        await writeFileAtomic(resolved, cleaned);
-                        runTargetFile = input.testFile;
-                    }
-                } else {
-                    const dir = readConfiguredTestDirectory(ctx.projectPath) || "e2e";
-                    const baseRaw = (
-                        input.inlineFileName ||
-                        input.testFile ||
-                        "raiken-scratch"
-                    ).replace(/^scratch:/, "");
-                    const baseName =
-                        path
-                            .basename(baseRaw)
-                            .replace(/\.(spec|test)\.(t|j)sx?$/i, "")
-                            .replace(/[^a-zA-Z0-9_-]+/g, "-")
-                            .replace(/(^-|-$)/g, "") || "raiken-scratch";
-                    const tempRel = path.join(dir, `${baseName}.raiken-run-${Date.now()}.spec.ts`);
-                    const tempAbs = path.join(ctx.projectPath, tempRel);
-                    // Clear out any orphaned temps from previously crashed runs.
-                    await sweepStaleTempSpecs(path.dirname(tempAbs));
-                    await writeFileAtomic(tempAbs, cleaned);
-                    runTargetFile = tempRel;
-                    tempFileToCleanup = tempAbs;
-                }
-            }
-
-            const cleanupTemp = () => {
-                if (!tempFileToCleanup) return;
-                try {
-                    fsSync.rmSync(tempFileToCleanup, { force: true });
-                } catch (err) {
-                    console.warn("Failed to remove temp test file:", err);
-                }
-            };
-
-            const runKey = path.resolve(ctx.projectPath);
-            if (activeTestRuns.has(runKey)) {
-                cleanupTemp();
-                return {
-                    success: false,
-                    exitCode: null,
-                    stdout: "",
-                    stderr: "A test run is already in progress for this project. Please wait for it to finish.",
-                    results: null,
-                    busy: true,
-                };
-            }
-            activeTestRuns.add(runKey);
-            const releaseLock = () => activeTestRuns.delete(runKey);
-
-            return new Promise((resolveRaw) => {
-                // Release the per-project run lock exactly once, whenever the run
-                // settles (close / error / timeout).
-                const resolve = (value: unknown) => {
-                    releaseLock();
-                    resolveRaw(value);
-                };
-                const args = ["test"];
-
-                // Add specific test file if provided
-                if (runTargetFile) {
-                    args.push(runTargetFile);
-                }
-
-                // Add test name filter if provided
-                if (input.testName) {
-                    args.push("-g", input.testName);
-                }
-
-                // Default to serial execution. Raiken drives a single live app
-                // instance backed by ONE authenticated account, so Playwright's
-                // auto-detected parallelism overwhelms dev servers (load-event
-                // timeouts) and races on shared account state — flaky failures
-                // unrelated to the code. Callers can still opt into parallelism.
-                const workers =
-                    input.workers !== undefined && typeof input.workers === "number"
-                        ? input.workers
-                        : 1;
-                args.push(`--workers=${workers}`);
-
-                // Add reporter for structured output
-                args.push("--reporter=json");
-
-                if (configPath) {
-                    args.push("--config", configPath);
-                }
-
-                const testProcess = spawn("npx", ["playwright", ...args], {
-                    cwd: ctx.projectPath,
-                    shell: true,
-                    // Cross-platform `npx` resolution requires shell:true,
-                    // which means `testProcess` is a shell wrapper — signals
-                    // sent to it are NOT forwarded to the real Playwright/
-                    // browser tree underneath. detached:true makes it its own
-                    // process group (POSIX) so killProcessTree() below can
-                    // signal the whole tree instead of leaving zombies.
-                    detached: process.platform !== "win32",
-                    env: { ...process.env, FORCE_COLOR: "0" },
-                });
-
-                let stdout = "";
-                let stderr = "";
-
-                testProcess.stdout?.on("data", (data) => {
-                    stdout += data.toString();
-                });
-
-                testProcess.stderr?.on("data", (data) => {
-                    stderr += data.toString();
-                });
-
-                // Guards so the timeout and close/error handlers can't both
-                // settle the promise. Without a timeout a hung Playwright run
-                // (stuck browser, unreachable baseURL) would leave the UI's
-                // `isRunningTests` spinner on forever with no way to recover.
-                let settled = false;
-                let killTimer: NodeJS.Timeout | null = null;
-
-                const timeoutId = setTimeout(() => {
-                    console.warn(
-                        `Test run exceeded ${TEST_RUN_TIMEOUT_MS}ms — terminating process`,
-                    );
-                    if (testProcess.pid) killProcessTree(testProcess.pid, "SIGTERM");
-                    killTimer = setTimeout(() => {
-                        if (testProcess.pid) killProcessTree(testProcess.pid, "SIGKILL");
-                    }, 5000);
-                    if (settled) return;
-                    settled = true;
-                    cleanupTemp();
-                    const timeoutResults = extractReporterJson(stdout);
-                    const timeoutParsedRun = timeoutResults
-                        ? parsePlaywrightReport(timeoutResults)
-                        : null;
-                    recordDashboardRunOutcome(ctx.projectPath, input.testFile, timeoutParsedRun);
-                    resolve({
-                        success: false,
-                        exitCode: null,
-                        stdout,
-                        stderr: `${stderr}\n[raiken] Test run timed out after ${Math.round(
-                            TEST_RUN_TIMEOUT_MS / 1000,
-                        )}s and was terminated.`,
-                        results: timeoutResults,
-                        // Pre-parsed via the canonical parser (also used by
-                        // `generateTestReport`) so the dashboard doesn't need
-                        // its own duplicate suite-walking logic.
-                        parsedRun: timeoutParsedRun,
-                    });
-                }, TEST_RUN_TIMEOUT_MS);
-
-                testProcess.on("close", (code) => {
-                    clearTimeout(timeoutId);
-                    if (killTimer) clearTimeout(killTimer);
-                    if (settled) return;
-                    settled = true;
-                    cleanupTemp();
-
-                    // Parse the Playwright JSON reporter object out of stdout.
-                    // Uses a balanced-brace scanner (shared with TestRunner) so
-                    // unrelated npm/npx output around the report doesn't corrupt
-                    // the match the way a greedy `{...}` regex would.
-                    const results = extractReporterJson(stdout);
-                    const parsedRun = results ? parsePlaywrightReport(results) : null;
-                    recordDashboardRunOutcome(ctx.projectPath, input.testFile, parsedRun);
-
-                    resolve({
-                        success: code === 0,
-                        exitCode: code,
-                        stdout,
-                        stderr,
-                        results,
-                        parsedRun,
-                    });
-                });
-
-                testProcess.on("error", (error) => {
-                    clearTimeout(timeoutId);
-                    if (killTimer) clearTimeout(killTimer);
-                    if (settled) return;
-                    settled = true;
-                    console.error("Test execution error:", error);
-                    cleanupTemp();
-                    resolve({
-                        success: false,
-                        exitCode: -1,
-                        stdout: "",
-                        stderr: error.message,
-                        results: null,
-                        parsedRun: null,
-                    });
-                });
-            });
+            return testExecutionService.run(ctx.projectPath, input);
         }),
+
+    cancelTestRun: t.procedure
+        .input(z.object({ runId: z.string().uuid().optional() }))
+        .mutation(({ input, ctx }) => ({
+            success: testExecutionService.cancel(ctx.projectPath, input.runId),
+        })),
 
     /**
      * Write a detailed, shareable test-run report (HTML with embedded
@@ -3010,12 +2614,26 @@ export const appRouter = t.router({
                         }
                     }
                 } else if (resolution === "provide_state") {
-                    const path = input.storageStatePath ?? null;
+                    const statePath = input.storageStatePath
+                        ? resolvePathWithinProject(projectPath, input.storageStatePath)
+                        : resolveUsableAuthStorageStatePath(projectPath);
+                    if (!statePath) {
+                        throw new Error(
+                            "No usable auth state was provided. Run `raiken auth` and try again.",
+                        );
+                    }
+                    const inspection = inspectAuthState(statePath);
+                    if (inspection.status !== "valid") {
+                        throw new Error(
+                            describeAuthStateProblem(inspection) ??
+                                "The provided auth state is not usable.",
+                        );
+                    }
                     if (input.blockerId) {
                         siteDb.markBlockerResolved(input.blockerId, {
                             resolution: "provide_state",
                             resolvedVia: "dashboard",
-                            storageStatePath: path,
+                            storageStatePath: statePath,
                         });
                     }
                     // Sweep all unresolved auth blockers — they all share
@@ -3026,7 +2644,7 @@ export const appRouter = t.router({
                             siteDb.markBlockerResolved(b.id, {
                                 resolution: "provide_state",
                                 resolvedVia: "dashboard",
-                                storageStatePath: path,
+                                storageStatePath: statePath,
                             });
                         }
                     }
@@ -3062,8 +2680,7 @@ export const appRouter = t.router({
                         targetBlocker?.category === "auth_required" ||
                         input.category === "auth_required";
                     if (targetIsAuth) {
-                        const authStatePath = path.join(projectPath, ".raiken", "auth-state.json");
-                        if (fsSync.existsSync(authStatePath)) {
+                        if (resolveUsableAuthStorageStatePath(projectPath)) {
                             purgeQueueOnResume = true;
                             resumeStartUrl = activeSession.startUrl;
                         }
@@ -3425,7 +3042,7 @@ export const appRouter = t.router({
                 // non-fatal
             }
 
-            discoveryRuntimeStore.set(projectPath, createEmptyDiscoveryState());
+            discoveryCoordinator.resetState(projectPath);
             pushDiscoveryEvent(projectPath, {
                 type: "cleared",
                 message: "Discovery data cleared",
@@ -3640,6 +3257,16 @@ export const appRouter = t.router({
                 data: { url, blockerId, category },
             });
 
+            let operation: ProjectOperationLease;
+            try {
+                operation = await acquireProjectOperation(projectPath, "browser");
+            } catch (error) {
+                return {
+                    success: false,
+                    message: error instanceof Error ? error.message : "Project is busy.",
+                    runtime: getDiscoveryState(projectPath),
+                };
+            }
             const run = runManualHandoff({
                 projectPath,
                 url,
@@ -3689,6 +3316,7 @@ export const appRouter = t.router({
                 };
             } finally {
                 handoffJobStore.delete(projectPath);
+                await operation.release();
             }
         }),
 
@@ -3891,7 +3519,7 @@ export const appRouter = t.router({
 
 async function loadAiAndIntegrations(projectPath: string): Promise<{
     integrationConfig?: Parameters<typeof runCover>[0]["integrations"];
-    aiConfig: { apiKey?: string; model?: string; baseURL?: string };
+    aiConfig: ResolvedAIConfig;
 }> {
     let integrationConfig: Parameters<typeof runCover>[0]["integrations"] | undefined;
     try {
@@ -3906,12 +3534,7 @@ async function loadAiAndIntegrations(projectPath: string): Promise<{
     // Resolve AI config through the multi-provider resolver so the configured
     // provider + its env var (not just OPENROUTER_API_KEY) is honored.
     const resolved = resolveAIConfig(projectPath);
-    const aiConfig: { apiKey?: string; model?: string; baseURL?: string } = {
-        apiKey: resolved.apiKey,
-        model: resolved.model,
-        baseURL: resolved.baseURL,
-    };
-    return { integrationConfig, aiConfig };
+    return { integrationConfig, aiConfig: resolved };
 }
 
 // Export the Type to be shared

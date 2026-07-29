@@ -6,6 +6,11 @@
  */
 
 import type { Browser, BrowserContext, Page } from "playwright";
+import {
+    describeAuthStateProblem,
+    inspectAuthState,
+    writeValidatedAuthState,
+} from "../config/auth-state";
 import type {
     AccessibilityNode,
     DOMContext,
@@ -13,6 +18,11 @@ import type {
     InteractiveElement,
     PagePerformance,
 } from "./dom-capture";
+import {
+    closeAllBrowserSessions,
+    getOrCreateBrowserSession,
+    resetBrowserRegistry,
+} from "./registry";
 
 // Playwright doesn't export a standalone `AriaRole` type, only the inline
 // union on `Page.getByRole`. Extracted here so runtime-parsed role strings
@@ -152,12 +162,9 @@ interface RawElement {
  * BrowserSession singleton - manages a persistent browser instance
  */
 export class BrowserSession {
-    private static instance: BrowserSession | null = null;
-
     private browser: Browser | null = null;
     private context: BrowserContext | null = null;
     private page: Page | null = null;
-    private projectPath: string;
     // `headless`/`viewportWidth`/`viewportHeight`/`timeout` are always filled in
     // by the constructor's defaults below, so they're narrowed to required here
     // rather than re-asserted with `!` at every call site that reads them.
@@ -176,8 +183,7 @@ export class BrowserSession {
     private lastNetworkIdle?: boolean;
     private lastSlowResponses?: PagePerformance["slowResponses"];
 
-    private constructor(projectPath: string, options: BrowserSessionOptions = {}) {
-        this.projectPath = projectPath;
+    private constructor(_projectPath: string, options: BrowserSessionOptions = {}) {
         this.options = {
             headless: true,
             viewportWidth: 1280,
@@ -185,6 +191,11 @@ export class BrowserSession {
             timeout: 30000,
             ...options,
         };
+    }
+
+    /** @internal Used by the canonical-project browser registry. */
+    static __create(projectPath: string, options?: BrowserSessionOptions): BrowserSession {
+        return new BrowserSession(projectPath, options);
     }
 
     /**
@@ -221,28 +232,7 @@ export class BrowserSession {
      * (the browser itself is shared; only the auth-state lookup path changes).
      */
     static getInstance(projectPath: string): BrowserSession {
-        if (!BrowserSession.instance) {
-            BrowserSession.instance = new BrowserSession(projectPath);
-        } else if (BrowserSession.instance.projectPath !== projectPath) {
-            const prev = BrowserSession.instance;
-            prev.projectPath = projectPath;
-            prev.selectorMemory = null;
-            // A different project must not reuse the previous project's browser
-            // context (cookies, auth storage state, open tabs). Detach the old
-            // browser immediately so isActive() reports false right away, and
-            // close it in the background. The next start() launches fresh with
-            // the new project's auth-state path.
-            if (prev.browser) {
-                const toClose = prev.browser;
-                prev.browser = null;
-                prev.context = null;
-                prev.page = null;
-                void toClose.close().catch(() => {
-                    /* already gone */
-                });
-            }
-        }
-        return BrowserSession.instance;
+        return getOrCreateBrowserSession(projectPath);
     }
 
     /**
@@ -323,16 +313,16 @@ export class BrowserSession {
                 viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
             };
 
-            // Load auth state if provided
+            // Fail fast with a Raiken-specific diagnosis instead of passing a
+            // missing, malformed, empty, or expired snapshot to Playwright.
             if (opts.storageStatePath) {
-                try {
-                    const fs = await import("node:fs");
-                    if (fs.existsSync(opts.storageStatePath)) {
-                        contextOptions.storageState = opts.storageStatePath;
-                    }
-                } catch (error) {
-                    console.warn("Failed to load auth state:", error);
+                const inspection = inspectAuthState(opts.storageStatePath);
+                if (inspection.status !== "valid") {
+                    throw new Error(
+                        describeAuthStateProblem(inspection) ?? "Auth state is not usable.",
+                    );
                 }
+                contextOptions.storageState = opts.storageStatePath;
             }
 
             this.context = await this.browser.newContext(contextOptions);
@@ -372,23 +362,14 @@ export class BrowserSession {
      * instance. Intended for process shutdown so Chromium doesn't linger.
      */
     static async closeInstance(): Promise<void> {
-        if (BrowserSession.instance) {
-            await BrowserSession.instance.close();
-        }
+        await closeAllBrowserSessions();
     }
 
     /**
      * Reset the singleton (for testing)
      */
     static async reset(): Promise<void> {
-        if (BrowserSession.instance) {
-            try {
-                await BrowserSession.instance.close();
-            } catch (err) {
-                console.warn("Browser close failed during reset:", err);
-            }
-            BrowserSession.instance = null;
-        }
+        await resetBrowserRegistry();
     }
 
     // =========================================================================
@@ -717,7 +698,7 @@ export class BrowserSession {
             await loc.click({ timeout: this.actionTimeoutMs() });
         } catch {
             // Some triggers open their popup on focus rather than click.
-            await loc.focus().catch(() => {});
+            await loc.focus().catch(() => undefined);
         }
 
         const popup = await this.locateComboboxPopup(meta.controls, preOpenListboxes);
@@ -729,7 +710,9 @@ export class BrowserSession {
         // trigger fires default key activation — a Space in the value clicks
         // the button and toggles the popup shut.
         if (meta.tag === "input" || meta.tag === "textarea" || meta.isContentEditable) {
-            await loc.pressSequentially(value, { timeout: this.actionTimeoutMs() }).catch(() => {});
+            await loc
+                .pressSequentially(value, { timeout: this.actionTimeoutMs() })
+                .catch(() => undefined);
         }
 
         const option = await this.findComboboxOption(popup, value);
@@ -1352,7 +1335,8 @@ export class BrowserSession {
      */
     async saveAuthState(path: string): Promise<void> {
         this.ensureActive();
-        await this.getActiveContext().storageState({ path });
+        const state = await this.getActiveContext().storageState();
+        writeValidatedAuthState(path, state);
     }
 
     /**
@@ -1361,6 +1345,10 @@ export class BrowserSession {
     async loadAuthState(path: string): Promise<void> {
         if (!this.browser) {
             throw new Error("Browser not started. Call start() first.");
+        }
+        const inspection = inspectAuthState(path);
+        if (inspection.status !== "valid") {
+            throw new Error(describeAuthStateProblem(inspection) ?? "Auth state is not usable.");
         }
 
         // Close existing context and create new one with auth state
@@ -1527,7 +1515,24 @@ export class BrowserSession {
                 '[role="textbox"]',
                 "[onclick]",
                 '[tabindex]:not([tabindex="-1"])',
+                // Modal landmarks. Not clickable, but tests assert on the modal
+                // itself (`getByRole('alertdialog', { name })`) and the
+                // dialog/alertdialog distinction is invisible to a capture that
+                // only lists the controls inside the modal — which is how a test
+                // ends up asserting the wrong role and failing for the wrong
+                // reason.
+                "dialog",
+                '[role="dialog"]',
+                '[role="alertdialog"]',
+                '[aria-modal="true"]',
             ].join(",");
+
+            // Roles whose element is a container: their `textContent` is the
+            // whole subtree, so the generic accessible-name fallbacks would
+            // produce a useless 500-character "name". Only explicitly authored
+            // names (aria-label / aria-labelledby) or a heading inside the
+            // container count.
+            const LANDMARK_ROLES = new Set(["dialog", "alertdialog"]);
 
             const isVisible = (el: Element): boolean => {
                 const rects = el.getClientRects();
@@ -1580,9 +1585,35 @@ export class BrowserSession {
                 return "";
             };
 
+            /**
+             * Accessible name for a modal landmark. `dialog`/`alertdialog` do
+             * not take their name from content, so only the authored sources
+             * Playwright itself consults are used — anything else would emit a
+             * `getByRole('alertdialog', { name })` locator that no longer
+             * resolves at runtime.
+             */
+            const landmarkName = (el: Element): string => {
+                const aria = el.getAttribute("aria-label");
+                if (aria?.trim()) return aria.trim();
+                const labelledby = el.getAttribute("aria-labelledby");
+                if (labelledby) {
+                    const txt = labelledby
+                        .split(/\s+/)
+                        .map((id) => document.getElementById(id)?.textContent || "")
+                        .join(" ")
+                        .replace(/\s+/g, " ")
+                        .trim();
+                    if (txt) return txt;
+                }
+                const title = el.getAttribute("title");
+                return title?.trim() || "";
+            };
+
             const computeRole = (el: Element, tag: string, type: string | null): string => {
                 const explicit = el.getAttribute("role");
                 if (explicit) return explicit;
+                if (tag === "dialog") return "dialog";
+                if (el.getAttribute("aria-modal") === "true") return "dialog";
                 if (tag === "a") return "link";
                 if (tag === "button") return "button";
                 if (tag === "textarea") return "textbox";
@@ -1607,7 +1638,8 @@ export class BrowserSession {
                 const tag = el.tagName.toLowerCase();
                 const type = el.getAttribute("type");
                 const role = computeRole(el, tag, type);
-                const name = accessibleName(el);
+                const isLandmark = LANDMARK_ROLES.has(role);
+                const name = isLandmark ? landmarkName(el) : accessibleName(el);
                 const isFormField =
                     (tag === "input" &&
                         !["submit", "button", "reset", "hidden"].includes(
@@ -1620,7 +1652,11 @@ export class BrowserSession {
                     tag,
                     role,
                     name: name.slice(0, 200),
-                    text: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
+                    // A landmark's textContent is its whole subtree. Left empty
+                    // so it never becomes a display name or a text locator.
+                    text: isLandmark
+                        ? ""
+                        : (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
                     type,
                     testId: el.getAttribute("data-testid"),
                     htmlId: el.getAttribute("id"),
@@ -1845,6 +1881,7 @@ export class BrowserSession {
             role === "radio" ||
             role === "slider";
         const isButton = role === "button";
+        const isLandmark = role === "dialog" || role === "alertdialog";
 
         // data-testid: most stable, framework-provided
         if (testId) selectors.push(`getByTestId('${esc(testId)}')`);
@@ -1873,6 +1910,9 @@ export class BrowserSession {
 
         // Playwright semantic locators: accessible, resilient
         if (name) selectors.push(`getByRole('${esc(role)}', { name: '${esc(name)}' })`);
+        // An unnamed modal is still worth addressing by role — that is how a
+        // test scopes assertions to the open dialog.
+        else if (isLandmark) selectors.push(`getByRole('${esc(role)}')`);
         if (htmlAttrs?.ariaLabel) {
             selectors.push(`getByLabel('${esc(htmlAttrs.ariaLabel)}')`);
         }
@@ -1880,8 +1920,9 @@ export class BrowserSession {
             selectors.push(`getByPlaceholder('${esc(htmlAttrs.placeholder)}')`);
         }
 
-        // Text content: last resort, least specific
-        if (name) selectors.push(`getByText('${esc(name)}')`);
+        // Text content: last resort, least specific. Never for a landmark,
+        // whose text is its entire subtree.
+        if (name && !isLandmark) selectors.push(`getByText('${esc(name)}')`);
 
         return selectors;
     }

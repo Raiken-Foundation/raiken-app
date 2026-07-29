@@ -23,11 +23,6 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
     // Provider-aware AI resolution (honors configured provider + its env var),
     // instead of only the raw `ai` block / OPENROUTER_API_KEY.
     const resolved = resolveAIConfig(projectPath);
-    const aiConfig = {
-        apiKey: resolved.apiKey,
-        model: resolved.model,
-        baseURL: resolved.baseURL,
-    };
 
     console.log(chalk.cyan("\nSyncing with ticket system...\n"));
 
@@ -35,7 +30,7 @@ export async function syncCommand(options: SyncCommandOptions): Promise<void> {
         projectPath,
         config: integrationConfig as Parameters<typeof syncCurrentTicket>[0]["config"],
         ticketId: options.ticket,
-        ai: aiConfig,
+        ai: resolved,
     });
 
     printSyncResult(result);

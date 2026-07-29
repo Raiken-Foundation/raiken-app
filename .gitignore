@@ -7,6 +7,8 @@ out-tsc
 
 # dependencies
 node_modules
+# This workspace is pnpm-only; nested npm lockfiles are accidental.
+tools/**/package-lock.json
 
 # IDEs and editors
 /.idea
@@ -43,11 +45,13 @@ vite.config.*.timestamp*
 vitest.config.*.timestamp*
 # Raiken runtime data
 .raiken/
+raiken.config.json
 storage/
 .env
 
 # Local / generated docs
 /docs/
+raiken.ctx.md
 
 # Playwright and test runner output
 playwright-report/

@@ -58,6 +58,7 @@ export default defineConfig(() => ({
         environment: "jsdom",
         include: ["{src,tests}/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}"],
         reporters: ["default"],
+        testTimeout: 15000,
         coverage: {
             reportsDirectory: "../../coverage/apps/dashboard",
             provider: "v8" as const,

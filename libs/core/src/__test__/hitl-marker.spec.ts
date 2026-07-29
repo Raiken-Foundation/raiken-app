@@ -29,6 +29,17 @@ describe("buildPendingHitlMarker", () => {
         expect(payload["options"]).toEqual(
             expect.arrayContaining([expect.objectContaining({ id: "save_approve" })]),
         );
+        expect(payload["overwriteTarget"]).toBe(false);
+    });
+
+    // Without this the approving surface can't tell "update this spec" from
+    // "here's a name I made up", and dedupes a requested overwrite away.
+    it("carries the overwrite-target flag for a deliberately targeted file", () => {
+        const actions: HITLAction[] = [
+            createSaveAction("test('x', async () => {});", "e2e/login.spec.ts", "login", true),
+        ];
+        const payload = decodeMarker(buildPendingHitlMarker(actions) as string);
+        expect(payload["overwriteTarget"]).toBe(true);
     });
 
     it("surfaces a run_approval card for a pending run action", () => {

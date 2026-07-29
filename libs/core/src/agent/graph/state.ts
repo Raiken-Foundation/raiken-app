@@ -1,7 +1,14 @@
 import { Annotation } from "@langchain/langgraph";
 import type { TestRunResult } from "../../testing/runner";
+import type { SelectorViolation } from "../grounding";
 import type { ContextData } from "../prompts";
-import type { ActionResult, AgentIntent, ContextPlan, InterruptionInfo } from "./utils";
+import type {
+    ActionResult,
+    AgentIntent,
+    AuthPrecondition,
+    ContextPlan,
+    InterruptionInfo,
+} from "./utils";
 
 export const GraphState = Annotation.Root({
     userPrompt: Annotation<string>({
@@ -24,6 +31,10 @@ export const GraphState = Annotation.Root({
     intent: Annotation<AgentIntent>({
         value: (_left, right) => right,
         default: () => "explore",
+    }),
+    authPrecondition: Annotation<AuthPrecondition>({
+        value: (_left, right) => right,
+        default: () => "authenticated",
     }),
     activeGoal: Annotation<string | null>({
         value: (_left, right) => right,
@@ -206,6 +217,15 @@ export const GraphState = Annotation.Root({
     groundingFailed: Annotation<boolean>({
         value: (_left, right) => right,
         default: () => false,
+    }),
+    /**
+     * Locators in the last generated draft that the captured DOM contradicts.
+     * Non-empty means generation was rejected rather than saved, so consumers
+     * can show *why* instead of a bare failure.
+     */
+    groundingViolations: Annotation<SelectorViolation[]>({
+        value: (_left, right) => right,
+        default: () => [],
     }),
 });
 

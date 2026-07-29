@@ -16,6 +16,11 @@ import {
     RequestQueue,
 } from "crawlee";
 import type { Page, Response } from "playwright";
+import {
+    describeAuthStateProblem,
+    inspectAuthState,
+    resolveUsableAuthStorageStatePath,
+} from "../config/auth-state";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "./db";
 import {
@@ -268,9 +273,9 @@ export class SiteDiscovery extends EventEmitter {
      * Session-scoped resolution memory.
      *
      * `skippedUrls`         URLs the user told us to skip after a blocker.
-     * `ignoredCategories`   blocker categories downgraded to `severity: "log"`
-     *                       for the rest of this session ("don't pause for
-     *                       captchas again, just record them").
+     * `ignoredCategories`   blocker categories skipped by the detector
+     *                       pipeline for the rest of this session so later
+     *                       detectors and page processing can continue.
      *
      * Both survive a pause/resume cycle via the `discovery_sessions` row
      * (`skipped_urls_json` / `ignored_categories_json` columns).
@@ -681,15 +686,17 @@ export class SiteDiscovery extends EventEmitter {
                 return;
             }
 
-            // S6: a fresh crawl that completes with zero pages discovered is
-            // almost always a bogus start URL, network error, or 100%-excluded
-            // host — surface it as an error instead of a "complete" success.
+            // S6: any crawl session that completes with zero pages discovered
+            // is almost always a bogus start URL, unresolved blocker, network
+            // error, or 100%-excluded host — surface it as an error instead of
+            // a "complete" success. Continued sessions rehydrate their prior
+            // page count, so this only fails when the whole session made no
+            // progress.
             // We append whatever diagnostic context we managed to capture
             // (failed requests + reasons, blockers detected) so the user gets
             // an actionable message instead of a generic "is the URL
             // reachable" prompt.
-            const isFreshCrawl = !this.options.continueSession;
-            if (isFreshCrawl && this.stats.pagesDiscovered === 0) {
+            if (this.stats.pagesDiscovered === 0) {
                 const message = this.buildEmptyCrawlError();
                 this.stats.status = "failed";
                 if (this.sessionId) {
@@ -1071,11 +1078,10 @@ export class SiteDiscovery extends EventEmitter {
             }
         }
 
-        // Check for auth state file
-        const authStatePath = path.join(this.options.projectPath, ".raiken", "auth-state.json");
-
-        if (fs.existsSync(authStatePath) && !this.options.storageStatePath) {
-            this.options.storageStatePath = authStatePath;
+        if (!this.options.storageStatePath) {
+            this.options.storageStatePath = resolveUsableAuthStorageStatePath(
+                this.options.projectPath,
+            );
         }
 
         // Update session status
@@ -1098,11 +1104,10 @@ export class SiteDiscovery extends EventEmitter {
      * Start a new discovery session.
      */
     private async startNewSession(): Promise<void> {
-        // Check for auth state file
-        const authStatePath = path.join(this.options.projectPath, ".raiken", "auth-state.json");
-
-        if (fs.existsSync(authStatePath) && !this.options.storageStatePath) {
-            this.options.storageStatePath = authStatePath;
+        if (!this.options.storageStatePath) {
+            this.options.storageStatePath = resolveUsableAuthStorageStatePath(
+                this.options.projectPath,
+            );
         }
 
         // Create session in database
@@ -1259,42 +1264,46 @@ export class SiteDiscovery extends EventEmitter {
                     });
                 }
 
-                if (effectiveSeverity !== "pause") {
+                if (effectiveSeverity === "skip") {
                     this.markBrokenLinks(url, normalizedUrl, "Blocker detected", "broken");
                     committed = true;
                     return;
                 }
 
-                // Once we've successfully crawled at least one page with
-                // the current storage state, treat further auth blockers
-                // as one-off protected URLs (skip them) rather than as
-                // session-wide failures (pause + teardown). Captchas /
-                // 5xx don't get magically cleared by a storage state, so
-                // they always pause.
-                const shouldPause =
-                    blocker.category !== "auth_required"
-                        ? true
-                        : this.options.pauseOnAuth && !this.hasSeenAuthenticatedSuccess;
+                if (effectiveSeverity === "pause") {
+                    // Once we've successfully crawled at least one page with
+                    // the current storage state, treat further auth blockers
+                    // as one-off protected URLs (skip them) rather than as
+                    // session-wide failures (pause + teardown). Captchas /
+                    // 5xx don't get magically cleared by a storage state, so
+                    // they always pause.
+                    const shouldPause =
+                        blocker.category !== "auth_required"
+                            ? true
+                            : this.options.pauseOnAuth && !this.hasSeenAuthenticatedSuccess;
 
-                if (!shouldPause) {
-                    this.markBrokenLinks(
-                        url,
-                        normalizedUrl,
-                        blocker.category === "auth_required" ? "Auth required" : "Blocker detected",
-                        blocker.category === "auth_required" ? "auth_required" : "broken",
-                    );
+                    if (!shouldPause) {
+                        this.markBrokenLinks(
+                            url,
+                            normalizedUrl,
+                            blocker.category === "auth_required"
+                                ? "Auth required"
+                                : "Blocker detected",
+                            blocker.category === "auth_required" ? "auth_required" : "broken",
+                        );
+                        committed = true;
+                        return;
+                    }
+
+                    // Pass blockedAtUrl into pause so it is re-inserted into
+                    // pendingRequests *before* queue_json is serialized — otherwise
+                    // the committed delete below would leave it out of the snapshot.
+                    // calledFromHandler: true — this call is itself one of the
+                    // crawler's currently-running tasks; see `pause()` doc.
+                    await this.pause({ blockedAtUrl: url, calledFromHandler: true });
                     committed = true;
                     return;
                 }
-
-                // Pass blockedAtUrl into pause so it is re-inserted into
-                // pendingRequests *before* queue_json is serialized — otherwise
-                // the committed delete below would leave it out of the snapshot.
-                // calledFromHandler: true — this call is itself one of the
-                // crawler's currently-running tasks; see `pause()` doc.
-                await this.pause({ blockedAtUrl: url, calledFromHandler: true });
-                committed = true;
-                return;
             }
 
             if (response && response.status() >= 400) {
@@ -1716,12 +1725,16 @@ export class SiteDiscovery extends EventEmitter {
         url: string,
         response: Response | undefined,
     ): Promise<DiscoveryBlocker | null> {
-        return runBlockerPipeline(this.detectors, {
-            projectPath: this.options.projectPath,
-            url,
-            page,
-            response,
-        });
+        return runBlockerPipeline(
+            this.detectors,
+            {
+                projectPath: this.options.projectPath,
+                url,
+                page,
+                response,
+            },
+            { skipCategories: this.ignoredCategories },
+        );
     }
 
     /**
@@ -1862,9 +1875,10 @@ export class SiteDiscovery extends EventEmitter {
             return;
         }
         try {
-            if (!fs.existsSync(this.options.storageStatePath)) {
+            const inspection = inspectAuthState(this.options.storageStatePath);
+            if (inspection.status !== "valid") {
                 if (!this.storageStateWarningEmitted) {
-                    console.warn(`Storage state not found at ${this.options.storageStatePath}`);
+                    console.warn(describeAuthStateProblem(inspection));
                     this.storageStateWarningEmitted = true;
                 }
                 this.playwrightStorageState = null;

@@ -40,8 +40,8 @@ graph TD
 
 ### Prerequisites
 
-- **Node.js**: v18 or higher
-- **pnpm**: v8 or higher (install with `npm install -g pnpm`)
+- **Node.js**: v22.x (see `.nvmrc`)
+- **pnpm**: v10.x (see root `packageManager`; install with `corepack enable`)
 
 ### Installation
 
@@ -76,7 +76,7 @@ nx serve cli
 ```
 - Starts Fastify server on `http://localhost:7101`
 - Serves tRPC API at `/api/trpc`
-- Hot-reloads on code changes
+- Rebuild/restart the CLI after backend changes; the current server target does not watch files
 
 **Terminal 2 - Frontend (React Dashboard)**
 ```bash
@@ -99,10 +99,12 @@ nx serve dashboard
    nx build cli
    ```
 
-3. **Install runtime deps for the built CLI**
+3. **Install the built CLI globally**
    ```bash
-   cd dist/apps/cli && npm install --legacy-peer-deps && cd ../../..
+   pnpm run cli:install
    ```
+   The build installs production dependencies into the distribution directory;
+   this command then links that packaged CLI globally through pnpm.
 
 4. **Run the built CLI**
    ```bash
@@ -132,6 +134,10 @@ raiken discover [url] [options]  # Autonomously discover web application structu
 
 raiken auth [options]          # Authenticate to save browser session state
   --url <url>                  # URL to navigate to for authentication
+  --script <path>              # Run a project-local custom login script
+  --manual                     # Ignore configured script; use an interactive browser
+  --headed                     # Show the scripted-login browser
+  --timeout <ms>               # Script timeout
 ```
 
 ### Configuration
@@ -153,7 +159,12 @@ Raiken is configured via `raiken.config.json` in your project root (created by `
   "auth": {
     "storageStatePath": ".raiken/auth-state.json",
     "baseUrl": "http://localhost:3000",
-    "loginPath": "/login"
+    "loginPath": "/login",
+    "customLoginScript": "e2e/auth/login.ts",
+    "credentials": {
+      "usernameEnv": "E2E_USERNAME",
+      "passwordEnv": "E2E_PASSWORD"
+    }
   },
   "browser": {
     "defaultBrowser": "chromium",
@@ -189,6 +200,12 @@ Raiken is configured via `raiken.config.json` in your project root (created by `
 ```
 
 The API key can also be set via the `OPENROUTER_API_KEY` environment variable (recommended) or in a `.env` file in your project root.
+
+When `auth.customLoginScript` is configured, `raiken auth` runs it through the project's Playwright
+installation and saves the resulting context to `storageStatePath`. The script must default-export
+an async function receiving `{ page, context, credentials }`. Credentials are resolved from the
+named environment variables and are never written into generated specs. Use `raiken auth --manual`
+to force the interactive fallback.
 
 ### Development Commands
 
@@ -271,15 +288,19 @@ Stop all servers with `Ctrl+C` in each terminal.
 
 #### Integration Test (Playground)
 ```bash
-# Build the CLI
-nx build cli
-
-# Install runtime deps for the built CLI
-cd dist/apps/cli && npm install --legacy-peer-deps && cd ../../..
+# Build the CLI and install its runtime deps (pnpm)
+pnpm run cli:deploy
 
 # Start the CLI in the playground
 cd tools/playground
 node ../../dist/apps/cli/bin.cjs start -p 7101
+```
+
+#### Distribution smoke test
+Cross-platform smoke script (version + health endpoint) for the built artifact:
+```bash
+pnpm run cli:deploy
+pnpm smoke:cli
 ```
 
 Verify the server is healthy:
@@ -306,6 +327,15 @@ pnpm format               # Format entire codebase (Biome)
 pnpm check                # Run all Biome checks
 nx lint <project>         # Lint specific project
 ```
+
+#### CI
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
+
+- **static-checks** — Biome, TypeScript, unit tests, CLI build
+- **discovery-integration** — serialized Playwright-backed discovery integration specs (`pnpm test:integration`)
+- **cli-smoke** — builds the CLI on Ubuntu and runs `pnpm smoke:cli`
+
+Release version metadata lives in `apps/cli/package.json`. The CLI `--version` flag reads it via `getRaikenVersion()` in `libs/shared/src/lib/version.ts`. Wire the health endpoint to the same helper when updating `libs/shared/src/lib/router.ts`.
 
 ### Build Errors
 ```bash

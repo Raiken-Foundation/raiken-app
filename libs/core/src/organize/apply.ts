@@ -7,6 +7,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeConfigAtomicSync } from "../config";
 import { CodeGraphDB } from "../database/db";
 import { rewriteFileImports } from "./imports";
 import { listTestDirectoryFiles } from "./inventory";
@@ -42,11 +43,7 @@ export function applyOrganizePlan(
         result.configCleanup.changes.length > 0
     ) {
         try {
-            const configPath = path.join(projectPath, "raiken.config.json");
-            fs.writeFileSync(
-                configPath,
-                `${JSON.stringify(result.configCleanup.cleanedConfig, null, 2)}\n`,
-            );
+            writeConfigAtomicSync(projectPath, result.configCleanup.cleanedConfig);
             configWritten = true;
         } catch (err) {
             errors.push(

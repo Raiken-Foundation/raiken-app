@@ -33,6 +33,13 @@ export const aiConfigSchema = z.object({
     provider: aiProviderSchema.optional(),
     /** Provider API key (also resolvable from a provider-specific env var; see PROVIDER_ENV_VARS). */
     apiKey: z.string().optional(),
+    /**
+     * Provider-scoped local keys. `apiKey` remains as the active-provider
+     * compatibility field for existing configs and dashboard clients; this
+     * map lets users switch between configured providers without re-entering
+     * credentials.
+     */
+    apiKeys: z.partialRecord(aiProviderSchema, z.string()).optional(),
     /** AI model identifier (e.g. anthropic/claude-sonnet-4.5, gpt-4o, claude-3-5-sonnet-20241022). */
     model: z.string().optional(),
     /** Base URL override (used for self-hosted Ollama or 'custom' providers). */

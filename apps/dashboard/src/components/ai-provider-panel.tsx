@@ -1,3 +1,4 @@
+import type { AIProviderId } from "@raiken/shared";
 import { type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { trpc } from "../utils/trpc";
 
@@ -12,6 +13,8 @@ interface ProviderOption {
     apiKeyUrl?: string | null;
     apiKeyPlaceholder?: string | null;
     hasKey: boolean;
+    keySource?: "environment" | "project" | "not-required" | "missing";
+    keyEnvVar?: string | null;
     recommendedModels?: ModelOption[];
 }
 
@@ -22,6 +25,49 @@ interface ModelOption {
     description?: string;
     deprecated?: boolean;
     source?: "live" | "recommended";
+}
+
+type ProviderKeySource = "environment" | "project" | "not-required" | "missing";
+
+export function resolveProviderKeyStatus(
+    providerId: string,
+    activeProviderId: string,
+    apiKey: string | undefined,
+    apiKeys: Record<string, string>,
+    source: ProviderKeySource | undefined,
+    envVar?: string | null,
+): { source: ProviderKeySource; label: string; title: string } {
+    const hasLocalKey = Boolean(
+        apiKeys[providerId]?.trim() || (providerId === activeProviderId && apiKey?.trim()),
+    );
+    const resolvedSource: ProviderKeySource =
+        source === "environment" ? "environment" : hasLocalKey ? "project" : (source ?? "missing");
+    switch (resolvedSource) {
+        case "environment":
+            return {
+                source: resolvedSource,
+                label: `using ${envVar ?? "environment key"}`,
+                title: "An environment variable supplies this key",
+            };
+        case "project":
+            return {
+                source: resolvedSource,
+                label: "key saved",
+                title: "A key is saved in this project's configuration",
+            };
+        case "not-required":
+            return {
+                source: resolvedSource,
+                label: "no key needed",
+                title: "This provider does not require a key",
+            };
+        default:
+            return {
+                source: resolvedSource,
+                label: "needs key",
+                title: "Set a key before using this provider",
+            };
+    }
 }
 
 export function normalizeModelOptions(models: ModelOption[], currentModel?: string): ModelOption[] {
@@ -57,10 +103,12 @@ function optionDomId(listboxId: string, modelId: string): string {
 
 interface AIProviderPanelProps {
     provider: string | undefined;
-    apiKey: string | undefined;
+    /** Unsaved, write-only key draft for the active provider. */
+    apiKeyDraft?: string;
     model: string | undefined;
     baseURL: string | undefined;
-    onChange: (field: "provider" | "apiKey" | "model" | "baseURL", value: string) => void;
+    onApiKeyDraftChange: (value: string) => void;
+    onChange: (field: "provider" | "model" | "baseURL", value: string) => void;
 }
 
 /**
@@ -68,15 +116,16 @@ interface AIProviderPanelProps {
  *
  * - Provider list comes from the backend (`listAIProviders`) so adding a new
  *   provider in core/agent/ai-providers.ts automatically surfaces it here.
- * - Model list is fetched on demand per (provider, apiKey) pair via
- *   `listAIModels`. Falls back to a free-form text input if the provider
+ * - Model list is fetched on demand with the POST-only `fetchAIModels`
+ *   mutation. Falls back to a free-form text input if the provider
  *   refuses, so users can still type arbitrary IDs.
  */
 export function AIProviderPanel({
     provider,
-    apiKey,
+    apiKeyDraft,
     model,
     baseURL,
+    onApiKeyDraftChange,
     onChange,
 }: AIProviderPanelProps) {
     const providerId = useId();
@@ -93,31 +142,34 @@ export function AIProviderPanel({
 
     const activeProviderId = provider ?? providersQuery.data?.current.provider ?? "openrouter";
     const activeProvider = providers.find((p) => p.id === activeProviderId);
+    const activeKeyStatus = resolveProviderKeyStatus(
+        activeProviderId,
+        activeProviderId,
+        apiKeyDraft,
+        {},
+        activeProvider?.keySource,
+        activeProvider?.keyEnvVar,
+    );
 
     // Defer model fetch until either the provider exposes a public catalog
     // or the user has supplied a key (avoid spamming /models with no auth).
     const canFetchModels = Boolean(
-        activeProvider && (activeProvider.publicCatalog || apiKey || activeProvider.hasKey),
+        activeProvider && (activeProvider.publicCatalog || apiKeyDraft || activeProvider.hasKey),
     );
+    const modelsMutation = trpc.fetchAIModels.useMutation();
+    const mutateModels = modelsMutation.mutate;
 
-    type ListModelsInput = Exclude<
-        Parameters<typeof trpc.listAIModels.useQuery>[0],
-        symbol | undefined
-    >;
-    type ProviderEnum = ListModelsInput["provider"];
-
-    const modelsQuery = trpc.listAIModels.useQuery(
-        {
-            provider: activeProviderId as ProviderEnum,
-            apiKey: apiKey?.trim() || undefined,
-            baseURL: baseURL?.trim() || undefined,
-        },
-        {
-            enabled: canFetchModels,
-            staleTime: 60_000,
-            retry: false,
-        },
-    );
+    useEffect(() => {
+        if (!canFetchModels) return;
+        const timer = window.setTimeout(() => {
+            mutateModels({
+                provider: activeProviderId as AIProviderId,
+                baseURL: baseURL?.trim() || undefined,
+                draftApiKey: apiKeyDraft?.trim() || undefined,
+            });
+        }, 400);
+        return () => window.clearTimeout(timer);
+    }, [activeProviderId, apiKeyDraft, baseURL, canFetchModels, mutateModels]);
 
     const [search, setSearch] = useState("");
     const [open, setOpen] = useState(false);
@@ -141,11 +193,14 @@ export function AIProviderPanel({
     }, []);
 
     const allModels = useMemo(() => {
-        const liveModels = (modelsQuery.data?.models ?? []) as ModelOption[];
+        const liveModels =
+            modelsMutation.data?.provider === activeProviderId
+                ? ((modelsMutation.data.models ?? []) as ModelOption[])
+                : [];
         const providerModels =
             liveModels.length > 0 ? liveModels : (activeProvider?.recommendedModels ?? []);
         return normalizeModelOptions(providerModels, model);
-    }, [activeProvider?.recommendedModels, model, modelsQuery.data?.models]);
+    }, [activeProvider?.recommendedModels, activeProviderId, model, modelsMutation.data]);
     const filteredModels = useMemo(() => {
         if (!search.trim()) return allModels;
         const q = search.trim().toLowerCase();
@@ -161,15 +216,17 @@ export function AIProviderPanel({
         setActiveOptionIndex(0);
     }, [activeProviderId, filteredModels.length, search]);
 
-    const modelsError = modelsQuery.data?.error;
+    const modelsError =
+        modelsMutation.data?.provider === activeProviderId
+            ? (modelsMutation.data.error ?? modelsMutation.error?.message)
+            : undefined;
     const modelsHaveResults = filteredModels.length > 0;
-    const isFetchingModels = modelsQuery.isFetching;
+    const isFetchingModels = modelsMutation.isPending;
     const activeOption = filteredModels[activeOptionIndex];
 
     function handleProviderChange(nextId: string) {
         const next = providers.find((p) => p.id === nextId);
         onChange("provider", nextId);
-        onChange("apiKey", "");
         onChange("model", next?.defaultModel ?? "");
         onChange("baseURL", next?.defaultBaseURL ?? "");
         setSearch("");
@@ -227,6 +284,14 @@ export function AIProviderPanel({
                 <div className="ai-provider-grid">
                     {providers.map((p) => {
                         const active = p.id === activeProviderId;
+                        const keyStatus = resolveProviderKeyStatus(
+                            p.id,
+                            activeProviderId,
+                            apiKeyDraft,
+                            {},
+                            p.keySource,
+                            p.keyEnvVar,
+                        );
                         return (
                             <button
                                 key={p.id}
@@ -237,12 +302,12 @@ export function AIProviderPanel({
                             >
                                 <span className="ai-provider-card-head">
                                     <span className="ai-provider-card-name">{p.label}</span>
-                                    {p.hasKey && (
+                                    {keyStatus.source !== "missing" && (
                                         <span
                                             className="ai-provider-card-tag"
-                                            title="API key detected in env"
+                                            title={keyStatus.title}
                                         >
-                                            key set
+                                            {keyStatus.label}
                                         </span>
                                     )}
                                 </span>
@@ -263,7 +328,15 @@ export function AIProviderPanel({
                 <label htmlFor={apiKeyId} className="ai-row-label">
                     API key
                     <span className="ai-row-hint">
-                        Stored locally in <code>raiken.config.json</code>
+                        Saved only in this project&apos;s gitignored <code>raiken.config.json</code>
+                        .
+                        {activeKeyStatus.source === "environment" && activeProvider?.keyEnvVar && (
+                            <>
+                                {" "}
+                                <code>{activeProvider.keyEnvVar}</code> is currently used instead of
+                                a saved key.
+                            </>
+                        )}
                         {activeProvider?.envVars[0] && (
                             <>
                                 {" "}
@@ -291,8 +364,8 @@ export function AIProviderPanel({
                     type="password"
                     autoComplete="off"
                     spellCheck={false}
-                    value={apiKey ?? ""}
-                    onChange={(e) => onChange("apiKey", e.target.value)}
+                    value={apiKeyDraft ?? ""}
+                    onChange={(e) => onApiKeyDraftChange(e.target.value)}
                     placeholder={activeProvider?.apiKeyPlaceholder ?? "sk-…"}
                     className="ai-input"
                 />
@@ -306,8 +379,9 @@ export function AIProviderPanel({
                         {isFetchingModels && "Loading models…"}
                         {!isFetchingModels && modelsError && (
                             <>
-                                Couldn't load model list from {activeProvider?.label}: {modelsError}
-                                . You can still type a model ID below.
+                                Couldn&apos;t load live models from {activeProvider?.label}.
+                                Recommended models are still available, or you can type a model ID
+                                below.
                             </>
                         )}
                         {!isFetchingModels &&

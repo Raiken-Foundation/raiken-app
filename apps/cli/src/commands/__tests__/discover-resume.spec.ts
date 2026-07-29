@@ -24,7 +24,11 @@ import * as path from "node:path";
 
 import { CodeGraphDB, SiteKnowledgeDB } from "@raiken/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getResumeContext, resolveAuthBlockersWithState } from "../discover";
+import {
+    getResumeContext,
+    resolveAuthBlockersWithState,
+    resolveUsableDiscoveryAuthState,
+} from "../discover";
 
 describe("discover --continue resume context (disc-5)", () => {
     let projectPath: string;
@@ -105,7 +109,13 @@ describe("discover --continue resume context (disc-5)", () => {
         seedPausedAuthSession();
         const authStatePath = path.join(projectPath, ".raiken", "auth-state.json");
         fs.mkdirSync(path.dirname(authStatePath), { recursive: true });
-        fs.writeFileSync(authStatePath, JSON.stringify({ cookies: [], origins: [] }));
+        fs.writeFileSync(
+            authStatePath,
+            JSON.stringify({
+                cookies: [{ name: "session", value: "active", expires: -1 }],
+                origins: [],
+            }),
+        );
 
         const before = await getResumeContext(projectPath);
         expect(before.pendingAuthBlockers).toHaveLength(1);
@@ -136,5 +146,34 @@ describe("discover --continue resume context (disc-5)", () => {
         await expect(
             resolveAuthBlockersWithState(projectPath, [], "/tmp/whatever"),
         ).resolves.toBeUndefined();
+    });
+
+    it("does not treat expired state as fresh resume authentication", () => {
+        const authStatePath = path.join(projectPath, ".raiken", "auth-state.json");
+        fs.mkdirSync(path.dirname(authStatePath), { recursive: true });
+        fs.writeFileSync(
+            authStatePath,
+            JSON.stringify({
+                cookies: [
+                    {
+                        name: "session",
+                        value: "stale",
+                        expires: Math.floor(Date.now() / 1000) - 60,
+                    },
+                ],
+                origins: [],
+            }),
+        );
+
+        expect(resolveUsableDiscoveryAuthState(projectPath)).toBeNull();
+
+        fs.writeFileSync(
+            authStatePath,
+            JSON.stringify({
+                cookies: [{ name: "session", value: "active", expires: -1 }],
+                origins: [],
+            }),
+        );
+        expect(resolveUsableDiscoveryAuthState(projectPath)).toBe(fs.realpathSync(authStatePath));
     });
 });

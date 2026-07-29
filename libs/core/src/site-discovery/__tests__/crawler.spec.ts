@@ -12,7 +12,7 @@
  *      assert the captcha + 5xx behavior without a Playwright instance.
  *
  * Full crawler integration (real Chromium, real network) is covered by
- * the playground manual test described in `docs/MANUAL_TEST_PLAN.md`.
+ * the playground runbook under "Manual Discovery Testing" in the root README.
  */
 
 import * as fs from "node:fs";
@@ -140,6 +140,45 @@ describe("runBlockerPipeline", () => {
         };
         const blocker = await runBlockerPipeline([broken, good], makeContext());
         expect(blocker?.detectorId).toBe("good");
+    });
+
+    it("skips ignored categories and continues to later detectors", async () => {
+        const calls: string[] = [];
+        const consent: BlockerDetector = {
+            id: "consent",
+            category: "consent_wall",
+            priority: 10,
+            async detect(ctx) {
+                calls.push("consent");
+                return buildBlocker({
+                    ctx,
+                    detectorId: "consent",
+                    category: "consent_wall",
+                    evidence: {},
+                });
+            },
+        };
+        const auth: BlockerDetector = {
+            id: "auth",
+            category: "auth_required",
+            priority: 20,
+            async detect(ctx) {
+                calls.push("auth");
+                return buildBlocker({
+                    ctx,
+                    detectorId: "auth",
+                    category: "auth_required",
+                    evidence: {},
+                });
+            },
+        };
+
+        const blocker = await runBlockerPipeline([consent, auth], makeContext(), {
+            skipCategories: new Set(["consent_wall"]),
+        });
+
+        expect(blocker?.category).toBe("auth_required");
+        expect(calls).toEqual(["consent", "auth"]);
     });
 
     it("returns null when every detector abstains", async () => {

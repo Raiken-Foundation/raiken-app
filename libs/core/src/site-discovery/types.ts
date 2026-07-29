@@ -222,8 +222,9 @@ export interface DiscoverySession {
     skippedUrlsJson?: string | null;
     /**
      * JSON-serialised array of {@link BlockerCategory} values the user told
-     * us to log-only for the rest of this session. Detectors still fire, but
-     * the crawler downgrades severity to "log".
+     * us to ignore for the rest of this session. Detectors may still inspect
+     * the page, but matching categories are skipped so later detectors and
+     * normal page processing can continue.
      */
     ignoredCategoriesJson?: string | null;
 }

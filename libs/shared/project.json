@@ -3,7 +3,7 @@
     "$schema": "../../node_modules/nx/schemas/project-schema.json",
     "sourceRoot": "libs/shared/src",
     "projectType": "library",
-    "tags": [],
+    "tags": ["type:lib", "scope:shared"],
     "targets": {
         "build": {
             "executor": "@nx/esbuild:esbuild",
@@ -15,6 +15,13 @@
                 "assets": ["libs/shared/*.md"],
                 "format": ["cjs"],
                 "generatePackageJson": true
+            }
+        },
+        "test": {
+            "executor": "@nx/vitest:test",
+            "outputs": ["{workspaceRoot}/coverage/libs/shared"],
+            "options": {
+                "config": "libs/shared/vitest.config.ts"
             }
         }
     }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useSession } from "../auth/useSession";
 import Nav from "../Nav";
 
 const ALL_PROJECTS = [
@@ -18,8 +19,10 @@ const ALL_PROJECTS = [
 ];
 
 export default function Projects() {
+    const { session, loading, hasPermission } = useSession();
     const [status, setStatus] = useState("all");
     const [search, setSearch] = useState("");
+    const canCreate = hasPermission("manage:projects") || hasPermission("edit:projects");
 
     const filtered = ALL_PROJECTS.filter((p) => {
         if (status !== "all" && p.status !== status) return false;
@@ -71,10 +74,22 @@ export default function Projects() {
                             className="btn-primary"
                             style={{ width: "auto", padding: ".4rem 1rem" }}
                             type="button"
+                            disabled={!canCreate}
+                            title={
+                                canCreate
+                                    ? "Create a new project"
+                                    : "Viewers have read-only access to projects"
+                            }
+                            aria-disabled={!canCreate}
                         >
                             New project
                         </button>
                     </div>
+                    {!loading && session?.role === "viewer" && (
+                        <output className="permission-note" data-testid="projects-create-denied">
+                            Project creation is unavailable for viewer accounts (read-only).
+                        </output>
+                    )}
                 </div>
 
                 <div className="card">

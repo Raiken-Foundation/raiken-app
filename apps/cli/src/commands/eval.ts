@@ -5,6 +5,10 @@
  *   - `playground`: ground-truth scenarios against the repo's fixture apps
  *     (crawler/route discovery, auth-wall detection). No LLM key needed.
  *     Intended to run from the raiken repo root (or pass --dir).
+ *   - `benchmark`: accuracy regression gates against the full
+ *     `tools/playground-auth` fixture — blocker layering, resumed crawls,
+ *     authenticated route recall, modal selector grounding, auth
+ *     preconditions. No LLM key needed; also expects the repo root.
  *   - `flakiness <testFile>`: project-agnostic — runs one spec N times against
  *     the current project and scores run-to-run stability.
  *
@@ -21,6 +25,7 @@ export interface EvalCommandOptions {
     repeat?: string;
     filter?: string;
     runs?: string;
+    expectTests?: string;
     dir?: string;
     out?: string;
     json?: boolean;
@@ -32,7 +37,21 @@ export async function evalCommand(
     target: string | undefined,
     options: EvalCommandOptions,
 ): Promise<void> {
+    if (!["playground", "benchmark", "flakiness"].includes(suite)) {
+        console.error(
+            chalk.red(
+                `Unknown eval suite "${suite}". Available: playground, benchmark, flakiness.`,
+            ),
+        );
+        return cliExit(2);
+    }
+    if (suite === "flakiness" && !target) {
+        console.error(chalk.red("usage: raiken eval flakiness <testFile> [--runs N]"));
+        return cliExit(2);
+    }
+
     const {
+        buildBenchmarkScenarios,
         buildFlakinessScenario,
         buildPlaygroundScenarios,
         formatEvalReport,
@@ -57,23 +76,23 @@ export async function evalCommand(
             playgroundDir: path.join(root, "playground"),
             authPlaygroundDir: path.join(root, "playground-auth"),
         });
-    } else if (suite === "flakiness") {
-        if (!target) {
-            console.error(chalk.red("usage: raiken eval flakiness <testFile> [--runs N]"));
-            return cliExit(2);
-        }
+    } else if (suite === "benchmark") {
+        const root = path.resolve(options.dir ?? path.join(projectPath, "tools"));
+        scenarios = buildBenchmarkScenarios({
+            authPlaygroundDir: path.join(root, "playground-auth"),
+        });
+    } else {
+        const expectTests = Number(options.expectTests);
         scenarios = [
             buildFlakinessScenario({
                 projectPath,
                 testFile: target,
                 runs: parseCount(options.runs, 3),
+                ...(Number.isFinite(expectTests) && expectTests > 0
+                    ? { expectedTests: Math.floor(expectTests) }
+                    : {}),
             }),
         ];
-    } else {
-        console.error(
-            chalk.red(`Unknown eval suite "${suite}". Available: playground, flakiness.`),
-        );
-        return cliExit(2);
     }
 
     const report = await runEvalScenarios(scenarios, {

@@ -48,6 +48,10 @@ export const createHitlSaveNode =
             filePath,
             content: state.testDraft,
             testName: fileName,
+            // A path taken from the file the user had open is a deliberate
+            // target, so whoever approves the save must overwrite it instead
+            // of writing `name-2.spec.ts` next to it.
+            _overwriteTarget: Boolean(state.targetTestFile),
         });
 
         if (!saveResult.success) {
@@ -114,10 +118,18 @@ export const createHitlRunNode = (deps: AgentNodeDeps) => async (state: GraphSta
             // interrupting the user for instead of silently leaving the
             // last (still-broken) attempt on disk unannounced.
             if (exhausted && autonomy.autoCorrect === "suggest") {
+                // "Unstable" and "broken" call for different fixes, so name
+                // which one this is: verification runs the spec more than
+                // once, and a fix that only held on some runs is reported as
+                // flaky rather than failing.
+                const unstable = results.some((r) => r.status === "flaky");
+                const verdict = unstable
+                    ? `${state.savedTestPath} passes only some of the time`
+                    : `${state.savedTestPath} still fails`;
                 return {
                     testRunResult: results,
                     shouldPause: true,
-                    awaitUserMessage: `Automatic repair tried ${state.repairAttempts} time(s) but ${state.savedTestPath} still fails. The last attempt is saved — review it, edit manually, or ask me to try again.`,
+                    awaitUserMessage: `Automatic repair tried ${state.repairAttempts} time(s) but ${verdict}. The last attempt is saved — review it, edit manually, or ask me to try again.`,
                 };
             }
         }

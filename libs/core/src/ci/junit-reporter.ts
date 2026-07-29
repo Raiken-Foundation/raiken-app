@@ -38,7 +38,9 @@ export function renderJUnitXml(run: CiRunReport): string {
 function renderSuite(testFile: string, tests: TestRunResult[]): string {
     const totals = {
         total: tests.length,
-        failed: tests.filter((t) => t.status === "failed").length,
+        // JUnit has no notion of flakiness, and a test that passed only on
+        // some attempts is not a pass — report it as a failure so CI blocks.
+        failed: tests.filter((t) => t.status === "failed" || t.status === "flaky").length,
         errored: tests.filter((t) => t.status === "error" || t.status === "timeout").length,
     };
     const timeSec = (tests.reduce((acc, t) => acc + t.duration, 0) / 1000).toFixed(3);
@@ -63,8 +65,13 @@ function renderCase(testFile: string, t: TestRunResult): string {
         return `${head}${tail}`;
     }
 
-    if (t.status === "failed") {
-        const message = xmlAttr(t.error?.message || "Test failed");
+    if (t.status === "failed" || t.status === "flaky") {
+        const message = xmlAttr(
+            t.error?.message ||
+                (t.status === "flaky"
+                    ? "Test passed on some attempts and failed on others"
+                    : "Test failed"),
+        );
         const body = xmlText(t.error?.stack || t.error?.message || "");
         return [
             head,

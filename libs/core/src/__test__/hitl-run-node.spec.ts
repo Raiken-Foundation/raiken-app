@@ -105,6 +105,35 @@ describe("createHitlRunNode", () => {
         expect(result.testRunResult).toBeUndefined();
     });
 
+    // "Broken" and "unstable" need different fixes from the user, and a
+    // repair that only held on some verification runs is the second.
+    it("says a repaired test is unstable rather than failing when verification was mixed", async () => {
+        const flaky: TestRunResult[] = [
+            {
+                testFile: "e2e/login.spec.ts",
+                testName: "deletes a workspace",
+                status: "flaky",
+                duration: 900,
+                error: { message: "welcome modal intercepted the click" },
+            },
+        ];
+        const callTool: CallTool = vi.fn(async () => ({
+            success: false,
+            data: flaky,
+            message: "1 test(s) failed",
+        }));
+
+        const node = createHitlRunNode({
+            callTool,
+            autonomy: { autoCorrect: "suggest", maxRetries: 2 },
+        } as unknown as Parameters<typeof createHitlRunNode>[0]);
+        const result = await node(baseState({ repairAttempts: 2 }));
+
+        expect(result.shouldPause).toBe(true);
+        expect(result.awaitUserMessage).toContain("passes only some of the time");
+        expect(result.testRunResult).toEqual(flaky);
+    });
+
     it("does nothing when there's no saved test or the caller didn't request a run", async () => {
         const callTool: CallTool = vi.fn();
         const node = createHitlRunNode({ callTool } as unknown as Parameters<

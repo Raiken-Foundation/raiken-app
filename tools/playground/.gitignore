@@ -36,7 +36,10 @@ lerna-debug.log*
 
 /test-results/
 /test-reports/
+/playwright-report/
 /tests/
-/e2e/ 
-playwright.config.ts
+/e2e/*
+!/e2e/workflows.spec.ts
+!/e2e/_flaky-examples.spec.ts
 raiken.config.json
+raiken.ctx.md

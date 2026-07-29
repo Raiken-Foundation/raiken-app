@@ -82,6 +82,18 @@ export default function ProjectDetailPage() {
         setActivity(a);
     };
 
+    const refreshMembersAndActivity = async () => {
+        if (!project) return;
+        const [updatedProject, nextMembers, nextActivity] = await Promise.all([
+            getProjectBySlug(project.slug),
+            listMembers(project.id),
+            listActivity(project.id),
+        ]);
+        setProject({ ...updatedProject, memberIds: [...updatedProject.memberIds] });
+        setMembers(nextMembers);
+        setActivity(nextActivity);
+    };
+
     const handleStatusChange = async (taskId: string, status: TaskStatus) => {
         if (!user) return;
         try {
@@ -108,7 +120,7 @@ export default function ProjectDetailPage() {
         if (!project || !user) return;
         try {
             const updated = await archiveProject(project.id, user);
-            setProject(updated);
+            setProject({ ...updated, memberIds: [...updated.memberIds] });
             push("success", "Project archived");
         } catch (err) {
             push("error", err instanceof ApiError ? err.message : "Failed to archive project");
@@ -191,11 +203,18 @@ export default function ProjectDetailPage() {
                         tasks={tasks}
                         members={members}
                         onCreated={refreshTasksAndActivity}
+                        onActivityChanged={refreshTasksAndActivity}
                         onStatusChange={handleStatusChange}
                         onDelete={handleDelete}
                     />
                 )}
-                {tab === "members" && <MembersPanel members={members} owner={project.ownerId} />}
+                {tab === "members" && (
+                    <MembersPanel
+                        project={project}
+                        members={members}
+                        onChanged={refreshMembersAndActivity}
+                    />
+                )}
                 {tab === "activity" && <ActivityPanel entries={activity} members={members} />}
             </Tabs>
 

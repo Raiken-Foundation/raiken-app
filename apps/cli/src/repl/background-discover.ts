@@ -5,8 +5,13 @@
  * stderr; the status strip can poll `getBackgroundDiscoverStatus()`.
  */
 
-import type { DiscoveryEvent, DiscoveryStats, SiteDiscovery } from "@raiken/core";
-import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
+import {
+    type DiscoveryEvent,
+    type DiscoveryStats,
+    resolveUsableAuthStorageStatePath,
+    type SiteDiscovery,
+} from "@raiken/core";
+import { loadDiscoveryConfig } from "@raiken/shared";
 import chalk from "chalk";
 import { accent, dim } from "../agent-stream";
 
@@ -83,7 +88,7 @@ export async function startBackgroundDiscover(params: {
     const config = loadDiscoveryConfig(params.projectPath);
     const maxPages = params.maxPages ?? config.maxPages;
     const maxDepth = params.maxDepth ?? config.maxDepth;
-    const storageStatePath = resolveAuthStorageStatePath(params.projectPath);
+    const storageStatePath = resolveUsableAuthStorageStatePath(params.projectPath);
 
     const { SiteDiscovery } = await import("@raiken/core");
     const discovery = new SiteDiscovery({
@@ -245,7 +250,7 @@ export async function continueBackgroundDiscover(
     }
 
     const config = loadDiscoveryConfig(projectPath);
-    const storageStatePath = resolveAuthStorageStatePath(projectPath);
+    const storageStatePath = resolveUsableAuthStorageStatePath(projectPath);
     const { SiteDiscovery } = await import("@raiken/core");
     const discovery = new SiteDiscovery({
         startUrl: "",

@@ -18,6 +18,11 @@ export type AgentStreamEvent =
           savedTest?: string | null;
           /** Why a requested save didn't happen/succeed, when `ok` is false because of it. */
           saveError?: string | null;
+          /**
+           * Why the run is not ok, covering every cause: a failed save, a
+           * missing artifact, a run that never happened, or failing tests.
+           */
+          reason?: string;
           run?: {
               success: boolean;
               passed: number;

@@ -11,6 +11,7 @@ import type {
     DiscoveryStats,
     SiteDiscovery,
 } from "@raiken/core";
+import { describeAuthStateProblem, inspectAuthState } from "@raiken/core";
 import { loadDiscoveryConfig, resolveAuthStorageStatePath } from "@raiken/shared";
 import chalk from "chalk";
 import ora from "ora";
@@ -33,6 +34,17 @@ const parseNumber = (value: string | number | undefined, fallback: number): numb
     const parsed = typeof value === "number" ? value : Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
+
+export function resolveUsableDiscoveryAuthState(projectPath: string): string | null {
+    const resolved = resolveAuthStorageStatePath(projectPath);
+    if (!resolved) return null;
+    const inspection = inspectAuthState(resolved);
+    if (inspection.status === "valid") return resolved;
+    console.warn(
+        chalk.yellow(describeAuthStateProblem(inspection) ?? "Saved auth state is not usable."),
+    );
+    return null;
+}
 
 /**
  * Resolve context needed to decide whether a `--continue` resume should
@@ -337,7 +349,7 @@ async function startDiscovery(
         spinner: "dots",
     }).start();
 
-    const storageStatePath = resolveAuthStorageStatePath(projectPath);
+    const storageStatePath = resolveUsableDiscoveryAuthState(projectPath);
     if (storageStatePath) {
         console.log(chalk.dim(`  Auth:      ${storageStatePath}\n`));
     }
@@ -397,7 +409,7 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
     const maxConcurrency = config.maxConcurrency;
     const excludePatterns = config.excludePatterns;
 
-    const storageStatePath = resolveAuthStorageStatePath(projectPath);
+    const storageStatePath = resolveUsableDiscoveryAuthState(projectPath);
 
     // Mirror the dashboard's `provide_state` / `clear`-with-fresh-state
     // behavior (see `resolveDiscoveryBlocker` in router.ts): if this

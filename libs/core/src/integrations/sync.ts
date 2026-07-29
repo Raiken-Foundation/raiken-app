@@ -12,6 +12,7 @@
  *   5. Return SyncResult
  */
 
+import type { ResolvedAIConfig } from "../agent/ai-providers";
 import { getCurrentBranch, getGitRemoteInfo, parseTicketFromBranch } from "./branch-parser";
 import { GitHubProvider } from "./github-provider";
 import { JiraProvider } from "./jira-provider";
@@ -25,11 +26,7 @@ interface SyncOptions {
     /** Explicit ticket override (e.g. from --ticket CLI flag) */
     ticketId?: string;
     /** AI config for the analyzer */
-    ai?: {
-        apiKey?: string;
-        model?: string;
-        baseURL?: string;
-    };
+    ai?: ResolvedAIConfig;
 }
 
 export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResult> {

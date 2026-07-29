@@ -7,7 +7,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type CoverEvent, type CoverResult, resolveAIConfig, runCover } from "@raiken/core";
+import {
+    type CoverEvent,
+    type CoverResult,
+    getProvider,
+    resolveAIConfig,
+    runCover,
+} from "@raiken/core";
 import chalk from "chalk";
 import { cliExit } from "../repl/exit";
 
@@ -36,12 +42,13 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     // provider + provider-specific env vars (e.g. ANTHROPIC_API_KEY), not just
     // OPENROUTER_API_KEY / the raw `ai` block.
     const resolved = resolveAIConfig(projectPath);
-    const ai = { apiKey: resolved.apiKey, model: resolved.model, baseURL: resolved.baseURL };
+    const ai = resolved;
+    const provider = getProvider(resolved.provider);
 
-    if (!options.dryRun && !ai.apiKey) {
+    if (!options.dryRun && provider.envVars.length > 0 && !ai.apiKey) {
         console.warn(
             chalk.yellow(
-                "⚠ No AI API key found (OPENROUTER_API_KEY / raiken.config.json). " +
+                `⚠ No ${provider.label} API key found (${provider.envVars[0]} / raiken.config.json). ` +
                     "Falling back to scaffold mode (--dry-run).",
             ),
         );

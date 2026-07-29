@@ -11,9 +11,13 @@
  */
 
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
-import { LLM_MAX_RETRIES, LLM_REQUEST_TIMEOUT_MS } from "../agent/ai-providers";
+import {
+    createLangChainModel,
+    getProvider,
+    LLM_REQUEST_TIMEOUT_MS,
+    type ResolvedAIConfig,
+} from "../agent/ai-providers";
 import { GraphQueryService } from "../analysis/graph-query";
 import { ProjectContext } from "../analysis/project-context";
 import { CodeGraphDB } from "../database/db";
@@ -26,11 +30,7 @@ import type {
     TicketSuggestion,
 } from "./types";
 
-interface AnalyzerConfig {
-    apiKey?: string;
-    model?: string;
-    baseURL?: string;
-}
+type AnalyzerConfig = ResolvedAIConfig;
 
 const impactSchema = z.object({
     affectedComponents: z
@@ -57,11 +57,11 @@ type ImpactAnalysis = z.infer<typeof impactSchema>;
 
 export class TicketAnalyzer {
     private projectPath: string;
-    private config: AnalyzerConfig;
+    private config?: AnalyzerConfig;
 
     constructor(projectPath: string, config?: AnalyzerConfig) {
         this.projectPath = projectPath;
-        this.config = config || {};
+        this.config = config;
     }
 
     async analyze(ticket: TicketInfo): Promise<TicketImpact> {
@@ -78,9 +78,9 @@ export class TicketAnalyzer {
 
         // Phase 2: LLM analysis for semantic understanding
         let llmAnalysis: ImpactAnalysis | null = null;
-        const apiKey = this.config.apiKey || process.env["OPENROUTER_API_KEY"];
-        if (apiKey) {
-            llmAnalysis = await this.llmAnalyze(ticket, apiKey);
+        const provider = this.config ? getProvider(this.config.provider) : undefined;
+        if (this.config && (provider?.envVars.length === 0 || this.config.apiKey)) {
+            llmAnalysis = await this.llmAnalyze(ticket);
         }
 
         // Phase 3: Keyword + semantic search for files not in the diff
@@ -180,21 +180,13 @@ export class TicketAnalyzer {
     // LLM Analysis
     // =========================================================================
 
-    private async llmAnalyze(ticket: TicketInfo, apiKey: string): Promise<ImpactAnalysis | null> {
+    private async llmAnalyze(ticket: TicketInfo): Promise<ImpactAnalysis | null> {
         try {
-            const model = new ChatOpenAI({
-                apiKey,
-                model: this.config.model || "anthropic/claude-sonnet-4.5",
+            if (!this.config) return null;
+            const model = createLangChainModel({
+                ...this.config,
                 temperature: 0.3,
                 maxTokens: 1000,
-                // Without these, a hung/rate-limited provider stalls ticket
-                // sync indefinitely (LangChain's un-timed default is 6 retries
-                // with exponential backoff and no request timeout at all).
-                timeout: LLM_REQUEST_TIMEOUT_MS,
-                maxRetries: LLM_MAX_RETRIES,
-                configuration: {
-                    baseURL: this.config.baseURL || "https://openrouter.ai/api/v1",
-                },
             });
 
             const ctx = ProjectContext.getInstance(this.projectPath);

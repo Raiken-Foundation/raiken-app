@@ -369,4 +369,227 @@ test('multi', async ({ page }) => {
             expect(report.findings.find((f) => f.rule === "hardcoded-localhost")).toBeUndefined();
         });
     });
+
+    describe("auth-precondition rules", () => {
+        /** Make the storageState path real so only the rule under test fires. */
+        function writeAuthState(relPath = ".raiken/auth-state.json") {
+            const abs = path.join(projectPath, relPath);
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(
+                abs,
+                '{"cookies":[{"name":"session","value":"active","expires":-1}],"origins":[]}',
+                "utf-8",
+            );
+        }
+
+        // The reported regression: Raiken generated exactly this spec for an
+        // MFA prompt and `raiken doctor` reported no issue.
+        it("flags a saved session combined with a login flow", async () => {
+            writeAuthState();
+            writeSpec(
+                "mfa.spec.ts",
+                `import { test, expect } from '@playwright/test';
+
+test.use({ storageState: '.raiken/auth-state.json' });
+
+test('signs in with MFA', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByLabel('Password').fill('secret');
+    await expect(page.getByText('Enter your code')).toBeVisible();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const finding = report.findings.find((f) => f.rule === "auth-state-with-login-flow");
+
+            expect(finding).toBeDefined();
+            expect(finding?.severity).toBe("error");
+            // Reported on the storageState line — the line to delete.
+            expect(finding?.line).toBe(3);
+            expect(finding?.message).toContain("navigates to the login page");
+        });
+
+        it("reports the offending spec only once", async () => {
+            writeAuthState();
+            writeSpec(
+                "login.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('signs in', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByLabel('Password').fill('secret');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(
+                report.findings.filter((f) => f.rule === "auth-state-with-login-flow"),
+            ).toHaveLength(1);
+        });
+
+        // Playwright's documented way to run one spec signed out despite a
+        // globally authenticated project. Flagging it would be backwards.
+        it("does NOT flag an empty storageState object with a login flow", async () => {
+            writeSpec(
+                "logged-out.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: { cookies: [], origins: [] } });
+test('signs in', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByLabel('Password').fill('secret');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.find((f) => f.rule === "auth-state-with-login-flow")).toBe(
+                undefined,
+            );
+        });
+
+        // "Sign out, then sign back in" is a real flow that needs both.
+        it("does NOT flag a re-login after an explicit sign-out", async () => {
+            writeAuthState();
+            writeSpec(
+                "relogin.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('signs back in', async ({ page }) => {
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await page.goto('/login');
+    await page.getByLabel('Password').fill('secret');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.find((f) => f.rule === "auth-state-with-login-flow")).toBe(
+                undefined,
+            );
+        });
+
+        // Found against the live fixture: an authenticated spec that confirms
+        // a destructive action by re-entering its password. A password field
+        // is normal inside an authenticated app, so it must not be evidence of
+        // a login flow — this rule is error severity and would fail CI.
+        it("does NOT flag a reauthentication prompt inside an authenticated flow", async () => {
+            writeAuthState();
+            writeSpec(
+                "delete-workspace.spec.ts",
+                `import { test, expect } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('deletes the workspace', async ({ page }) => {
+    await page.goto('/settings');
+    await page.getByTestId('delete-workspace').click();
+    await page.getByRole('button', { name: /confirm|delete/i }).click();
+    const password = page.getByLabel(/password/i);
+    await password.fill('password123');
+    await page.getByRole('button', { name: /confirm|authenticate/i }).click();
+    await expect(page.getByText(/deleted/i)).toBeVisible();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.find((f) => f.rule === "auth-state-with-login-flow")).toBe(
+                undefined,
+            );
+        });
+
+        it("does NOT flag an authenticated spec that never touches a login form", async () => {
+            writeAuthState();
+            writeSpec(
+                "projects.spec.ts",
+                `import { test, expect } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+    await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.find((f) => f.rule === "auth-state-with-login-flow")).toBe(
+                undefined,
+            );
+        });
+
+        it("flags a storageState path that does not exist", async () => {
+            writeSpec(
+                "missing.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const finding = report.findings.find((f) => f.rule === "missing-auth-state-file");
+
+            expect(finding).toBeDefined();
+            expect(finding?.severity).toBe("warning");
+            expect(finding?.message).toContain(".raiken/auth-state.json");
+        });
+
+        it("flags malformed, empty, and expired storage state files", async () => {
+            writeSpec(
+                "state.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+});
+`,
+            );
+            const statePath = path.join(projectPath, ".raiken", "auth-state.json");
+            fs.mkdirSync(path.dirname(statePath), { recursive: true });
+
+            fs.writeFileSync(statePath, "{ bad");
+            let report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.some((f) => f.rule === "malformed-auth-state-file")).toBe(true);
+
+            fs.writeFileSync(statePath, JSON.stringify({ cookies: [], origins: [] }));
+            report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.some((f) => f.rule === "empty-auth-state-file")).toBe(true);
+
+            fs.writeFileSync(
+                statePath,
+                JSON.stringify({
+                    cookies: [
+                        {
+                            name: "session",
+                            value: "stale",
+                            expires: Math.floor(Date.now() / 1000) - 60,
+                        },
+                    ],
+                    origins: [],
+                }),
+            );
+            report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.some((f) => f.rule === "expired-auth-state-file")).toBe(true);
+        });
+
+        it("does NOT guess about an interpolated storageState path", async () => {
+            writeSpec(
+                "env.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: \`\${process.env.STATE_DIR}/auth.json\` });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.find((f) => f.rule === "missing-auth-state-file")).toBe(
+                undefined,
+            );
+        });
+    });
 });

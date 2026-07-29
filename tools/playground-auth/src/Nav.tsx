@@ -1,4 +1,5 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink } from "react-router-dom";
+import { useSession } from "./auth/useSession";
 
 const NAV_LINKS = [
     { to: "/dashboard", label: "Dashboard", testid: "nav-dashboard" },
@@ -8,24 +9,10 @@ const NAV_LINKS = [
     { to: "/settings", label: "Settings", testid: "nav-settings" },
 ];
 
-function getUser(): string {
-    const match = document.cookie.match(/raiken-session=([^;]+)/);
-    if (!match) return "guest";
-    try {
-        const payload = JSON.parse(atob(match[1]));
-        return payload.user ?? "guest";
-    } catch {
-        return "guest";
-    }
-}
-
 export default function Nav() {
-    const navigate = useNavigate();
-
-    const handleLogout = async () => {
-        await fetch("/auth/signout", { method: "GET" });
-        navigate("/auth/login");
-    };
+    const { session, loading } = useSession();
+    const displayName = loading ? "Loading…" : (session?.user ?? "guest");
+    const displayRole = loading ? "" : (session?.role ?? "");
 
     return (
         <aside className="sidebar" data-testid="sidebar">
@@ -46,12 +33,17 @@ export default function Nav() {
             </nav>
             <div className="sidebar-footer">
                 <div className="user-chip" data-testid="user-chip">
-                    {getUser()}
+                    <span data-testid="user-chip-name">{displayName}</span>
+                    {!loading && displayRole && (
+                        <span className="user-role" data-testid="user-chip-role">
+                            {displayRole}
+                        </span>
+                    )}
                 </div>
                 <button
                     className="logout-btn"
                     data-testid="logout-button"
-                    onClick={handleLogout}
+                    onClick={() => window.location.assign("/auth/signout")}
                     type="button"
                 >
                     Sign out

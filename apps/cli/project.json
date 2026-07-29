@@ -3,7 +3,7 @@
     "$schema": "../../node_modules/nx/schemas/project-schema.json",
     "sourceRoot": "apps/cli/src",
     "projectType": "application",
-    "tags": [],
+    "tags": ["type:app", "scope:cli"],
     "targets": {
         "build:esbuild": {
             "executor": "@nx/esbuild:esbuild",
@@ -39,7 +39,8 @@
                 "commands": [
                     "mkdir -p dist/apps/cli/public",
                     "cp -r dist/apps/dashboard/* dist/apps/cli/public/",
-                    "cp apps/cli/README.md dist/apps/cli/README.md"
+                    "cp apps/cli/README.md dist/apps/cli/README.md",
+                    "cp scripts/cli-pnpm-workspace.yaml dist/apps/cli/pnpm-workspace.yaml"
                 ],
                 "parallel": false
             }
@@ -51,7 +52,7 @@
             "options": {
                 "commands": [
                     "echo '📦 Installing CLI dependencies into dist/apps/cli...'",
-                    "cd dist/apps/cli && npm install --silent --legacy-peer-deps",
+                    "pnpm --dir dist/apps/cli install --prod --no-frozen-lockfile --silent",
                     "echo '✅ Dependencies installed!'"
                 ],
                 "parallel": false
@@ -90,10 +91,10 @@
             }
         },
         "test": {
-            "executor": "@nx/vitest:test",
+            "executor": "nx:run-commands",
             "outputs": ["{workspaceRoot}/coverage/apps/cli"],
             "options": {
-                "config": "apps/cli/vitest.config.ts"
+                "command": "pnpm --dir apps/cli exec vitest run --config vitest.config.ts"
             }
         }
     }

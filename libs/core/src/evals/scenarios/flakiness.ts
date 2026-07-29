@@ -14,6 +14,13 @@ export interface FlakinessEvalOptions {
     testFile: string;
     /** Consecutive runs to compare. Defaults to 3. */
     runs?: number;
+    /**
+     * How many tests the suite is known to contain. Stability alone can't tell
+     * a healthy suite from one that silently stopped collecting tests — every
+     * run agreeing on "2 passed" is perfectly stable and completely wrong when
+     * the file holds ten. Set for a ground-truth suite; omit elsewhere.
+     */
+    expectedTests?: number;
 }
 
 export function buildFlakinessScenario(
@@ -29,7 +36,10 @@ export function buildFlakinessScenario(
             const allRuns: TestRunResult[][] = [];
             for (let i = 1; i <= runs; i++) {
                 ctx.log(`run ${i}/${runs}…`);
-                allRuns.push(await runner.runTest(options.testFile, {}));
+                // Retries would be measuring the retry, not the test: a spec
+                // that only passes on its second attempt is exactly the
+                // instability this scenario exists to catch.
+                allRuns.push(await runner.runTest(options.testFile, { retries: 0 }));
             }
             return allRuns;
         },
@@ -57,6 +67,19 @@ export function buildFlakinessScenario(
                             : `divergent outcomes: ${[...unique].join("  vs  ")}`,
                 };
             }),
+            ...(options.expectedTests === undefined
+                ? []
+                : [
+                      scorer<TestRunResult[][]>("runs-the-whole-suite", (allRuns) => {
+                          const counts = allRuns.map((results) => results.length);
+                          const expected = options.expectedTests;
+                          return {
+                              passed: counts.every((count) => count === expected),
+                              value: counts[0],
+                              detail: `expected ${expected} test(s) per run, got ${counts.join(", ")}`,
+                          };
+                      }),
+                  ]),
             scorer("suite-green", (allRuns) => {
                 const failing = allRuns
                     .flat()

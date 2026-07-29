@@ -1,116 +1,26 @@
-import fsSync from "node:fs";
 import path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
-import { parseSourceFile } from "../../../analysis/ast-parser";
 import { ProjectContext } from "../../../analysis/project-context";
+import { authCredentialEnvGuidance } from "../../../config/auth-credentials";
+import { resolveAuthStorageStateRelativePath } from "../../../config/auth-state";
+import { validateTestCode } from "../../../testing/test-code-validation";
 import { cleanGeneratedTestCode } from "../../../utils";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
+import type { GroundingReport } from "../../grounding";
+import {
+    describeGroundingViolations,
+    formatGroundingCorrection,
+    formatGroundingRejection,
+    validateSelectorGrounding,
+} from "../../grounding";
 import { AgentMemory } from "../../memory";
 import type { ContextData } from "../../prompts";
 import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
 import type { GraphStateType } from "../state";
-import type { ContextPlan } from "../utils";
-import { goalTargetsUnauthedPage, normalizeSelector, parseSummaryElements } from "../utils";
+import type { AuthPrecondition, ContextPlan } from "../utils";
+import { normalizeSelector, parseSummaryElements, shouldUseStorageState } from "../utils";
 import type { AgentNodeDeps } from "./types";
-
-/**
- * Save-gate for generated test drafts.
- *
- * A streamed response that gets interrupted mid-token, an empty/near-empty
- * LLM reply, or the model answering with prose instead of code would
- * otherwise flow straight through as `testDraft` — which `hitl.ts` then
- * writes to disk and (optionally) runs unconditionally, since it only checks
- * `if (!state.testDraft) return {}`. A truthy-but-garbage string passes that
- * check. Real syntax validation (not a brace-counting heuristic, which is
- * easily fooled by parens/braces inside string literals) catches truncation
- * reliably; the `test(`-call check catches well-formed-but-useless output
- * (e.g. just a comment) that happens to parse.
- */
-function validateTestDraft(code: string): { ok: boolean; reason?: string } {
-    if (!code.trim()) return { ok: false, reason: "empty response" };
-    try {
-        parseSourceFile(code, "generated-test.spec.ts");
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { ok: false, reason: `does not parse as valid JS/TS (${message})` };
-    }
-    if (!/\btest(?:\.(?:describe|only|skip|fixme))?\s*\(/.test(code)) {
-        return { ok: false, reason: "no Playwright test() call found" };
-    }
-    return { ok: true };
-}
-
-/**
- * Return the locators used in a generated test that do NOT appear in the
- * captured page context (DOM summary + every visited page summary). Best-effort
- * and warn-only: it validates the semantic locators we can compare structurally
- * (getByRole/TestId/Label/Placeholder against captured selectors) plus, more
- * loosely, getByText / page.locator by checking whether their literal argument
- * appears anywhere in the captured text. The goal is to flag likely guesses, so
- * we err toward NOT flagging (false negatives) over noisy false positives.
- */
-function findUngroundedSelectors(testCode: string, summaries: string[]): string[] {
-    const domSelectors = new Set<string>();
-    // Full captured text (selectors + names + visible text) used for the looser
-    // text/CSS containment checks below.
-    let combinedText = "";
-    for (const summary of summaries) {
-        if (!summary) continue;
-        combinedText += `\n${summary}`;
-        for (const el of parseSummaryElements(summary)) {
-            for (const sel of el.selectors) {
-                domSelectors.add(sel);
-                const normalized = normalizeSelector(sel);
-                if (normalized) domSelectors.add(normalized);
-            }
-        }
-    }
-    if (domSelectors.size === 0 && !combinedText.trim()) return [];
-
-    const missing: string[] = [];
-    const flag = (raw: string) => {
-        if (!missing.includes(raw)) missing.push(raw);
-    };
-
-    // Structural locators: must match a captured selector.
-    const semantic = testCode.match(/getBy(?:Role|TestId|Label|Placeholder)\([^)]*\)/g) || [];
-    for (const sel of semantic) {
-        const normalized = normalizeSelector(sel) || sel;
-        if (!domSelectors.has(sel) && !domSelectors.has(normalized)) flag(sel);
-    }
-
-    // Text locators: the quoted text should appear somewhere in the captured
-    // text. Only flag when we have text to compare against.
-    if (combinedText.trim()) {
-        const textLocators = testCode.match(/getByText\(\s*(['"`])([^'"`]+)\1/g) || [];
-        for (const loc of textLocators) {
-            const m = loc.match(/getByText\(\s*(['"`])([^'"`]+)\1/);
-            const text = m?.[2]?.trim();
-            if (
-                text &&
-                text.length > 2 &&
-                !combinedText.toLowerCase().includes(text.toLowerCase())
-            ) {
-                flag(loc.endsWith(")") ? loc : `${loc})`);
-            }
-        }
-
-        // page.locator("css") — the raw selector string should be recognizable
-        // in the captured selectors or text. Very loose (CSS is unstable), so
-        // only the exact literal is checked.
-        const cssLocators = testCode.match(/\.locator\(\s*(['"`])([^'"`]+)\1/g) || [];
-        for (const loc of cssLocators) {
-            const m = loc.match(/\.locator\(\s*(['"`])([^'"`]+)\1/);
-            const css = m?.[2]?.trim();
-            if (css && css.length > 2 && !domSelectors.has(css) && !combinedText.includes(css)) {
-                flag(loc.endsWith(")") ? loc : `${loc})`);
-            }
-        }
-    }
-
-    return missing;
-}
 
 const PAGE_SUMMARIES_MAX_CHARS = 3000;
 
@@ -168,17 +78,6 @@ function formatKnownActions(projectPath: string): string | null {
     return lines.join("\n");
 }
 
-const AUTH_TASK_RE =
-    /\b(auth|authentication|log[\s-]?in|login|log[\s-]?out|logout|sign[\s-]?in|sign[\s-]?out|sign[\s-]?up|register|credential|session)\b/i;
-
-/** Is this generation about authentication (login/logout/sign-in flows)? */
-function isAuthTask(state: GraphStateType): boolean {
-    const text = [state.userPrompt, state.activeGoal, state.targetFeature, state.targetAction]
-        .filter(Boolean)
-        .join(" ");
-    return AUTH_TASK_RE.test(text);
-}
-
 interface StoredLoginContext {
     url: string | null;
     fields: Array<{ label: string; type: string | null; selector: string | null }>;
@@ -201,22 +100,7 @@ interface StoredActionPath {
  * run authenticated instead of stalling at a login wall.
  */
 function resolveAuthStateRelPath(projectPath: string): string | null {
-    try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const raw = fsSync.readFileSync(configPath, "utf-8");
-        const config = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
-        if (config.auth?.storageStatePath) {
-            const abs = path.resolve(projectPath, config.auth.storageStatePath);
-            if (fsSync.existsSync(abs)) {
-                return path.relative(projectPath, abs) || config.auth.storageStatePath;
-            }
-        }
-    } catch {
-        // Config missing/invalid — fall through to the default location.
-    }
-    const fallbackRel = path.join(".raiken", "auth-state.json");
-    if (fsSync.existsSync(path.join(projectPath, fallbackRel))) return fallbackRel;
-    return null;
+    return resolveAuthStorageStateRelativePath(projectPath);
 }
 
 /**
@@ -234,6 +118,25 @@ function formatStorageStateGuidance(relPath: string): string {
         `    test.use({ storageState: ${JSON.stringify(relPath)} });`,
         "- Treat the browser as already signed in. Do NOT navigate to a login page, do NOT implement a login flow, do NOT call test.skip for authentication, and do NOT add TODOs about login.",
         "- Assert authenticated-only UI and behaviour directly (the app will be on its post-login pages).",
+    ].join("\n");
+}
+
+function formatAuthPreconditionGuidance(precondition: AuthPrecondition): string | null {
+    if (precondition === "authenticated") return null;
+    if (precondition === "unauthenticated") {
+        return [
+            "[AUTH PRECONDITION — start logged out]",
+            "- Do NOT add test.use({ storageState }) or load any saved authentication state.",
+            "- Use a fresh Playwright context and assert the logged-out page, redirect, or access denial requested by the user.",
+            "- Do not sign in unless the requested scenario explicitly requires it.",
+        ].join("\n");
+    }
+    return [
+        "[AUTH PRECONDITION — exercise the real login flow]",
+        "- Start from a fresh logged-out Playwright context.",
+        "- Do NOT add test.use({ storageState }) or load any saved authentication state.",
+        "- Perform login, MFA, OTP, or logout steps using only the observed routes and selectors below.",
+        "- Read secrets from environment variables; never hardcode credentials.",
     ].join("\n");
 }
 
@@ -275,7 +178,7 @@ function formatAuthFlow(
     state: GraphStateType,
     hasStorageState: boolean,
 ): string | null {
-    if (!isAuthTask(state)) return null;
+    if (state.authPrecondition !== "login_flow") return null;
 
     let login: StoredLoginContext | null = null;
     let logout: StoredActionPath | null = null;
@@ -591,11 +494,22 @@ export const createGenerateTestsNode =
         // experience: loading a signed-in storageState there would skip the very
         // login page under test (and a stale one would just add noise). Keep the
         // test genuinely logged-out.
-        const authStateRel = goalTargetsUnauthedPage(state.userPrompt)
-            ? null
-            : resolveAuthStateRelPath(projectPath);
+        const authStateRel = shouldUseStorageState(state.authPrecondition)
+            ? resolveAuthStateRelPath(projectPath)
+            : null;
         if (authStateRel) {
             systemPrompt = `${systemPrompt}\n\n${formatStorageStateGuidance(authStateRel)}`;
+        }
+
+        const authPreconditionBlock = formatAuthPreconditionGuidance(state.authPrecondition);
+        if (authPreconditionBlock) {
+            systemPrompt = `${systemPrompt}\n\n${authPreconditionBlock}`;
+        }
+        if (state.authPrecondition === "login_flow") {
+            const credentialGuidance = authCredentialEnvGuidance(projectPath);
+            if (credentialGuidance) {
+                systemPrompt = `${systemPrompt}\n\n[CONFIGURED AUTH ENVIRONMENT VARIABLES]\n${credentialGuidance}\n- Fail clearly when a required variable is missing; never hardcode or print its value.`;
+            }
         }
 
         const authBlock = formatAuthFlow(projectPath, state, !!authStateRel);
@@ -629,15 +543,28 @@ export const createGenerateTestsNode =
             systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
         }
 
-        onProgress?.("Generating test");
-        try {
-            const messages = [new SystemMessage(systemPrompt), new HumanMessage(state.userPrompt)];
+        const groundingSummaries = [state.domSummary, ...(state.pageSummaries || [])].filter(
+            (s): s is string => typeof s === "string" && s.length > 0,
+        );
+
+        /**
+         * One full generation pass. `correction` carries grounding violations
+         * from the previous pass; `allowStreaming` is false for retries because
+         * `onToken` appends to the live editor buffer, so streaming a second
+         * draft would show both concatenated.
+         */
+        const generateDraft = async (
+            correction: string | undefined,
+            allowStreaming: boolean,
+        ): Promise<string> => {
+            const prompt = correction ? `${systemPrompt}\n\n${correction}` : systemPrompt;
+            const messages = [new SystemMessage(prompt), new HumanMessage(state.userPrompt)];
 
             // Stream tokens live when the model supports it so the dashboard
             // shows the test being written instead of a long silent wait. Fall
             // back to a single invoke() when streaming isn't available.
             let content = "";
-            if (onToken && typeof model.stream === "function") {
+            if (allowStreaming && onToken && typeof model.stream === "function") {
                 try {
                     const stream = await model.stream(messages, {
                         timeout: LLM_REQUEST_TIMEOUT_MS,
@@ -685,41 +612,87 @@ export const createGenerateTestsNode =
             if (cleaned && authStateRel) {
                 cleaned = injectStorageState(cleaned, authStateRel);
             }
+            return cleaned;
+        };
 
-            // Best-effort selector validation: warn (in logs) when the generated
-            // test references selectors that weren't present in ANY captured page
-            // (live DOM + every visited page summary), which usually means the
-            // model guessed. Never blocks generation.
-            const groundingSummaries = [state.domSummary, ...(state.pageSummaries || [])].filter(
-                (s): s is string => typeof s === "string" && s.length > 0,
-            );
-            if (cleaned && groundingSummaries.length > 0) {
-                const missing = findUngroundedSelectors(cleaned, groundingSummaries);
-                if (missing.length > 0) {
-                    console.warn(
-                        `Generated test references ${missing.length} selector(s) not seen in the DOM: ${missing
-                            .slice(0, 5)
-                            .join(", ")}`,
-                    );
+        onProgress?.("Generating test");
+        try {
+            // Grounding gates generation because nothing downstream re-checks it:
+            // `hitlSave` writes any truthy draft and `hitlRun` runs it.
+            //
+            // A locator the capture *contradicts* (right element, wrong role) is
+            // proof the draft is broken, so it never reaches save. A locator the
+            // capture simply doesn't contain is reported, not blocked — a
+            // validation error, a modal, or a later page exists only in a state
+            // we never captured, and refusing those would refuse most
+            // negative-path tests. Either way the model gets one corrective pass
+            // with the specific locators named.
+            const MAX_GROUNDING_PASSES = 2;
+            let previous: GroundingReport | null = null;
+
+            for (let pass = 1; pass <= MAX_GROUNDING_PASSES; pass++) {
+                const cleaned = await generateDraft(
+                    previous ? formatGroundingCorrection(previous) : undefined,
+                    pass === 1,
+                );
+
+                const validation = validateTestCode(cleaned);
+                if (!validation.ok) {
+                    console.warn(`Generated test draft rejected: ${validation.reason}`);
+                    return {
+                        testDraft: "",
+                        summary: `Test generation produced output that wasn't usable (${validation.reason}). This can happen when a streamed response gets interrupted — try again.`,
+                        context,
+                        testDirectory: context.testDirectory,
+                    };
                 }
+
+                const grounding = validateSelectorGrounding(cleaned, groundingSummaries);
+                const lastPass = pass === MAX_GROUNDING_PASSES;
+                const clean =
+                    !grounding.enforceable ||
+                    (grounding.contradictions.length === 0 && grounding.unverified.length === 0);
+
+                if (grounding.enforceable && grounding.contradictions.length > 0 && lastPass) {
+                    for (const line of describeGroundingViolations(grounding.contradictions)) {
+                        console.warn(`Ungrounded selector: ${line}`);
+                    }
+                    return {
+                        testDraft: "",
+                        groundingViolations: grounding.contradictions,
+                        summary: formatGroundingRejection(grounding.contradictions),
+                        context,
+                        testDirectory: context.testDirectory,
+                    };
+                }
+
+                if (clean || lastPass) {
+                    for (const line of describeGroundingViolations([
+                        ...grounding.unverified,
+                        ...grounding.warnings,
+                    ])) {
+                        console.warn(`Selector not seen in any captured page: ${line}`);
+                    }
+                    return {
+                        testDraft: cleaned,
+                        // Surfaced in the run summary so an unverifiable locator
+                        // is visible to the user, not just to the log.
+                        groundingViolations: grounding.unverified,
+                        context,
+                        testDirectory: context.testDirectory,
+                    };
+                }
+
+                previous = grounding;
+                onProgress?.(
+                    `Regenerating: ${
+                        grounding.contradictions.length + grounding.unverified.length
+                    } selector(s) don't match the captured DOM`,
+                );
             }
 
-            const validation = validateTestDraft(cleaned);
-            if (!validation.ok) {
-                console.warn(`Generated test draft rejected: ${validation.reason}`);
-                return {
-                    testDraft: "",
-                    summary: `Test generation produced output that wasn't usable (${validation.reason}). This can happen when a streamed response gets interrupted — try again.`,
-                    context,
-                    testDirectory: context.testDirectory,
-                };
-            }
-
-            return {
-                testDraft: cleaned,
-                context,
-                testDirectory: context.testDirectory,
-            };
+            // Unreachable: the loop always returns on its last pass.
+            return { context, testDirectory: context.testDirectory };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error("Test generation LLM call failed:", message);

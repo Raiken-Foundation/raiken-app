@@ -79,19 +79,22 @@ export function buildBlocker(args: {
 }
 
 /**
- * Run every detector in priority order, returning the first match. A
- * detector that throws is logged once and skipped — one bad detector
+ * Run every detector in priority order, returning the first non-ignored
+ * match. A detector that throws is logged once and skipped — one bad detector
  * shouldn't stop the rest of the pipeline from running.
  */
 export async function runBlockerPipeline(
     detectors: BlockerDetector[],
     ctx: BlockerDetectorContext,
+    options: { skipCategories?: ReadonlySet<BlockerCategory> } = {},
 ): Promise<DiscoveryBlocker | null> {
     const ordered = [...detectors].sort((a, b) => a.priority - b.priority);
     for (const detector of ordered) {
         try {
             const blocker = await detector.detect(ctx);
-            if (blocker) return blocker;
+            if (!blocker) continue;
+            if (options.skipCategories?.has(blocker.category)) continue;
+            return blocker;
         } catch (err) {
             // Best-effort: a detector that crashes shouldn't take down
             // the crawl. Surface the failure on the console so the user

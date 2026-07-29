@@ -4,8 +4,12 @@
 export * from "./agent/index";
 // Analysis module
 export * from "./analysis/index";
+// Project artifact access
+export * from "./artifacts/index";
 // Browser module
 export * from "./browser/index";
+// Project chat history
+export * from "./chat/index";
 // CI module
 export * from "./ci/index";
 // Configuration module
@@ -22,6 +26,8 @@ export * from "./doctor/index";
 export * from "./evals/index";
 // Integrations module
 export * from "./integrations/index";
+// Cross-process operation coordination
+export * from "./operations/index";
 // Orchestrator
 export {
     type OrchestratorResult,
@@ -41,3 +47,5 @@ export * from "./trace/index";
 export * from "./types";
 // Types and utilities
 export * from "./utils";
+// Durable HITL continuation records
+export * from "./workflows/index";

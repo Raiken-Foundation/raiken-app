@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { inspectAuthState } from "../config/auth-state";
 import { readPlaywrightBaseURL } from "../testing/playwright-config";
 import { detectDevServerPort } from "../testing/port-detector";
 
@@ -203,6 +204,164 @@ const HARDCODED_LOCALHOST_RULE: Rule = {
         "Use a relative path like `page.goto('/login')` so the test runs against any baseURL (local, staging, prod).",
 };
 
+/**
+ * A `storageState` pointing at a file on disk, e.g.
+ * `test.use({ storageState: ".raiken/auth-state.json" })`.
+ *
+ * Only a string literal counts. `storageState: { cookies: [], origins: [] }`
+ * is Playwright's documented way to run ONE spec signed out despite a global
+ * authenticated state — the opposite of the mistake below — and
+ * `storageState: undefined` likewise. Neither must ever be flagged.
+ */
+const STORAGE_STATE_LITERAL = /storageState\s*:\s*(['"`])([^'"`]+)\1/;
+
+/**
+ * Steps that only make sense when the browser starts signed OUT.
+ *
+ * Deliberately narrow. A password field is NOT on this list: authenticated
+ * apps ask for one all the time — reauthenticating before a destructive
+ * action, changing a password — and the benchmark fixture's delete-workspace
+ * flow does exactly that. Flagging it would turn a correct test into an
+ * `error`-severity finding that fails `raiken doctor --fail-on error`.
+ *
+ * Navigating to a login route and pressing a control named "sign in" / "log
+ * in" are the two signals that stay unambiguous, and a real login flow has at
+ * least one of them.
+ */
+const LOGIN_SIGNALS: Array<{ pattern: RegExp; describe: string }> = [
+    {
+        pattern: /\.goto\(\s*['"`][^'"`]*\/(?:login|signin|sign-in|log-in|auth\/login)\b/i,
+        describe: "navigates to the login page",
+    },
+    {
+        pattern: /getByRole\(\s*['"`]button['"`]\s*,[^)]*(?:sign\s*in|log\s*in|login)/i,
+        describe: "clicks the sign-in button",
+    },
+];
+
+/**
+ * Signing out first makes a later sign-in legitimate ("log out, log back in"
+ * is a real flow), so a file containing one is left alone.
+ */
+const LOGOUT_SIGNAL = /(?:sign\s*out|signout|log\s*out|logout)/i;
+
+function isCommentLine(line: string): boolean {
+    return /^\s*(?:\*|\/\/)/.test(line);
+}
+
+/**
+ * Auth-precondition consistency, checked across the whole file.
+ *
+ * The line-by-line rules above cannot catch this: `test.use({ storageState })`
+ * on line 3 and a login form filled on line 40 are each perfectly valid on
+ * their own, and only contradict each other in combination. That combination
+ * is a guaranteed failure — the browser starts already signed in, the app
+ * redirects away from the login page, and the spec times out hunting for
+ * fields that were never rendered. Raiken generated exactly this spec for an
+ * MFA prompt and `doctor` reported nothing.
+ */
+function scanAuthPreconditions(text: string, file: string, projectPath: string): DoctorFinding[] {
+    const lines = text.split(/\r?\n/);
+
+    let stateLine = 0;
+    let statePath = "";
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line || isCommentLine(line)) continue;
+        const match = STORAGE_STATE_LITERAL.exec(line);
+        if (match) {
+            stateLine = i + 1;
+            statePath = match[2];
+            break;
+        }
+    }
+    if (!statePath) return [];
+
+    const snippet = lines[stateLine - 1].trim().slice(0, 200);
+    const findings: DoctorFinding[] = [];
+
+    if (!LOGOUT_SIGNAL.test(text)) {
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (!line || isCommentLine(line)) continue;
+            const signal = LOGIN_SIGNALS.find((candidate) => candidate.pattern.test(line));
+            if (!signal) continue;
+            findings.push({
+                rule: "auth-state-with-login-flow",
+                severity: "error",
+                file,
+                line: stateLine,
+                column: 1,
+                snippet,
+                message: `This spec loads a saved session (storageState: "${statePath}") but ${signal.describe} on line ${
+                    i + 1
+                } — it starts already signed in, so the login UI never appears.`,
+                suggestion:
+                    "Drop the storageState for this spec so it starts signed out (or use `storageState: { cookies: [], origins: [] }` to opt one spec out of a global authenticated state).",
+            });
+            break;
+        }
+    }
+
+    // A path that isn't there is the same contradiction stated differently:
+    // the spec claims a captured session that does not exist. Interpolated
+    // paths are skipped — their value isn't knowable from the source.
+    if (!/\$\{|process\.env/.test(snippet)) {
+        const stateFile = path.isAbsolute(statePath)
+            ? statePath
+            : path.resolve(projectPath, statePath);
+        const inspection = inspectAuthState(stateFile);
+        if (inspection.status === "missing") {
+            findings.push({
+                rule: "missing-auth-state-file",
+                severity: "warning",
+                file,
+                line: stateLine,
+                column: 1,
+                snippet,
+                message: `storageState points at "${statePath}", which does not exist — every test in this file fails before its first step.`,
+                suggestion:
+                    "Capture a session with `raiken auth`, or point storageState at the file your setup project writes.",
+            });
+        } else if (inspection.status === "malformed") {
+            findings.push({
+                rule: "malformed-auth-state-file",
+                severity: "warning",
+                file,
+                line: stateLine,
+                column: 1,
+                snippet,
+                message: `storageState points at "${statePath}", but it is not a valid Playwright storage-state file.`,
+                suggestion: "Replace it by capturing a fresh session with `raiken auth`.",
+            });
+        } else if (inspection.status === "empty") {
+            findings.push({
+                rule: "empty-auth-state-file",
+                severity: "warning",
+                file,
+                line: stateLine,
+                column: 1,
+                snippet,
+                message: `storageState points at "${statePath}", but it contains no cookies or origins.`,
+                suggestion: "Sign in and capture a populated session with `raiken auth`.",
+            });
+        } else if (inspection.status === "expired") {
+            findings.push({
+                rule: "expired-auth-state-file",
+                severity: "warning",
+                file,
+                line: stateLine,
+                column: 1,
+                snippet,
+                message: `storageState points at "${statePath}", but all persistent cookies have expired.`,
+                suggestion: "Refresh the saved session with `raiken auth`.",
+            });
+        }
+    }
+
+    return findings;
+}
+
 export async function scanTests(options: DoctorOptions): Promise<DoctorReport> {
     const exts = options.extensions ?? DEFAULT_EXTENSIONS;
     const projectPath = path.resolve(options.projectPath);
@@ -228,6 +387,7 @@ export async function scanTests(options: DoctorOptions): Promise<DoctorReport> {
             const text = fs.readFileSync(absFile, "utf-8");
             const rel = path.relative(projectPath, absFile);
             findings.push(...scanText(text, rel, extraRules));
+            findings.push(...scanAuthPreconditions(text, rel, projectPath));
         } catch {
             // Unreadable files are simply skipped; a crash here would be worse
             // than a silent miss for a lint-style tool.

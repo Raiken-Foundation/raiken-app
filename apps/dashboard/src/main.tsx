@@ -4,6 +4,7 @@ import type { ErrorInfo, ReactNode } from "react";
 import { Component, StrictMode, useState } from "react";
 import * as ReactDOM from "react-dom/client";
 import App from "./app/app";
+import { serverAuthHeaders } from "./utils/api-auth";
 import { trpc } from "./utils/trpc";
 import "./styles.css";
 
@@ -138,6 +139,7 @@ function Root() {
             links: [
                 httpBatchLink({
                     url: "/api/trpc",
+                    headers: () => serverAuthHeaders(),
                 }),
             ],
         }),

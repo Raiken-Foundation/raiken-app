@@ -2,6 +2,7 @@ import { useId, useMemo, useState } from "react";
 import { PriorityPill, TaskStatusPill } from "../../components/StatusPill";
 import { useAuth } from "../../contexts/AuthContext";
 import type { Project, Task, TaskStatus, User } from "../../types";
+import TaskDetailsModal from "./TaskDetailsModal";
 import TaskFormModal from "./TaskFormModal";
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
     tasks: Task[];
     members: User[];
     onCreated: () => Promise<void> | void;
+    onActivityChanged: () => Promise<void> | void;
     onStatusChange: (taskId: string, status: TaskStatus) => Promise<void>;
     onDelete: (taskId: string) => Promise<void>;
 }
@@ -20,6 +22,7 @@ export default function TaskListPanel({
     tasks,
     members,
     onCreated,
+    onActivityChanged,
     onStatusChange,
     onDelete,
 }: Props) {
@@ -27,6 +30,7 @@ export default function TaskListPanel({
     const [showCreate, setShowCreate] = useState(false);
     const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
     const [search, setSearch] = useState("");
+    const [selectedTask, setSelectedTask] = useState<Task | null>(null);
     const searchId = useId();
     const filterId = useId();
 
@@ -72,16 +76,24 @@ export default function TaskListPanel({
                     </select>
                 </div>
                 <div className="task-toolbar-actions">
-                    <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() => setShowCreate(true)}
-                        data-testid="open-create-task"
-                    >
-                        + New task
-                    </button>
+                    {project.status !== "archived" && (
+                        <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => setShowCreate(true)}
+                            data-testid="open-create-task"
+                        >
+                            + New task
+                        </button>
+                    )}
                 </div>
             </div>
+
+            {project.status === "archived" && (
+                <div className="alert alert-info" data-testid="project-readonly">
+                    This project is archived. Tasks and comments are read-only.
+                </div>
+            )}
 
             {filtered.length === 0 ? (
                 <div className="empty-state" data-testid="tasks-empty">
@@ -99,9 +111,14 @@ export default function TaskListPanel({
                             >
                                 <div className="task-row-main">
                                     <div className="task-row-title">
-                                        <span data-testid={`task-title-${task.id}`}>
+                                        <button
+                                            type="button"
+                                            className="task-title-button"
+                                            onClick={() => setSelectedTask(task)}
+                                            data-testid={`task-title-${task.id}`}
+                                        >
                                             {task.title}
-                                        </span>
+                                        </button>
                                         <PriorityPill priority={task.priority} />
                                     </div>
                                     {task.description && (
@@ -134,6 +151,7 @@ export default function TaskListPanel({
                                         onChange={(e) =>
                                             onStatusChange(task.id, e.target.value as TaskStatus)
                                         }
+                                        disabled={project.status === "archived"}
                                         data-testid={`status-select-${task.id}`}
                                     >
                                         {STATUS_ORDER.map((s) => (
@@ -142,7 +160,7 @@ export default function TaskListPanel({
                                             </option>
                                         ))}
                                     </select>
-                                    {isAdmin && (
+                                    {isAdmin && project.status !== "archived" && (
                                         <button
                                             type="button"
                                             className="btn btn-ghost btn-sm"
@@ -168,6 +186,15 @@ export default function TaskListPanel({
                         setShowCreate(false);
                         await onCreated();
                     }}
+                />
+            )}
+            {selectedTask && (
+                <TaskDetailsModal
+                    task={selectedTask}
+                    members={members}
+                    readOnly={project.status === "archived"}
+                    onClose={() => setSelectedTask(null)}
+                    onCommentAdded={onActivityChanged}
                 />
             )}
         </div>

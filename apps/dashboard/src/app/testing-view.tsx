@@ -1,4 +1,3 @@
-import { useQueryClient } from "@tanstack/react-query";
 import type { KeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { CodeEditor, type DiffReview, type TestFile } from "../components/code-editor";
@@ -44,6 +43,29 @@ interface ServerParsedRun {
         tests: { passed: number; failed: number; total: number };
         timeSeconds: number;
     };
+}
+
+interface DashboardRunResult {
+    success?: boolean;
+    busy?: boolean;
+    cancelled?: boolean;
+}
+
+export function classifyRunResult(
+    result: DashboardRunResult,
+): "busy" | "cancelled" | "passed" | "failed" {
+    if (result.busy) return "busy";
+    if (result.cancelled) return "cancelled";
+    return result.success ? "passed" : "failed";
+}
+
+export function shouldAutoBuildGraph(
+    stats: { totalFiles: number } | null | undefined,
+    attempted: boolean,
+    isBuilding: boolean,
+): boolean {
+    if (stats === undefined || attempted || isBuilding) return false;
+    return stats === null || stats.totalFiles === 0;
 }
 
 function fromServerParsedRun(run: ServerParsedRun): {
@@ -185,12 +207,13 @@ export function TestingView({
     onNavigateRoute,
     onHitlPendingChange,
 }: TestingViewProps) {
-    const queryClient = useQueryClient();
     const [activeFileId, setActiveFileId] = useState<string>("");
     const [ticketPrompt, setTicketPrompt] = useState<string | undefined>();
     const [files, setFiles] = useState<TestFile[]>([]);
     const filesRef = useRef<TestFile[]>([]);
     const [isBuilding, setIsBuilding] = useState(false);
+    const [graphBuildError, setGraphBuildError] = useState<string | null>(null);
+    const graphBuildAttemptedRef = useRef(false);
     const [activeFilePath, setActiveFilePath] = useState<string>("");
     const [generatedTest, setGeneratedTest] = useState<string>("");
     const [sidebarWidth, setSidebarWidth] = useState(320);
@@ -280,13 +303,15 @@ export function TestingView({
 
     // Build code graph mutation
     const buildGraphMutation = trpc.buildCodeGraph.useMutation({
-        onSuccess: () => {
+        onSuccess: async () => {
+            await Promise.all([utils.getGraphStats.invalidate(), utils.getGraphFiles.invalidate()]);
             setIsBuilding(false);
-            queryClient.invalidateQueries();
+            setGraphBuildError(null);
         },
         onError: (error) => {
             console.error("❌ Failed to build code graph:", error);
             setIsBuilding(false);
+            setGraphBuildError(error.message);
         },
     });
 
@@ -306,11 +331,20 @@ export function TestingView({
 
     // Build graph on first load if no files exist
     useEffect(() => {
-        if (statsData && statsData.totalFiles === 0 && !isBuilding) {
-            setIsBuilding(true);
-            buildGraphMutation.mutate({ path: ".", persist: true });
-        }
-    }, [statsData]);
+        if (!shouldAutoBuildGraph(statsData, graphBuildAttemptedRef.current, isBuilding)) return;
+        graphBuildAttemptedRef.current = true;
+        setGraphBuildError(null);
+        setIsBuilding(true);
+        buildGraphMutation.mutate({ path: ".", persist: true });
+    }, [statsData, isBuilding, buildGraphMutation.mutate]);
+
+    const handleRetryGraphBuild = () => {
+        if (isBuilding) return;
+        graphBuildAttemptedRef.current = true;
+        setGraphBuildError(null);
+        setIsBuilding(true);
+        buildGraphMutation.mutate({ path: ".", persist: true });
+    };
 
     // Paths the user explicitly closed. The code-graph list refetches on every
     // file-change bump; without this, a refetch would re-open a tab the user
@@ -570,16 +604,18 @@ export function TestingView({
                 stdout?: string;
                 stderr?: string;
                 busy?: boolean;
+                cancelled?: boolean;
                 // biome-ignore lint/suspicious/noExplicitAny: untyped reporter payload
                 results?: any;
                 parsedRun?: ServerParsedRun | null;
             };
+            const disposition = classifyRunResult(result);
 
             // Server rejected the run because another run is already in flight
             // for this project. The test did NOT execute, so don't parse the
             // (empty) output as a failure — just tell the user and restore the
             // tab from its transient "running" state.
-            if (result.busy) {
+            if (disposition === "busy") {
                 const busyFileId = runningFileIdRef.current ?? activeFileId;
                 runningFileIdRef.current = null;
                 setRawTestOutput(
@@ -590,6 +626,30 @@ export function TestingView({
                         prevFiles.map((file) =>
                             file.id === busyFileId && file.status === "running"
                                 ? { ...file, status: "pending" }
+                                : file,
+                        ),
+                    );
+                }
+                return;
+            }
+
+            if (disposition === "cancelled") {
+                const cancelledFileId = runningFileIdRef.current ?? activeFileId;
+                runningFileIdRef.current = null;
+                setRawTestOutput("Test run cancelled.");
+                setTestResults([]);
+                setTestSummary(emptySummary);
+                lastReportJsonRef.current = null;
+                if (cancelledFileId) {
+                    setFiles((prevFiles) =>
+                        prevFiles.map((file) =>
+                            file.id === cancelledFileId
+                                ? {
+                                      ...file,
+                                      status: "pending",
+                                      passedCount: undefined,
+                                      failedCount: undefined,
+                                  }
                                 : file,
                         ),
                     );
@@ -629,7 +689,7 @@ export function TestingView({
                         file.id === targetFileId
                             ? {
                                   ...file,
-                                  status: result.success ? "passed" : "failed",
+                                  status: disposition,
                                   passedCount: parsed.summary.tests.passed,
                                   failedCount: parsed.summary.tests.failed,
                               }
@@ -658,6 +718,11 @@ export function TestingView({
                     ),
                 );
             }
+        },
+    });
+    const cancelTestRunMutation = trpc.cancelTestRun.useMutation({
+        onSuccess: (result) => {
+            if (result.success) setRawTestOutput("Stopping the active test run…");
         },
     });
 
@@ -1257,6 +1322,14 @@ export function TestingView({
                             <span>{isBuilding ? "building code graph…" : "loading files…"}</span>
                         </div>
                     )}
+                    {graphBuildError && !isBuilding && (
+                        <div className="indexing-banner indexing-error" role="alert">
+                            <span>Code graph build failed: {graphBuildError}</span>
+                            <button type="button" onClick={handleRetryGraphBuild}>
+                                Retry
+                            </button>
+                        </div>
+                    )}
                     <CodeEditor
                         files={displayFiles}
                         activeFileId={activeFileId}
@@ -1277,6 +1350,19 @@ export function TestingView({
                     />
                 </div>
             </div>
+
+            {isRunningTests && (
+                <div className="test-run-controls">
+                    <button
+                        type="button"
+                        className="cancel-run-button"
+                        onClick={() => cancelTestRunMutation.mutate({})}
+                        disabled={cancelTestRunMutation.isPending}
+                    >
+                        {cancelTestRunMutation.isPending ? "Stopping…" : "Stop test run"}
+                    </button>
+                </div>
+            )}
 
             {/* Test Results - Full Width at Bottom.
                 `testCode` is the run-time snapshot used as a fallback when
@@ -1313,6 +1399,21 @@ export function TestingView({
           min-height: 0;
           background: var(--bg);
           overflow: hidden;
+        }
+
+        .test-run-controls {
+          display: flex;
+          justify-content: flex-end;
+          padding: 8px 16px 0;
+        }
+
+        .cancel-run-button {
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--surface);
+          color: var(--text);
+          padding: 6px 10px;
+          cursor: pointer;
         }
 
         .main-content {
@@ -1373,6 +1474,21 @@ export function TestingView({
           border-top-color: var(--accent);
           border-radius: 50%;
           animation: q-spin 0.8s linear infinite;
+        }
+        .indexing-error {
+          color: var(--danger);
+          justify-content: space-between;
+        }
+        .indexing-error button {
+          padding: 2px 7px;
+          border: 1px solid var(--hair-strong);
+          background: transparent;
+          color: inherit;
+          font: inherit;
+          cursor: pointer;
+        }
+        .indexing-error button:hover {
+          border-color: var(--danger);
         }
       `}</style>
         </div>

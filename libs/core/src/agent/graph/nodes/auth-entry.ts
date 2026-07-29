@@ -1,5 +1,4 @@
-import fsSync from "node:fs";
-import path from "node:path";
+import { resolveUsableAuthStorageStatePath } from "../../../config/auth-state";
 import { loadSiteKnowledge } from "../../../site-discovery/knowledge-loader";
 import { AgentMemory } from "../../memory";
 
@@ -41,17 +40,10 @@ export function isAuthHost(hostname: string): boolean {
  */
 export function hasAuthSession(projectPath: string): boolean {
     try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const raw = fsSync.readFileSync(configPath, "utf-8");
-        const config = JSON.parse(raw) as { auth?: { storageStatePath?: string } };
-        if (config.auth?.storageStatePath) {
-            const abs = path.resolve(projectPath, config.auth.storageStatePath);
-            if (fsSync.existsSync(abs)) return true;
-        }
+        return resolveUsableAuthStorageStatePath(projectPath) !== null;
     } catch {
-        // Config missing/invalid — fall through to the default location.
+        return false;
     }
-    return fsSync.existsSync(path.join(projectPath, ".raiken", "auth-state.json"));
 }
 
 /**

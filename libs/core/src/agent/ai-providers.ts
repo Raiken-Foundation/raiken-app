@@ -370,7 +370,10 @@ export function getProvider(id: string | undefined): ProviderDefinition {
 
 /**
  * Look up an API key from the environment using the provider's known env vars.
- * Falls back to a generic AI_API_KEY if nothing else matches.
+ * `AI_API_KEY` is intentionally reserved for the `custom` provider: applying
+ * one generic key to every first-party provider cross-wires credentials (for
+ * example, a gateway token being sent to Anthropic). Built-in providers only
+ * read their explicitly documented environment variables.
  */
 export function readApiKeyFromEnv(provider: AIProviderId): string | undefined {
     const def = AI_PROVIDERS[provider];
@@ -378,6 +381,7 @@ export function readApiKeyFromEnv(provider: AIProviderId): string | undefined {
         const value = process.env[name];
         if (value?.trim()) return value;
     }
+    if (provider !== "custom") return undefined;
     const { AI_API_KEY: generic } = process.env;
     return generic?.trim() ? generic : undefined;
 }
@@ -419,6 +423,7 @@ export function resolveAIConfig(
     let configFromFile: {
         provider?: string;
         apiKey?: string;
+        apiKeys?: Partial<Record<AIProviderId, string>>;
         model?: string;
         baseURL?: string;
         maxTokens?: number;
@@ -454,9 +459,21 @@ export function resolveAIConfig(
         apiKey = envKey;
         apiKeySource = "env";
         apiKeyEnvVar = provider.envVars.find((name) => process.env[name]?.trim());
-    } else if (configFromFile.apiKey) {
-        apiKey = configFromFile.apiKey;
-        apiKeySource = "config";
+    } else {
+        // `apiKey` is the legacy/current-provider field. Once an `apiKeys`
+        // map exists, only consult it for the provider recorded in the file:
+        // an override for a different provider must never reuse the active
+        // provider's credential.
+        const canUseLegacyKey =
+            configFromFile.provider === provider.id ||
+            (!configFromFile.provider && provider.id === "openrouter");
+        const savedKey =
+            configFromFile.apiKeys?.[provider.id] ??
+            (canUseLegacyKey ? configFromFile.apiKey : undefined);
+        if (savedKey) {
+            apiKey = savedKey;
+            apiKeySource = "config";
+        }
     }
 
     return {

@@ -46,15 +46,30 @@ describe("gatherAttentionItems", () => {
         }
     });
 
-    it("flags a missing AI provider key when no env var or config key is set", async () => {
+    it("flags an uninitialized project before the first agent turn", async () => {
         const items = await gatherAttentionItems(projectPath);
-        expect(items.some((i) => /No AI provider key configured/.test(i))).toBe(true);
+
+        expect(items).toContainEqual(expect.stringContaining("run `raiken init`"));
+        expect(items.some((i) => /No AI provider key configured/.test(i))).toBe(false);
+    });
+
+    it("flags a missing AI provider key after a provider has been configured", async () => {
+        fs.writeFileSync(
+            path.join(projectPath, "raiken.config.json"),
+            JSON.stringify({ ai: { provider: "deepseek" } }),
+        );
+        const items = await gatherAttentionItems(projectPath);
+        expect(items.some((i) => /DeepSeek needs an API key/.test(i))).toBe(true);
     });
 
     it("does not flag a missing key once the provider's env var is set", async () => {
         process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+        fs.writeFileSync(
+            path.join(projectPath, "raiken.config.json"),
+            JSON.stringify({ ai: { provider: "openrouter" } }),
+        );
         const items = await gatherAttentionItems(projectPath);
-        expect(items.some((i) => /No AI provider key configured/.test(i))).toBe(false);
+        expect(items.some((i) => /needs an API key/.test(i))).toBe(false);
     });
 
     it("says nothing about discovery for a fresh project with no discovery DB yet", async () => {

@@ -3,8 +3,9 @@
 // Tight, instruction-only style: no persona, no few-shot, no recap sections.
 // ============================================================================
 
+import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import type { SiteKnowledge } from "../site-discovery";
-import type { ParsedClass, ParsedFunction, ParsedImport } from "../types";
+import type { ParsedClass, ParsedFunction, ParsedImport, TemplateSelector } from "../types";
 import type { AgentIntent } from "./graph/utils";
 
 export interface ContextData {
@@ -15,6 +16,8 @@ export interface ContextData {
         imports: ParsedImport[];
         fullContext: string;
         relevanceScore: number;
+        /** Literal selectors read out of this file's markup, when it has any. */
+        templateSelectors?: TemplateSelector[];
     }>;
     projectType: string;
     testDirectory: string;
@@ -27,6 +30,31 @@ export interface ContextData {
      * fully-qualified URLs.
      */
     baseURL?: string | null;
+}
+
+/**
+ * Render the `[SOURCE FILES]` block.
+ *
+ * Shared by the generation and explain prompts so a template's selectors show up
+ * in both — mapping a feature to files is exactly when a server-rendered
+ * template's test ids are the most useful thing Raiken knows about it.
+ */
+function formatSourceFiles(files: ContextData["files"]): string {
+    return files
+        .map((f) => {
+            const selectors = describeTemplateSelectors(f.templateSelectors ?? []);
+            const imports = f.imports
+                .slice(0, 5)
+                .map((i) => i.source)
+                .join(", ");
+            return `File: ${f.path}
+Functions: ${f.functions.map((fn) => `${fn.name}(${fn.params.join(", ")})`).join(", ") || "none"}
+Classes: ${f.classes.map((c) => c.name).join(", ") || "none"}
+Imports: ${imports || "none"}${selectors ? `\nTemplate selectors:\n${selectors}` : ""}
+---
+${f.fullContext}`;
+        })
+        .join("\n\n");
 }
 
 /**
@@ -88,6 +116,16 @@ export const goldenFrameworkTemplate: PromptTemplate = {
   Do NOT emit \`http://\` / \`https://\` URLs unless navigating to an external origin.`
             : `- URLs MUST be absolute (no baseURL is configured). Source from user prompt, [SITE DISCOVERY KNOWLEDGE], or DOM context. Never invent a route. If none is available, ask.`;
 
+        // Only spend tokens on the caveat when a template actually contributed
+        // selectors. Source markup shows the app's naming conventions but proves
+        // nothing about what renders, so it must never outrank the live DOM.
+        const hasTemplateSelectors = context.files.some(
+            (f) => (f.templateSelectors?.length ?? 0) > 0,
+        );
+        const templateSelectorRule = hasTemplateSelectors
+            ? `\n- "Template selectors" listed under a source file come from markup, not from a live page. Use them to match the app's naming, but only [LIVE DOM CONTEXT] proves an element exists — where both are present, the DOM wins.`
+            : "";
+
         return `[ROLE]
 Senior Playwright/TypeScript engineer. Target: ${context.projectType}.
 
@@ -95,21 +133,7 @@ Senior Playwright/TypeScript engineer. Target: ${context.projectType}.
 Test directory: ${context.testDirectory}${context.baseURL ? `\nbaseURL: ${context.baseURL}` : ""}
 
 [SOURCE FILES]
-${context.files
-    .map(
-        (f) => `File: ${f.path}
-Functions: ${f.functions.map((fn) => `${fn.name}(${fn.params.join(", ")})`).join(", ") || "none"}
-Classes: ${f.classes.map((c) => c.name).join(", ") || "none"}
-Imports: ${
-            f.imports
-                .slice(0, 5)
-                .map((i) => i.source)
-                .join(", ") || "none"
-        }
----
-${f.fullContext}`,
-    )
-    .join("\n\n")}
+${formatSourceFiles(context.files)}
 ${context.siteKnowledge && this.formatSiteKnowledgeSection ? this.formatSiteKnowledgeSection(context.siteKnowledge, context.baseURL) : ""}
 
 [TASK]
@@ -134,7 +158,7 @@ Structure: imports → describe → optional beforeEach → test cases (Arrange/
 [RULES]
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
 - Every locator you assert/act on MUST resolve to exactly ONE element (Playwright strict mode fails otherwise). The same name often appears twice (a sidebar link AND a breadcrumb, a heading AND a link). Disambiguate by scoping to a landmark — page.getByRole("navigation").getByRole("link", { name: "X" }) or page.getByRole("main")… — or use { exact: true }, or .first() only when any match is truly acceptable.
-- If a [LIVE DOM CONTEXT] block is present, use ONLY selectors from it. Do not invent.
+- If a [LIVE DOM CONTEXT] block is present, use ONLY selectors from it. Do not invent.${templateSelectorRule}
 ${urlRule}
 - If [LIVE DOM CONTEXT] includes [PREREQUISITES], add beforeEach handling them; use env vars for credentials.
 - No fixed sleeps. NEVER emit page.waitForTimeout, setTimeout, or sleep.
@@ -234,21 +258,7 @@ QA + senior engineer helping a teammate understand and test the product.
 [PROJECT] ${context.projectType} (tests: ${context.testDirectory})
 
 [SOURCE FILES]
-${context.files
-    .map(
-        (f) => `File: ${f.path}
-Functions: ${f.functions.map((fn) => `${fn.name}(${fn.params.join(", ")})`).join(", ") || "none"}
-Classes: ${f.classes.map((c) => c.name).join(", ") || "none"}
-Imports: ${
-            f.imports
-                .slice(0, 5)
-                .map((i) => i.source)
-                .join(", ") || "none"
-        }
----
-${f.fullContext}`,
-    )
-    .join("\n\n")}
+${formatSourceFiles(context.files)}
 
 [TASK]
 ${userPrompt}

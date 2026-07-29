@@ -11,7 +11,14 @@ import { TestStorage } from "./storage";
 export interface TestRunResult {
     testFile: string;
     testName: string;
-    status: "passed" | "failed" | "error" | "timeout" | "skipped";
+    /**
+     * `"flaky"` means the same spec both passed and failed within one
+     * invocation — across Playwright retries or `--repeat-each` repetitions.
+     * It is deliberately NOT `"passed"`: every caller checks
+     * `status === "passed"`, so an intermittent test can never be reported as
+     * a green run or as a successful repair.
+     */
+    status: "passed" | "failed" | "error" | "timeout" | "skipped" | "flaky";
     duration: number;
     error?: {
         message: string;
@@ -43,6 +50,74 @@ interface PlaywrightJsonSuite {
 }
 interface PlaywrightJsonReport {
     suites?: PlaywrightJsonSuite[];
+}
+
+/** A verdict that is neither a pass nor a deliberate skip. */
+function isFailureStatus(status: TestRunResult["status"]): boolean {
+    return status !== "passed" && status !== "skipped";
+}
+
+/**
+ * Collapse repetitions of the same test into one verdict.
+ *
+ * `--repeat-each` does not add attempts inside a spec — Playwright reports each
+ * repetition as its own spec entry, so a run of the same test that passed once
+ * and failed once arrives here as two independent results. Left unmerged, a
+ * caller counting statuses sees "1 passed, 1 failed" for a single test, and the
+ * `flaky` verdict that repair verification depends on is never reached.
+ */
+function mergeRepetitions(results: TestRunResult[]): TestRunResult[] {
+    const order: string[] = [];
+    const groups = new Map<string, TestRunResult[]>();
+
+    for (const result of results) {
+        const key = `${result.testFile}\u0000${result.testName}`;
+        const group = groups.get(key);
+        if (group) {
+            group.push(result);
+        } else {
+            groups.set(key, [result]);
+            order.push(key);
+        }
+    }
+
+    return order.map((key) => {
+        const group = groups.get(key) as TestRunResult[];
+        if (group.length === 1) return group[0];
+
+        const statuses = group.map((r) => r.status);
+        const failing = statuses.filter(isFailureStatus);
+        const unstable =
+            statuses.includes("flaky") ||
+            (failing.length > 0 && statuses.some((s) => s === "passed"));
+
+        let status: TestRunResult["status"];
+        if (unstable) status = "flaky";
+        else if (failing.length > 0) status = failing[0];
+        else if (statuses.includes("passed")) status = "passed";
+        else status = "skipped";
+
+        // Report the whole verification, not one repetition of it.
+        const duration = group.reduce((total, r) => total + (r.duration || 0), 0);
+        const merged: TestRunResult = { ...group[0], status, duration };
+
+        const failure = group.find((r) => r.error);
+        if (isFailureStatus(status) && failure?.error) merged.error = failure.error;
+        else if (!isFailureStatus(status)) delete merged.error;
+
+        const withAttachments = group.find((r) => r.attachments?.length);
+        if (withAttachments?.attachments) merged.attachments = withAttachments.attachments;
+
+        return merged;
+    });
+}
+
+/** Map one Playwright attempt status onto our result vocabulary. */
+function mapAttemptStatus(status: string | undefined): TestRunResult["status"] {
+    if (status === "passed") return "passed";
+    if (status === "timedOut") return "timeout";
+    if (status === "skipped") return "skipped";
+    return "failed";
 }
 
 /**
@@ -110,6 +185,20 @@ export interface TestRunOptions {
     headed?: boolean;
     /** Project path for relative file resolution */
     projectPath?: string;
+    /** Cancel the subprocess and kill its process tree when aborted */
+    signal?: AbortSignal;
+    /**
+     * Playwright `--retries`. Left unset the project config decides, which is
+     * right for a user-initiated run but wrong for verification: a config with
+     * `retries: 2` lets a fix that works one time in three report success.
+     * Pin it to 0 whenever the run is evidence rather than a convenience.
+     */
+    retries?: number;
+    /**
+     * Playwright `--repeat-each`: run the spec this many times in a single
+     * invocation. Used to prove a repair holds up rather than passing once.
+     */
+    repeatEach?: number;
 }
 
 /**
@@ -154,7 +243,19 @@ export class TestRunner {
      * Run a test file using Playwright Test.
      */
     async runTest(testFile: string, options: TestRunOptions = {}): Promise<TestRunResult[]> {
-        const { timeout = 60000, headed = false } = options;
+        const { timeout = 60000, headed = false, signal, retries, repeatEach } = options;
+
+        if (signal?.aborted) {
+            return [
+                {
+                    testFile,
+                    testName: this.extractTestName(testFile),
+                    status: "error",
+                    duration: 0,
+                    error: { message: "Operation cancelled" },
+                },
+            ];
+        }
 
         // Resolve the project's actual Playwright config explicitly instead
         // of relying on Playwright's own cwd-based auto-discovery, which
@@ -187,6 +288,17 @@ export class TestRunner {
 
             if (configPath) {
                 args.push("--config", configPath);
+            }
+
+            // Explicit `--retries` overrides whatever the project config sets.
+            // Zero makes the run evidence: nothing is retried, so the reported
+            // outcome is the outcome of a single honest attempt.
+            if (typeof retries === "number" && retries >= 0) {
+                args.push(`--retries=${retries}`);
+            }
+
+            if (typeof repeatEach === "number" && repeatEach > 1) {
+                args.push(`--repeat-each=${repeatEach}`);
             }
 
             if (headed) {
@@ -223,21 +335,54 @@ export class TestRunner {
                 stderr += data.toString();
             });
 
-            // Guards so the timeout and close/error handlers can't both settle
+            // Guards so the timeout, abort, and close/error handlers can't both settle
             // the promise (which would push duplicate results).
             let settled = false;
             let killTimer: NodeJS.Timeout | null = null;
 
-            // Handle timeout
-            const timeoutId = setTimeout(() => {
-                // Ask the process TREE to terminate (not just the shell
-                // wrapper); if it ignores SIGTERM (hung driver/browser),
-                // escalate to SIGKILL so we don't leave orphaned
-                // npx/Chromium processes accumulating across runs.
+            const settleCancelled = () => {
+                if (settled) return;
+                settled = true;
+                results.push({
+                    testFile,
+                    testName: this.extractTestName(testFile),
+                    status: "error",
+                    duration: Date.now() - startTime,
+                    error: { message: "Operation cancelled" },
+                });
+                resolve(results);
+            };
+
+            const terminateProcessTree = () => {
                 if (child.pid) killProcessTree(child.pid, "SIGTERM");
                 killTimer = setTimeout(() => {
                     if (child.pid) killProcessTree(child.pid, "SIGKILL");
                 }, 5000);
+            };
+
+            let timeoutId: ReturnType<typeof setTimeout>;
+
+            const onAbort = () => {
+                clearTimeout(timeoutId);
+                terminateProcessTree();
+                settleCancelled();
+            };
+
+            if (signal) {
+                if (signal.aborted) {
+                    onAbort();
+                    return;
+                }
+                signal.addEventListener("abort", onAbort, { once: true });
+            }
+
+            // Handle timeout
+            timeoutId = setTimeout(() => {
+                // Ask the process TREE to terminate (not just the shell
+                // wrapper); if it ignores SIGTERM (hung driver/browser),
+                // escalate to SIGKILL so we don't leave orphaned
+                // npx/Chromium processes accumulating across runs.
+                terminateProcessTree();
                 if (settled) return;
                 settled = true;
                 results.push({
@@ -252,9 +397,14 @@ export class TestRunner {
                 resolve(results);
             }, timeout + 5000); // Extra buffer for process cleanup
 
-            child.on("close", (code) => {
+            const cleanup = () => {
                 clearTimeout(timeoutId);
                 if (killTimer) clearTimeout(killTimer);
+                signal?.removeEventListener("abort", onAbort);
+            };
+
+            child.on("close", (code) => {
+                cleanup();
                 if (settled) return;
                 settled = true;
                 const duration = Date.now() - startTime;
@@ -301,8 +451,7 @@ export class TestRunner {
             });
 
             child.on("error", (err) => {
-                clearTimeout(timeoutId);
-                if (killTimer) clearTimeout(killTimer);
+                cleanup();
                 if (settled) return;
                 settled = true;
                 results.push({
@@ -340,66 +489,111 @@ export class TestRunner {
             const walkSuites = (suites: PlaywrightJsonSuite[]) => {
                 for (const suite of suites || []) {
                     for (const spec of suite.specs || []) {
-                        // Aggregate across retries: prefer the final attempt's
-                        // outcome, but keep the error from the last failing run.
-                        const attempts = spec.tests?.flatMap((t) => t.results || []) || [];
-                        if (attempts.length === 0) continue;
-                        const result = attempts[attempts.length - 1];
-
-                        const status =
-                            result.status === "passed"
-                                ? "passed"
-                                : result.status === "timedOut"
-                                  ? "timeout"
-                                  : result.status === "skipped"
-                                    ? "skipped"
-                                    : "failed";
-
-                        const testResult: TestRunResult = {
-                            testFile,
-                            testName: spec.title,
-                            status,
-                            duration: result.duration || fallbackDuration,
-                        };
-
-                        const failure =
-                            status !== "passed" && status !== "skipped"
-                                ? attempts.find((a) => a.error) || result
-                                : undefined;
-                        if (failure?.error) {
-                            testResult.error = {
-                                message: failure.error.message || "Unknown error",
-                                stack: failure.error.stack,
-                                selector:
-                                    this.extractSelectorFromError(failure.error.message || "") ||
-                                    undefined,
-                            };
-                        }
-
-                        // Attachments live on the LAST attempt (retries reuse the
-                        // same artifact slots), matching the `result` we already
-                        // read status/duration from above.
-                        if (result.attachments && result.attachments.length > 0) {
-                            testResult.attachments = result.attachments.map((att) => ({
-                                name: att.name ?? "",
-                                contentType: att.contentType ?? "",
-                                path: att.path,
-                                body: att.body,
-                            }));
-                        }
-
-                        results.push(testResult);
+                        const testResult = this.summarizeSpec(spec, testFile, fallbackDuration);
+                        if (testResult) results.push(testResult);
                     }
                     if (suite.suites) walkSuites(suite.suites);
                 }
             };
 
             walkSuites(json.suites || []);
+            return mergeRepetitions(results);
         } catch {
             // Invalid JSON output
         }
 
         return results;
+    }
+
+    /**
+     * Collapse every attempt Playwright recorded for one spec into a single
+     * verdict.
+     *
+     * The reporter nests attempts twice: `spec.tests` holds one entry per
+     * project × `--repeat-each` repetition, and each entry's `results` holds
+     * one per retry. Reading only the last attempt of the flattened list —
+     * the previous behavior — reports `passed` for a spec that failed and
+     * then passed, no matter which layer the pass came from.
+     *
+     * For a repair verification that is the difference between a fix and the
+     * appearance of one, so a mixed set of outcomes is reported as `flaky`
+     * (never `passed`) and keeps the failing attempt's error, giving the
+     * repair loop the actual reason instead of a green light.
+     */
+    private summarizeSpec(
+        spec: PlaywrightJsonSpec,
+        testFile: string,
+        fallbackDuration: number,
+    ): TestRunResult | null {
+        const attemptGroups = (spec.tests ?? [])
+            .map((test) => test.results ?? [])
+            .filter((group) => group.length > 0);
+        const attempts = attemptGroups.flat();
+        if (attempts.length === 0) return null;
+        const last = attempts[attempts.length - 1];
+
+        const isFailure = isFailureStatus;
+
+        // One verdict per repetition, taken from its final retry — the same
+        // rule Playwright applies when it prints a run summary.
+        const perRepetition = attemptGroups.map((group) =>
+            mapAttemptStatus(group[group.length - 1].status),
+        );
+        // A repetition that only went green because an earlier retry was
+        // discarded is itself unstable, even though its final attempt passed.
+        const passedOnRetry = attemptGroups.some(
+            (group) =>
+                mapAttemptStatus(group[group.length - 1].status) === "passed" &&
+                group.slice(0, -1).some((attempt) => isFailure(mapAttemptStatus(attempt.status))),
+        );
+
+        const failing = perRepetition.filter(isFailure);
+        const anyPassed = perRepetition.includes("passed");
+
+        let status: TestRunResult["status"];
+        if (failing.length > 0 && (anyPassed || passedOnRetry)) {
+            status = "flaky";
+        } else if (failing.length > 0) {
+            status = failing[0];
+        } else if (passedOnRetry) {
+            status = "flaky";
+        } else if (anyPassed) {
+            status = "passed";
+        } else {
+            status = "skipped";
+        }
+
+        const testResult: TestRunResult = {
+            testFile,
+            testName: spec.title,
+            status,
+            duration: last.duration || fallbackDuration,
+        };
+
+        if (isFailure(status)) {
+            const failure = attempts.find((attempt) => attempt.error) || last;
+            if (failure.error) {
+                testResult.error = {
+                    message: failure.error.message || "Unknown error",
+                    stack: failure.error.stack,
+                    selector:
+                        this.extractSelectorFromError(failure.error.message || "") || undefined,
+                };
+            }
+        }
+
+        // Attachments live on the LAST attempt (retries reuse the same
+        // artifact slots), matching the attempt we read duration from.
+        if (last.attachments && last.attachments.length > 0) {
+            testResult.attachments = last.attachments.map((att) => ({
+                name: att.name ?? "",
+                contentType: att.contentType ?? "",
+                path: att.path,
+                body: att.body,
+            }));
+        }
+
+        return testResult;
     }
 
     /**

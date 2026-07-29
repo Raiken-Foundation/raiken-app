@@ -484,7 +484,7 @@ export class SiteKnowledgeDB {
             .prepare(
                 `
             SELECT * FROM discovery_blockers
-            WHERE project_path = ? AND resolved_at IS NULL
+            WHERE project_path = ? AND resolved_at IS NULL AND severity != 'log'
             ORDER BY discovered_at DESC
         `,
             )
@@ -967,7 +967,7 @@ export class SiteKnowledgeDB {
             .prepare(
                 `
             SELECT COUNT(*) as count FROM discovery_blockers
-            WHERE project_path = ? AND resolved_at IS NULL
+            WHERE project_path = ? AND resolved_at IS NULL AND severity != 'log'
         `,
             )
             .get(this.projectPath) as { count: number };

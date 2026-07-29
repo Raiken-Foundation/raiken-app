@@ -24,9 +24,7 @@
  * dead holder can never wedge a project's discovery forever.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { lock as lockfileLock } from "proper-lockfile";
+import { acquireProjectOperation } from "../operations";
 
 /**
  * Stale threshold for the lock's mtime. Generous relative to the
@@ -34,23 +32,8 @@ import { lock as lockfileLock } from "proper-lockfile";
  * false-positive a live crawl as stale, but still short enough that a
  * crashed process's lock frees up well within a user's patience.
  */
-const LOCK_STALE_MS = 45_000;
-/** Renew comfortably inside the stale window (must be <= stale / 2). */
-const LOCK_UPDATE_MS = 15_000;
-
 export interface DiscoveryLockHandle {
     release(): Promise<void>;
-}
-
-// `proper-lockfile` doesn't export a typed error class for contention — it
-// throws a plain `Error` with a `.code === "ELOCKED"` property at runtime.
-function isLockedError(error: unknown): boolean {
-    return (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "ELOCKED"
-    );
 }
 
 /**
@@ -60,31 +43,6 @@ function isLockedError(error: unknown): boolean {
  * rather than silently proceeding.
  */
 export async function acquireDiscoveryLock(projectPath: string): Promise<DiscoveryLockHandle> {
-    const raikenDir = path.join(projectPath, ".raiken");
-    fs.mkdirSync(raikenDir, { recursive: true });
-    const lockTarget = path.join(raikenDir, "discovery.lock");
-
-    try {
-        const release = await lockfileLock(lockTarget, {
-            // The target need not exist as a real file — we're locking a
-            // conceptual resource ("discovery for this project"), not a
-            // file we're about to read/write.
-            realpath: false,
-            stale: LOCK_STALE_MS,
-            update: LOCK_UPDATE_MS,
-            retries: 0,
-        });
-        return { release };
-    } catch (error) {
-        if (isLockedError(error)) {
-            throw new Error(
-                "Another discovery process is already running for this project " +
-                    "(cross-process lock held). Wait for it to finish before starting " +
-                    "a new crawl. If you're certain no other Raiken process is running " +
-                    `(e.g. it crashed without cleaning up), the lock self-clears after ` +
-                    `${Math.round(LOCK_STALE_MS / 1000)}s.`,
-            );
-        }
-        throw error;
-    }
+    const lease = await acquireProjectOperation(projectPath, "discovery");
+    return { release: () => lease.release() };
 }

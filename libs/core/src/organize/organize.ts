@@ -8,7 +8,7 @@
 
 import * as path from "node:path";
 import { getProvider, resolveAIConfig } from "../agent/ai-providers";
-import { readConfiguredTestDirectory } from "../utils";
+import { loadTestDirectory } from "../config";
 import { analyzeConfigCleanup } from "./config-cleanup";
 import { buildTestInventory } from "./inventory";
 import { planTestOrganization } from "./plan";
@@ -16,8 +16,7 @@ import type { OrganizeOptions, OrganizeResult } from "./types";
 
 export async function runOrganize(options: OrganizeOptions): Promise<OrganizeResult> {
     const projectPath = path.resolve(options.projectPath);
-    const testDirectory =
-        options.testDirectory ?? readConfiguredTestDirectory(projectPath) ?? "e2e";
+    const testDirectory = options.testDirectory ?? loadTestDirectory(projectPath);
 
     const includeTests = options.includeTests ?? true;
     const includeConfig = options.includeConfig ?? true;

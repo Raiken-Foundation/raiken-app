@@ -107,6 +107,30 @@ describe("manual fallback detector — error_page / captcha (existing coverage)"
         expect(blocker?.category).toBe("error_page");
     });
 
+    it("still flags vendor 5xx like Cloudflare's 520", async () => {
+        const blocker = await detector.detect({
+            projectPath: PROJECT_PATH,
+            url: "http://localhost:3000/",
+            page: makePage({}),
+            response: makeResponse(520),
+        });
+        expect(blocker?.category).toBe("error_page");
+    });
+
+    it("ignores synthetic proxy statuses (590–599) — no origin answered", async () => {
+        // 594 "Connection Refused" is proxy-chain's fabricated response when
+        // the upstream connect fails; it paused crawls against healthy apps.
+        for (const status of [590, 594, 599]) {
+            const blocker = await detector.detect({
+                projectPath: PROJECT_PATH,
+                url: "http://localhost:3000/",
+                page: makePage({}),
+                response: makeResponse(status, { statusText: "Connection Refused" }),
+            });
+            expect(blocker?.category).not.toBe("error_page");
+        }
+    });
+
     it("flags a Cloudflare Turnstile iframe as captcha", async () => {
         const blocker = await detector.detect({
             projectPath: PROJECT_PATH,

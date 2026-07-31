@@ -9,7 +9,13 @@
  * handler. The UI picks it up automatically.
  */
 
+import { findSharedSlashMetadata } from "@raiken/shared";
 import type { trpc } from "./trpc";
+
+/** Use cross-surface description when semantics match; keep adapter-specific text otherwise. */
+function sharedDescription(name: string, fallback: string): string {
+    return findSharedSlashMetadata(name)?.description ?? fallback;
+}
 
 export type DashboardView = "testing" | "discovery" | "quality" | "settings";
 
@@ -149,7 +155,10 @@ const COMMANDS: SlashCommand[] = [
     },
     {
         name: "doctor",
-        description: "Open the doctor panel (test-suite anti-pattern lint).",
+        description: sharedDescription(
+            "doctor",
+            "Open the doctor panel (test-suite anti-pattern lint).",
+        ),
         group: "run",
         execute(_args, ctx) {
             ctx.navigate({ view: "quality", tool: "doctor" });
@@ -276,8 +285,10 @@ const COMMANDS: SlashCommand[] = [
         name: "test",
         aliases: ["run-tests"],
         argsHint: "[file or test name]",
-        description:
+        description: sharedDescription(
+            "test",
             "Run Playwright tests. Optional pattern filters by name; pass a path to scope.",
+        ),
         group: "run",
         async execute(args, ctx) {
             const arg = args.trim();
@@ -328,7 +339,7 @@ const COMMANDS: SlashCommand[] = [
     },
     {
         name: "clear",
-        description: "Clear the chat transcript.",
+        description: sharedDescription("clear", "Clear the chat transcript."),
         group: "utility",
         execute(_args, ctx) {
             ctx.clearChat();
@@ -338,7 +349,7 @@ const COMMANDS: SlashCommand[] = [
     {
         name: "help",
         aliases: ["?"],
-        description: "Show the full slash-command reference.",
+        description: sharedDescription("help", "Show the full slash-command reference."),
         group: "utility",
         execute(_args, ctx) {
             const groups: Record<string, SlashCommand[]> = {};

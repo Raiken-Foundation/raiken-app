@@ -1,11 +1,19 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
-import { BrowserSession, runOrchestrator } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import {
+    BrowserSession,
+    createProjectApplication,
+    getProvider,
+    resolveAIConfig,
+    runOrchestrator,
+} from "@raiken/core";
+import { splitTestSavePath } from "@raiken/shared";
 import chalk from "chalk";
 import { dim, renderToolCall, routeDiagnosticsToStderr, splitHITL } from "../agent-stream";
 import { bootstrapProject } from "../bootstrap";
+import { CLI_EXIT, type CliExitCode, safeCliErrorMessage } from "../errors";
 import { createEventStream, nowTs } from "../repl/events";
+import { cliExit } from "../repl/exit";
 
 export interface OneShotOptions {
     /** The request. When empty, the prompt is read from piped stdin. */
@@ -35,6 +43,29 @@ interface RunSummary {
     skipped: number;
 }
 
+function hitlWorkflowId(hitl: Record<string, unknown> | null): string | undefined {
+    const context =
+        hitl?.context && typeof hitl.context === "object"
+            ? (hitl.context as Record<string, unknown>)
+            : {};
+    return typeof context.workflowId === "string" ? context.workflowId : undefined;
+}
+
+function summarizeWorkflowRun(run: {
+    success: boolean;
+    results?: Array<{ status: string }>;
+}): RunSummary {
+    const results = run.results ?? [];
+    return {
+        success: run.success,
+        passed: results.filter((result) => result.status === "passed").length,
+        failed: results.filter(
+            (result) => result.status !== "passed" && result.status !== "skipped",
+        ).length,
+        skipped: results.filter((result) => result.status === "skipped").length,
+    };
+}
+
 export interface OneShotOutcomeInput {
     /**
      * True when the agent actually produced test code this run — either an
@@ -55,7 +86,7 @@ export interface OneShotOutcomeInput {
 
 export interface OneShotOutcome {
     ok: boolean;
-    exitCode: number;
+    exitCode: CliExitCode;
     /** Why the run is not ok. Absent when it is. */
     reason?: string;
 }
@@ -80,7 +111,11 @@ export interface OneShotOutcome {
  * driving the full orchestrator/browser stack.
  */
 export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcome {
-    const notOk = (reason: string): OneShotOutcome => ({ ok: false, exitCode: 1, reason });
+    const notOk = (reason: string): OneShotOutcome => ({
+        ok: false,
+        exitCode: CLI_EXIT.RUNTIME_FAILURE,
+        reason,
+    });
 
     if (input.saveError) return notOk(input.saveError);
     if (input.producedTest && input.saveRequested && !input.savedTest) {
@@ -96,7 +131,7 @@ export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcom
             `The test run failed (${input.runSummary.passed} passed, ${input.runSummary.failed} failed).`,
         );
     }
-    return { ok: true, exitCode: 0 };
+    return { ok: true, exitCode: CLI_EXIT.SUCCESS };
 }
 
 /**
@@ -136,7 +171,8 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     // Keep stdout pristine for machine modes: route engine console.* to stderr.
     const restoreConsole = routeDiagnosticsToStderr();
 
-    const fail = (message: string, code = 1): never => {
+    const fail = (error: unknown, code: CliExitCode = CLI_EXIT.RUNTIME_FAILURE): never => {
+        const message = safeCliErrorMessage(error);
         if (streamJson) {
             events.emit({ type: "done", ok: false, error: message, ts: nowTs() });
         }
@@ -146,7 +182,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         } else if (!streamJson) {
             process.stderr.write(chalk.red(`\n  ✗ ${message}\n`));
         }
-        process.exit(code);
+        cliExit(code);
     };
 
     let prompt = (options.prompt || "").trim();
@@ -154,7 +190,25 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     if (!prompt) {
         return void fail(
             'No prompt provided. Use: raiken -p "test the login flow"  (or pipe input on stdin).',
+            CLI_EXIT.USAGE,
         );
+    }
+
+    // Fail fast when the run cannot possibly work: without an API key the
+    // orchestrator streams an "API Key Required" message and returns
+    // normally, which used to make one-shot exit 0 with `ok: true` — a CI
+    // pipeline would green-light a run where nothing happened. Config/auth
+    // problems are exit 3 by contract.
+    {
+        const resolved = resolveAIConfig(projectPath);
+        const provider = getProvider(resolved.provider);
+        if (provider.envVars.length > 0 && !resolved.apiKey) {
+            return void fail(
+                `No API key configured for ${provider.label}. Run \`raiken config\` to save one, ` +
+                    `or set ${provider.envVars[0]} in your environment.`,
+                CLI_EXIT.CONFIG_AUTH,
+            );
+        }
     }
 
     const bootResult = await bootstrapProject(projectPath, {
@@ -172,7 +226,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         });
     }
 
-    const caller = appRouter.createCaller({ projectPath });
+    const app = createProjectApplication(projectPath);
 
     const abort = new AbortController();
     const timer = options.timeoutMs ? setTimeout(() => abort.abort(), options.timeoutMs) : null;
@@ -217,7 +271,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                 },
                 suppressProgressPrint: streamJson || json,
             });
-            if (hitl && hitl.kind === "save_approval") {
+            if (hitl && (hitl.kind === "save_approval" || hitl.kind === "run_approval")) {
                 pendingHITL = hitl;
                 if (streamJson) {
                     events.emit({
@@ -225,6 +279,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                         kind: String(hitl.kind),
                         payload: {
                             suggestedPath: hitl.suggestedPath,
+                            testFile: hitl.testFile,
                             // Omit full test code from the event stream by default —
                             // editors can request it via the final done payload.
                             hasTestCode: typeof hitl.testCode === "string",
@@ -246,8 +301,21 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             process.stdout.write("\n");
         }
     } catch (err) {
-        if (abort.signal.aborted) return void fail("Run aborted.", 130);
-        return void fail(err instanceof Error ? err.message : String(err));
+        const workflowId = hitlWorkflowId(pendingHITL);
+        if (
+            workflowId &&
+            (pendingHITL?.kind === "save_approval" || pendingHITL?.kind === "run_approval")
+        ) {
+            await app.hitl
+                .continue({
+                    workflowId,
+                    action: pendingHITL.kind === "save_approval" ? "save" : "run",
+                    decision: "reject",
+                })
+                .catch(() => undefined);
+        }
+        if (abort.signal.aborted) return void fail("Run aborted.", CLI_EXIT.CANCELLED);
+        return void fail(err);
     } finally {
         if (timer) clearTimeout(timer);
         process.off("SIGINT", onSigint);
@@ -262,35 +330,65 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
 
     const draftFromApproval =
         pendingHITL && typeof pendingHITL.testCode === "string" ? pendingHITL.testCode : "";
+    const workflowId = hitlWorkflowId(pendingHITL);
+    const pendingKind =
+        pendingHITL?.kind === "save_approval" || pendingHITL?.kind === "run_approval"
+            ? pendingHITL.kind
+            : undefined;
     // Whether the agent produced a test at all — the only signal that makes
     // "a saved file must exist" a fair expectation. Asking a question, or
     // exploring a site, legitimately leaves no artifact behind.
     const producedTest = Boolean(draftFromApproval) || agentSavedPath !== null;
 
     let savedTest: string | null = null;
-    if (pendingHITL && options.save) {
+    let workflowStatusAfterSave: string | undefined;
+    if (pendingKind === "save_approval" && pendingHITL && options.save) {
         const suggestedPath =
             typeof pendingHITL.suggestedPath === "string" ? pendingHITL.suggestedPath : "";
         if (draftFromApproval && suggestedPath) {
-            const lastSlash = suggestedPath.lastIndexOf("/");
-            const testDir = lastSlash >= 0 ? suggestedPath.slice(0, lastSlash) : undefined;
-            const fileName = lastSlash >= 0 ? suggestedPath.slice(lastSlash + 1) : suggestedPath;
             try {
-                const result = await caller.saveGeneratedTest({
-                    fileName,
-                    content: draftFromApproval,
-                    testDir,
-                    // Only dedupe to `name-2.spec.ts` for a path the agent
-                    // invented. When it deliberately targeted an existing
-                    // spec, redirecting the write is the bug, not the guard.
-                    avoidOverwrite: pendingHITL.overwriteTarget !== true,
-                });
-                savedTest = result.filePath;
-                if (!json && !streamJson) {
+                if (workflowId) {
+                    const result = await app.hitl.continue({
+                        workflowId,
+                        action: "save",
+                        decision: "approve",
+                        filePath: suggestedPath,
+                        // Only dedupe to `name-2.spec.ts` for a path the agent
+                        // invented. When it deliberately targeted an existing
+                        // spec, redirecting the write is the bug, not the guard.
+                        avoidOverwrite: pendingHITL.overwriteTarget !== true,
+                    });
+                    savedTest = result.savedPath ?? null;
+                    workflowStatusAfterSave = result.workflow.status;
+                    if (!savedTest) {
+                        saveError =
+                            result.workflow.statusMessage ??
+                            "The durable save workflow did not produce a test artifact.";
+                    }
+                } else {
+                    const { fileName, testDir } = splitTestSavePath(suggestedPath);
+                    const result = await app.testing.saveGeneratedTest({
+                        fileName,
+                        content: draftFromApproval,
+                        testDir,
+                        avoidOverwrite: pendingHITL.overwriteTarget !== true,
+                    });
+                    savedTest = result.filePath;
+                }
+                if (savedTest && !json && !streamJson) {
                     process.stderr.write(chalk.green(`\n  ✓ Saved ${savedTest}\n`));
                 }
             } catch (err) {
-                saveError = err instanceof Error ? err.message : String(err);
+                if (workflowId) {
+                    await app.hitl
+                        .continue({
+                            workflowId,
+                            action: "save",
+                            decision: "reject",
+                        })
+                        .catch(() => undefined);
+                }
+                saveError = safeCliErrorMessage(err);
                 if (!json && !streamJson) {
                     process.stderr.write(chalk.red(`\n  ✗ Save failed: ${saveError}\n`));
                 }
@@ -299,6 +397,16 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             saveError =
                 "Agent proposed a test but the approval payload was missing test code or a save path.";
         }
+    } else if (pendingKind === "save_approval" && workflowId && !options.save) {
+        await app.hitl.continue({
+            workflowId,
+            action: "save",
+            decision: "reject",
+        });
+        workflowStatusAfterSave = "cancelled";
+    } else if (pendingKind === "run_approval" && pendingHITL) {
+        const testFile = typeof pendingHITL.testFile === "string" ? pendingHITL.testFile : "";
+        if (testFile) savedTest = testFile;
     }
 
     if (!savedTest && agentSavedPath) savedTest = agentSavedPath;
@@ -321,19 +429,36 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     if (options.run && savedTest) {
         if (!json && !streamJson) process.stderr.write(dim(`  Running ${savedTest}...\n`));
         try {
-            const result = (await caller.runTests({ testFile: savedTest })) as {
-                success: boolean;
-                results?: {
-                    stats?: { expected?: number; unexpected?: number; skipped?: number };
-                } | null;
-            };
-            const stats = result.results?.stats;
-            runSummary = {
-                success: result.success,
-                passed: stats?.expected ?? 0,
-                failed: stats?.unexpected ?? 0,
-                skipped: stats?.skipped ?? 0,
-            };
+            const shouldContinueWorkflow =
+                workflowId &&
+                (pendingKind === "run_approval" ||
+                    workflowStatusAfterSave === "await_run_approval");
+            if (shouldContinueWorkflow) {
+                const result = await app.hitl.continue({
+                    workflowId,
+                    action: "run",
+                    decision: "approve",
+                });
+                runSummary = result.run
+                    ? summarizeWorkflowRun(result.run)
+                    : { success: false, passed: 0, failed: 0, skipped: 0 };
+            } else {
+                const result = (await app.testing.runTests({ testFile: savedTest })) as {
+                    success: boolean;
+                    parsedRun?: { tests?: Array<{ status?: string }> } | null;
+                };
+                // Count from the parsed run (same vocabulary as `raiken test`
+                // and `raiken report`), not the raw Playwright stats block —
+                // that block misses reporter-level failures like compile or
+                // webServer errors and under-reports failures as 0/0/0.
+                const tests = result.parsedRun?.tests ?? [];
+                runSummary = {
+                    success: result.success,
+                    passed: tests.filter((t) => t.status === "passed").length,
+                    failed: tests.filter((t) => t.status === "failed").length,
+                    skipped: tests.filter((t) => t.status === "skipped").length,
+                };
+            }
             if (!json && !streamJson) {
                 const badge = runSummary.success ? chalk.green("✓ passed") : chalk.red("✗ failed");
                 process.stderr.write(
@@ -341,13 +466,33 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                 );
             }
         } catch (err) {
+            if (
+                workflowId &&
+                (pendingKind === "run_approval" || workflowStatusAfterSave === "await_run_approval")
+            ) {
+                await app.hitl
+                    .continue({
+                        workflowId,
+                        action: "run",
+                        decision: "reject",
+                    })
+                    .catch(() => undefined);
+            }
             if (!json && !streamJson) {
-                process.stderr.write(
-                    chalk.red(`  ✗ Run failed: ${err instanceof Error ? err.message : err}\n`),
-                );
+                process.stderr.write(chalk.red(`  ✗ Run failed: ${safeCliErrorMessage(err)}\n`));
             }
             runSummary = { success: false, passed: 0, failed: 0, skipped: 0 };
         }
+    } else if (
+        !options.run &&
+        workflowId &&
+        (pendingKind === "run_approval" || workflowStatusAfterSave === "await_run_approval")
+    ) {
+        await app.hitl.continue({
+            workflowId,
+            action: "run",
+            decision: "reject",
+        });
     }
 
     try {
@@ -401,5 +546,5 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         }
     }
 
-    process.exit(exitCode);
+    cliExit(exitCode);
 }

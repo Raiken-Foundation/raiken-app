@@ -8,6 +8,7 @@ export * from "./coordinator";
 export * from "./crawler";
 export * from "./db";
 export * from "./detectors";
+export * from "./discovery-config";
 export * from "./knowledge-loader";
 export * from "./manual-handoff";
 export * from "./query-service";

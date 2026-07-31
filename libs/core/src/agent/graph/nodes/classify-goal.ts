@@ -3,6 +3,7 @@ import { z } from "zod";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
 import { resolveAuthPrecondition } from "../utils";
+import { inferDiscoveryManagementAction } from "./discovery-management";
 import type { AgentNodeDeps } from "./types";
 
 const classifierSchema = z.object({
@@ -29,11 +30,23 @@ const classifierSchema = z.object({
             "True when the user wants the action actually carried out in the browser (e.g. 'sign out', 'log me out', 'click delete'), false when they only ask about it or want a test written for it.",
         ),
     nextTool: z
-        .enum(["domCapture", "codeSearch", "testGen", "explain", "discoveryRead", "none"])
+        .enum([
+            "domCapture",
+            "codeSearch",
+            "testGen",
+            "explain",
+            "discoveryRead",
+            "discoveryManage",
+            "none",
+        ])
         .nullable()
         .describe(
-            "The best tool to use next: 'domCapture' for browser/UI work, 'codeSearch' for finding code, 'testGen' for test generation, 'explain' for explanations, 'discoveryRead' for reading site discovery data, 'none' for no specific tool",
+            "The best tool to use next: 'domCapture' for browser/UI work, 'codeSearch' for finding code, 'testGen' for test generation, 'explain' for explanations, 'discoveryRead' for reading site discovery data, 'discoveryManage' for clearing or starting site discovery, 'none' for no specific tool",
         ),
+    discoveryAction: z
+        .enum(["clear", "start", "clearAndStart"])
+        .nullable()
+        .describe("The requested site-discovery mutation, or null for read-only requests"),
     missingContext: z
         .array(z.string())
         .describe("List of information still needed to fulfill the request"),
@@ -124,19 +137,30 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
             result = await fallbackClassify(deps, prompt, state.userPrompt);
         }
 
+        const inferredDiscoveryAction = inferDiscoveryManagementAction(state.userPrompt);
+        const discoveryAction = inferredDiscoveryAction ?? result.discoveryAction ?? null;
+
         deps.setActiveIntent?.(result.intent);
         deps.setGoalState?.({
             goal: result.goal,
             targetFeature: result.targetFeature,
             targetUrl: result.targetUrl,
             missingContext: result.missingContext,
-            nextTool: result.targetAction ? "domCapture" : result.nextTool,
+            nextTool: discoveryAction
+                ? "discoveryManage"
+                : result.targetAction
+                  ? "domCapture"
+                  : result.nextTool,
         });
 
         // A concrete UI action ("sign out") must reach the live browser/explore
         // path, so force domCapture — otherwise the classifier may pick
         // codeSearch/none and never open the page to find/perform the action.
-        const nextTool = result.targetAction ? "domCapture" : result.nextTool;
+        const nextTool = discoveryAction
+            ? "discoveryManage"
+            : result.targetAction
+              ? "domCapture"
+              : result.nextTool;
 
         const stateUpdates: Record<string, unknown> = {
             intent: result.intent,
@@ -147,6 +171,7 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
             performAction: result.performAction,
             missingContext: result.missingContext,
             nextTool,
+            discoveryAction,
             shouldRunTests: result.shouldRunTests,
             pauseReason: null,
         };
@@ -325,6 +350,7 @@ async function fallbackClassify(
         targetAction: parsed.targetAction ?? null,
         performAction: parsed.performAction ?? false,
         nextTool: parsed.nextTool ?? null,
+        discoveryAction: parsed.discoveryAction ?? null,
         missingContext: Array.isArray(parsed.missingContext)
             ? parsed.missingContext.filter((item: unknown) => typeof item === "string")
             : [],

@@ -1,9 +1,10 @@
 /**
  * Type definitions and formatting utilities for DOM capture.
  *
- * Element collection and selector construction live in BrowserSession
- * (session.ts) -- the single source of truth. This module holds only the
- * shared interfaces and the text-formatting layer consumed by the agent.
+ * Element collection and selector construction live in the browser session
+ * decomposition modules (`session/selector-utils`, `session/dom-snapshot-builder`).
+ * This module holds only the shared interfaces and the text-formatting layer
+ * consumed by the agent.
  */
 
 export interface AccessibilityNode {

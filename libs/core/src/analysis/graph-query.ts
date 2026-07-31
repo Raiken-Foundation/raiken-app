@@ -7,6 +7,7 @@ import type { GraphEdge, ParsedSymbol } from "../types";
  * Ordered roughly from highest- to lowest- evidence.
  */
 export type AffectReason =
+    | "changed_test" // the test file itself changed in the diff
     | "source_map" // explicit user-recorded mapping
     | "runtime" // captured during a real test run
     | "imports" // static dependency: test file imports the changed file
@@ -256,7 +257,7 @@ export class GraphQueryService {
     }
 }
 
-function isLikelyTestPath(filePath: string): boolean {
+export function isLikelyTestPath(filePath: string): boolean {
     const lower = filePath.toLowerCase();
     return (
         /\.(spec|test|e2e)\.[jt]sx?$/.test(lower) ||

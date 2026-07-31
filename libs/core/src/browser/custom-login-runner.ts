@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -12,7 +11,11 @@ import {
 } from "../config";
 import { acquireProjectOperation } from "../operations";
 import { findPlaywrightConfigPath, readPlaywrightTestDir } from "../testing/playwright-config";
-import { killProcessTree } from "../testing/process-tree";
+import {
+    customLoginPlaywrightSpawnOptions,
+    runPlaywrightSubprocess,
+} from "../testing/playwright-subprocess";
+import { sweepStaleAuthSpecs } from "../testing/raiken-temp-specs";
 
 export interface CustomLoginScriptOptions {
     projectPath: string;
@@ -32,7 +35,6 @@ export interface CustomLoginScriptResult {
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
-const STALE_TEMP_MS = 10 * 60 * 1000;
 
 export function buildCustomLoginSpec(args: {
     scriptImport: string;
@@ -81,18 +83,37 @@ function redactKnownSecrets(value: string, secrets: Array<string | undefined>): 
     return redacted;
 }
 
-async function sweepStaleSpecs(testDir: string): Promise<void> {
-    try {
-        const now = Date.now();
-        for (const name of await fs.readdir(testDir)) {
-            const timestamp = Number(name.match(/^raiken-auth-(\d+)-.+\.spec\.ts$/)?.[1]);
-            if (Number.isFinite(timestamp) && now - timestamp > STALE_TEMP_MS) {
-                await fs.rm(path.join(testDir, name), { force: true });
-            }
-        }
-    } catch {
-        // The test directory may not exist yet.
+/** Safe, non-secret diagnostics for a failed custom-login Playwright run. */
+export interface CustomLoginFailureDiagnostics {
+    exitCode: number | null;
+    specBasename: string;
+    configBasename: string | null;
+    headed: boolean;
+    timedOut?: boolean;
+    cancelled?: boolean;
+    timeoutSeconds?: number;
+}
+
+export function formatCustomLoginFailureMessage(
+    diagnostics: CustomLoginFailureDiagnostics,
+): string {
+    if (diagnostics.cancelled) {
+        return "Custom login cancelled";
     }
+    if (diagnostics.timedOut) {
+        const suffix =
+            typeof diagnostics.timeoutSeconds === "number"
+                ? ` after ${diagnostics.timeoutSeconds}s`
+                : "";
+        return `Custom login timed out${suffix}. Spec: ${diagnostics.specBasename}. Config: ${diagnostics.configBasename ?? "default"}.`;
+    }
+    const configLabel = diagnostics.configBasename ?? "default";
+    return (
+        `Custom login script failed (exit ${diagnostics.exitCode ?? "unknown"}). ` +
+        `Spec: ${diagnostics.specBasename}. Config: ${configLabel}. ` +
+        `Headed: ${diagnostics.headed ? "yes" : "no"}. ` +
+        "Run the script with your project Playwright configuration for detailed output."
+    );
 }
 
 async function runPlaywright(
@@ -103,67 +124,50 @@ async function runPlaywright(
     timeoutMs: number,
     headed: boolean,
     signal?: AbortSignal,
-): Promise<{ stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-        const command = process.platform === "win32" ? "npx.cmd" : "npx";
-        const args = ["--no-install", "playwright", "test", path.relative(projectPath, specPath)];
-        args.push("--workers=1", "--reporter=line");
-        if (headed) args.push("--headed");
-        if (configPath) args.push("--config", configPath);
+): Promise<void> {
+    const args = ["--no-install", "playwright", "test", path.relative(projectPath, specPath)];
+    args.push("--workers=1", "--reporter=line");
+    if (headed) args.push("--headed");
+    if (configPath) args.push("--config", configPath);
 
-        const child = spawn(command, args, {
+    const subprocess = await runPlaywrightSubprocess(
+        customLoginPlaywrightSpawnOptions({
             cwd: projectPath,
-            detached: process.platform !== "win32",
+            args,
             env: environment,
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-        let stdout = "";
-        let stderr = "";
-        let settled = false;
-        const terminate = () => {
-            if (child.pid) killProcessTree(child.pid, "SIGTERM");
-            setTimeout(() => {
-                if (child.pid) killProcessTree(child.pid, "SIGKILL");
-            }, 5000).unref();
-        };
-        const finish = (error?: Error) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            signal?.removeEventListener("abort", onAbort);
-            if (error) reject(error);
-            else resolve({ stdout, stderr });
-        };
-        const onAbort = () => {
-            terminate();
-            finish(new DOMException("Custom login cancelled", "AbortError"));
-        };
-        const timer = setTimeout(() => {
-            terminate();
-            finish(new Error(`Custom login timed out after ${Math.round(timeoutMs / 1000)}s`));
-        }, timeoutMs + 5000);
+            signal,
+            timeoutMs,
+            timeoutGraceMs: 5000,
+        }),
+    );
 
-        child.stdout?.on("data", (chunk) => {
-            stdout += chunk.toString();
-        });
-        child.stderr?.on("data", (chunk) => {
-            stderr += chunk.toString();
-        });
-        child.once("error", (error) => finish(error));
-        child.once("close", (code) => {
-            if (code === 0) finish();
-            else {
-                finish(
-                    new Error(
-                        `Custom login script failed (exit ${code ?? "unknown"}). ` +
-                            "Run the script with your project Playwright configuration for detailed output.",
-                    ),
-                );
-            }
-        });
-        signal?.addEventListener("abort", onAbort, { once: true });
-        if (signal?.aborted) onAbort();
-    });
+    const diagnostics: CustomLoginFailureDiagnostics = {
+        exitCode: subprocess.exitCode,
+        specBasename: path.basename(specPath),
+        configBasename: configPath ? path.basename(configPath) : null,
+        headed,
+        timedOut: subprocess.timedOut,
+        cancelled: subprocess.cancelled,
+    };
+
+    if (subprocess.cancelled) {
+        throw new DOMException(formatCustomLoginFailureMessage(diagnostics), "AbortError");
+    }
+    if (subprocess.timedOut) {
+        throw new Error(
+            formatCustomLoginFailureMessage({
+                ...diagnostics,
+                exitCode: null,
+                timeoutSeconds: Math.round(timeoutMs / 1000),
+            }),
+        );
+    }
+    if (subprocess.spawnError) {
+        throw subprocess.spawnError;
+    }
+    if (subprocess.exitCode !== 0) {
+        throw new Error(formatCustomLoginFailureMessage(diagnostics));
+    }
 }
 
 export async function runCustomLoginScript(
@@ -194,7 +198,7 @@ export async function runCustomLoginScript(
     const testDir = resolvePathWithinProject(projectPath, testDirRelative);
     await fs.mkdir(testDir, { recursive: true });
     await fs.mkdir(path.dirname(storageStatePath), { recursive: true });
-    await sweepStaleSpecs(testDir);
+    await sweepStaleAuthSpecs(projectPath, testDir);
 
     const id = `${Date.now()}-${randomUUID()}`;
     const specPath = path.join(testDir, `raiken-auth-${id}.spec.ts`);

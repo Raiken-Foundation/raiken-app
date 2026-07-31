@@ -9,17 +9,22 @@ export interface ParsedCommandArgs {
 // otherwise `--flag <token>` swallows the following positional as its value
 // and `booleanFlag()` then reads the flag as false.
 const BOOLEAN_FLAGS = new Set([
+    "apply",
     "auth",
     "configOnly",
     "continue",
     "dryRun",
     "embeddings",
+    "fix",
     "force",
+    "headed",
     "husky",
     "json",
     "list",
     "noEmbedScreenshots",
     "noImpact",
+    "noInterpret",
+    "onlyFlaky",
     "open",
     "skipAuth",
     "skipRun",
@@ -27,6 +32,7 @@ const BOOLEAN_FLAGS = new Set([
     "status",
     "testsOnly",
     "unsetKey",
+    "updateSnapshots",
     "y",
     "yes",
 ]);

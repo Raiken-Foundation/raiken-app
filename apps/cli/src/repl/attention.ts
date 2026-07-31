@@ -10,14 +10,14 @@
  * worth flagging up front, once, at REPL startup.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import {
+    createProjectApplication,
     formatActiveWorkflowAttention,
+    getConfigPath,
     getProvider,
     resolveAIConfig,
     WorkflowStore,
 } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
 
@@ -33,7 +33,7 @@ export async function gatherAttentionItems(
 ): Promise<string[]> {
     const items: string[] = [];
 
-    const initialized = fs.existsSync(path.join(projectPath, "raiken.config.json"));
+    const initialized = fs.existsSync(getConfigPath(projectPath));
     if (!initialized) {
         items.push(
             "This project has not been initialized — run `raiken init` to set up test defaults, " +
@@ -60,11 +60,9 @@ export async function gatherAttentionItems(
     }
 
     try {
-        const caller = appRouter.createCaller({ projectPath });
-        const [session, stats] = await Promise.all([
-            caller.getDiscoverySession({}),
-            caller.getDiscoveryStats({}),
-        ]);
+        const app = createProjectApplication(projectPath);
+        const session = app.discovery.getSessionView();
+        const stats = app.discovery.getStats();
         if (session?.status === "paused") {
             items.push(
                 `Discovery paused at ${session.startUrl} (${session.pagesDiscovered} pages, ` +

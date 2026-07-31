@@ -1,8 +1,9 @@
-import { appRouter } from "@raiken/shared";
+import { createProjectApplication } from "@raiken/core";
 import chalk from "chalk";
 import ora from "ora";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { bootstrapProject } from "../bootstrap";
+import { CLI_EXIT } from "../errors";
 
 interface IndexOptions {
     embeddings?: boolean;
@@ -22,7 +23,7 @@ export async function indexCommand(options: IndexOptions): Promise<void> {
 
     if (!result.ok) {
         console.log(chalk.red("\n  ✗ Indexing failed — see error above.\n"));
-        process.exitCode = 1;
+        process.exitCode = CLI_EXIT.RUNTIME_FAILURE;
         return;
     }
     if (result.warnings.length > 0) {
@@ -32,26 +33,34 @@ export async function indexCommand(options: IndexOptions): Promise<void> {
     }
 
     if (options.embeddings) {
-        const caller = appRouter.createCaller({ projectPath });
+        const app = createProjectApplication(projectPath);
         const spinner = ora({ text: "Generating embeddings…", spinner: "dots" }).start();
         // The generator logs progress to stdout — route it to stderr so the
         // spinner stays clean and readable.
         const restore = routeDiagnosticsToStderr();
-        let res: Awaited<ReturnType<typeof caller.generateEmbeddings>>;
+        let res: Awaited<ReturnType<typeof app.indexing.generateEmbeddings>>;
         try {
-            res = await caller.generateEmbeddings({ forceRegenerate: options.force === true });
+            res = await app.indexing.generateEmbeddings({
+                forceRegenerate: options.force === true,
+            });
         } finally {
             restore();
         }
-        if (res.success) {
-            spinner.succeed(
-                chalk.green(
-                    `Embeddings ready — ${res.filesProcessed}/${res.totalFiles} files, ${res.chunksGenerated} chunks`,
+        if (!res.success) {
+            spinner.fail(chalk.red(`Embeddings failed: ${res.error ?? "unknown error"}`));
+            console.log(
+                dim(
+                    `\n  The code graph was built, but ${chalk.white('raiken search "<query>"')} needs embeddings. Re-run ${chalk.white("raiken index --embeddings")}.\n`,
                 ),
             );
-        } else {
-            spinner.fail(chalk.red(`Embeddings failed: ${res.error ?? "unknown error"}`));
+            process.exitCode = CLI_EXIT.RUNTIME_FAILURE;
+            return;
         }
+        spinner.succeed(
+            chalk.green(
+                `Embeddings ready — ${res.filesProcessed}/${res.totalFiles} files, ${res.chunksGenerated} chunks`,
+            ),
+        );
     }
 
     console.log(

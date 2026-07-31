@@ -27,9 +27,10 @@ import { type BlockerDetector, type BlockerDetectorContext, buildBlocker } from 
 import { getVisibleText } from "./util";
 
 /**
- * Login-shaped URL patterns. Single source of truth — `manual-handoff.ts`
- * and the CLI auth command both import {@link looksLikeLoginUrl} below
- * (and exported {@link LOGIN_URL_PATTERNS} where they need the raw set).
+ * Login-shaped URL patterns. Single source of truth — the interactive
+ * auth handoff module and the CLI auth command both import
+ * {@link looksLikeLoginUrl} below (and exported {@link LOGIN_URL_PATTERNS}
+ * where they need the raw set).
  *
  * Coverage rationale:
  *  - Hyphen, underscore, and bare variants for English ("sign-in", "sign_in",
@@ -84,6 +85,27 @@ const LOGIN_URL_EXCLUSIONS: readonly RegExp[] = [
     /\/oauth\/(?:callback|token|authorize\/callback|complete)(?:\/|$)/i,
     /\/sso\/(?:callback|complete|finalize)(?:\/|$)/i,
     /\/login\/(?:callback|complete)(?:\/|$)/i,
+];
+
+/**
+ * Logout-shaped URL patterns. Navigating to one of these DESTROYS the
+ * session the crawl is running on — the auth detector already excludes
+ * them from wall-detection (they're not login pages), but that only stops
+ * the *pause*; the crawler still navigated there and killed its own
+ * session mid-run. The crawler consults {@link looksLikeLogoutUrl} at the
+ * enqueue layer and refuses to navigate these while a storage state is
+ * loaded (the link itself is still recorded as discovered structure).
+ *
+ * Segment-anchored like {@link LOGIN_URL_PATTERNS}: `/signout-everywhere`
+ * or `?next=/logout` do not match.
+ */
+export const LOGOUT_URL_PATTERNS: readonly RegExp[] = [
+    /\/logout(?:\/|$)/i,
+    /\/log-out(?:\/|$)/i,
+    /\/log_out(?:\/|$)/i,
+    /\/signout(?:\/|$)/i,
+    /\/sign-out(?:\/|$)/i,
+    /\/sign_out(?:\/|$)/i,
 ];
 
 const OAUTH_PATTERNS: Array<{ pattern: RegExp; provider: string }> = [
@@ -265,6 +287,16 @@ export function looksLikeLoginUrl(url: string): boolean {
     const path = extractPath(url);
     if (LOGIN_URL_EXCLUSIONS.some((rx) => rx.test(path))) return false;
     return LOGIN_URL_PATTERNS.some((rx) => rx.test(path));
+}
+
+/**
+ * Public predicate over {@link LOGOUT_URL_PATTERNS}, sharing the
+ * path-extraction rules of {@link looksLikeLoginUrl} (pathname only —
+ * a benign `?next=/logout` return-URL does not qualify).
+ */
+export function looksLikeLogoutUrl(url: string): boolean {
+    const path = extractPath(url);
+    return LOGOUT_URL_PATTERNS.some((rx) => rx.test(path));
 }
 
 /**

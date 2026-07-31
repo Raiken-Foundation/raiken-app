@@ -136,10 +136,17 @@ async function main() {
 
     try {
         const healthBody = await waitForHealth(smokePort);
-        if (!healthBody.includes('"status":"ok"') && !healthBody.includes('"status": "ok"')) {
-            fail(`getHealth response did not report ok: ${healthBody.slice(0, 200)}`);
+        const envelope = JSON.parse(healthBody);
+        const health = envelope?.result?.data?.json ?? envelope?.result?.data;
+        if (
+            !health ||
+            !["ok", "degraded"].includes(health.status) ||
+            health.liveness !== "alive" ||
+            health.readiness !== "ready"
+        ) {
+            fail(`getHealth response was not live and ready: ${healthBody.slice(0, 200)}`);
         }
-        if (!healthBody.includes(`"version":"${expectedVersion}"`)) {
+        if (health.version !== expectedVersion) {
             fail(
                 `getHealth did not report packaged version ${expectedVersion}: ${healthBody.slice(0, 200)}`,
             );

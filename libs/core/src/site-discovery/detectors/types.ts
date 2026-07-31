@@ -16,6 +16,7 @@
 
 import type { Page, Response } from "playwright";
 
+import { obs } from "../../observability";
 import type { BlockerCategory, DiscoveryBlocker } from "../types";
 
 export interface BlockerDetectorContext {
@@ -94,6 +95,21 @@ export async function runBlockerPipeline(
             const blocker = await detector.detect(ctx);
             if (!blocker) continue;
             if (options.skipCategories?.has(blocker.category)) continue;
+            // Decision trace for "why did discovery stop here?" — the
+            // error_page false-positive class of bugs is undebuggable after
+            // the fact. Debug level: silent by default, on via
+            // RAIKEN_LOG_LEVEL=debug.
+            obs.debug("discovery.blocker.detected", {
+                message: `${blocker.detectorId} -> ${blocker.category} (${blocker.severity}) at ${ctx.url}`,
+                meta: {
+                    url: ctx.url,
+                    httpStatus: ctx.response?.status() ?? null,
+                    detectorId: blocker.detectorId,
+                    category: blocker.category,
+                    severity: blocker.severity,
+                    evidence: (blocker.detectedElements ?? "").slice(0, 500),
+                },
+            });
             return blocker;
         } catch (err) {
             // Best-effort: a detector that crashes shouldn't take down

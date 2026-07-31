@@ -7,5 +7,6 @@
 export * from "./auth-credentials";
 export * from "./auth-state";
 export * from "./load";
+export * from "./patch";
 export * from "./schema";
 export * from "./store";

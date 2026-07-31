@@ -13,7 +13,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { CodeGraphDB, SiteKnowledgeDB } from "@raiken/core";
+import { CodeGraphDB, canonicalProjectPath, SiteKnowledgeDB } from "@raiken/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { gatherAttentionItems } from "../attention";
 
@@ -80,11 +80,12 @@ describe("gatherAttentionItems", () => {
 
     it("flags a paused discovery session with a /discover --continue hint", async () => {
         process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+        const canonicalPath = canonicalProjectPath(projectPath);
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), canonicalPath);
             siteDb.saveSession({
-                projectPath,
+                projectPath: canonicalPath,
                 startUrl: "https://example.test/",
                 status: "paused",
                 pagesDiscovered: 3,
@@ -110,11 +111,12 @@ describe("gatherAttentionItems", () => {
 
     it("flags a failed discovery session with a retry hint", async () => {
         process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+        const canonicalPath = canonicalProjectPath(projectPath);
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), canonicalPath);
             siteDb.saveSession({
-                projectPath,
+                projectPath: canonicalPath,
                 startUrl: "https://example.test/",
                 status: "failed",
                 pagesDiscovered: 1,
@@ -136,11 +138,12 @@ describe("gatherAttentionItems", () => {
 
     it("says nothing about discovery once a session completed cleanly", async () => {
         process.env.OPENROUTER_API_KEY = "sk-or-v1-test";
+        const canonicalPath = canonicalProjectPath(projectPath);
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), canonicalPath);
             siteDb.saveSession({
-                projectPath,
+                projectPath: canonicalPath,
                 startUrl: "https://example.test/",
                 status: "completed",
                 pagesDiscovered: 12,

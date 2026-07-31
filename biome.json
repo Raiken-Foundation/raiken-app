@@ -18,8 +18,7 @@
             "!**/test-results",
             "!**/playwright-report",
             "!tools/playground",
-            "!tools/playground-auth",
-            "!.claude"
+            "!tools/playground-auth"
         ]
     },
     "linter": {

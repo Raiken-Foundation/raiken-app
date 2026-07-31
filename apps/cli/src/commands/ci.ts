@@ -11,6 +11,7 @@
 
 import { type CiEvent, type CiResult, GitError, runCi } from "@raiken/core";
 import chalk from "chalk";
+import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../repl/exit";
 
 interface CiCommandOptions {
@@ -82,12 +83,16 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
             onEvent: jsonOutput ? undefined : (event) => logEvent(event),
         });
     } catch (err) {
+        // A GitError means the supplied --base/--head refs are unusable, which
+        // is a usage problem. Anything else is a genuine run failure and must
+        // map through the shared policy (timeout → 124, cancelled → 130, …)
+        // instead of masquerading as bad arguments.
         if (err instanceof GitError) {
-            console.error(chalk.red(`\n✗ ${err.message}`));
-            cliExit(2);
+            console.error(chalk.red(`\n✗ ${safeCliErrorMessage(err)}`));
+            cliExit(CLI_EXIT.USAGE);
         }
-        console.error(chalk.red("\n✗ raiken ci failed:"), err instanceof Error ? err.message : err);
-        cliExit(2);
+        console.error(chalk.red("\n✗ raiken ci failed:"), safeCliErrorMessage(err));
+        cliExit(mapErrorToCliExitCode(err));
     }
 
     if (jsonOutput) {

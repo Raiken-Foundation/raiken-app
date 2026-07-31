@@ -24,8 +24,13 @@ describe("RunTraceRecorder", () => {
             .map((line) => JSON.parse(line) as RunTraceEvent);
     }
 
-    it("writes start, tool call/result pairs, and end as JSONL", () => {
-        const recorder = new RunTraceRecorder({ dir, kind: "agent", label: "generate a test" });
+    it("writes start, tool call/result pairs, and end as JSONL when content tracing enabled", () => {
+        const recorder = new RunTraceRecorder({
+            dir,
+            kind: "agent",
+            label: "generate a test",
+            contentTraces: true,
+        });
         const seq = recorder.toolCall("click", { selector: "#submit" });
         recorder.toolResult("click", { success: true, message: "ok" }, seq, true);
         recorder.end("completed");
@@ -51,6 +56,7 @@ describe("RunTraceRecorder", () => {
             kind: "agent",
             label: "x",
             maxStringLength: 20,
+            contentTraces: true,
         });
         recorder.toolCall("login", {
             apiKey: "sk-super-secret",
@@ -75,8 +81,55 @@ describe("RunTraceRecorder", () => {
         expect(raw).toContain("[+30 chars]");
     });
 
+    it("operational mode omits tool content unless content tracing is enabled", () => {
+        const prev = process.env["RAIKEN_TRACE"];
+        const prevOps = process.env["RAIKEN_OPS_TRACE"];
+        try {
+            delete process.env["RAIKEN_TRACE"];
+            fs.mkdirSync(path.join(dir, ".raiken"), { recursive: true });
+            const recorder = new RunTraceRecorder({
+                dir: path.join(dir, "traces"),
+                kind: "agent",
+                label: "ignored",
+                operational: true,
+                correlation: { operationId: "op-1" },
+                projectPath: dir,
+            });
+            recorder.toolCall("click", { selector: "#secret" });
+            recorder.end("error", "failed");
+
+            const events = readEvents(recorder);
+            expect(events.map((e) => e.type)).toEqual(["run_start", "run_end"]);
+            expect(recorder.filePath).toContain("-ops-");
+            const start = events[0] as Extract<RunTraceEvent, { type: "run_start" }>;
+            expect(start.label).toBe("agent:op-1");
+            expect(start.contentTraces).toBe(false);
+        } finally {
+            if (prev === undefined) delete process.env["RAIKEN_TRACE"];
+            else process.env["RAIKEN_TRACE"] = prev;
+            if (prevOps === undefined) delete process.env["RAIKEN_OPS_TRACE"];
+            else process.env["RAIKEN_OPS_TRACE"] = prevOps;
+        }
+    });
+
+    it("forOperational returns null when the project has not been initialized", () => {
+        const prevOps = process.env["RAIKEN_OPS_TRACE"];
+        try {
+            delete process.env["RAIKEN_OPS_TRACE"];
+            expect(RunTraceRecorder.forOperational(dir, "agent")).toBeNull();
+        } finally {
+            if (prevOps === undefined) delete process.env["RAIKEN_OPS_TRACE"];
+            else process.env["RAIKEN_OPS_TRACE"] = prevOps;
+        }
+    });
+
     it("end() is idempotent and records the outcome", () => {
-        const recorder = new RunTraceRecorder({ dir, kind: "eval", label: "scenario" });
+        const recorder = new RunTraceRecorder({
+            dir,
+            kind: "eval",
+            label: "scenario",
+            contentTraces: true,
+        });
         recorder.end("error", "boom");
         recorder.end("completed");
 

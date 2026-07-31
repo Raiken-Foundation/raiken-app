@@ -1,0 +1,23 @@
+/* ── Responsive ── */
+@media (max-width: 900px) {
+    .discovery-view .field-row-3 {
+        grid-template-columns: 1fr 1fr;
+    }
+    .discovery-view .stat-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+    .discovery-view .stat + .stat:nth-child(4) {
+        border-left: none;
+    }
+    .discovery-view .stat:nth-child(n + 4) {
+        border-top: 1px solid var(--hair);
+    }
+}
+@media (max-width: 600px) {
+    .discovery-view .field-row-3 {
+        grid-template-columns: 1fr;
+    }
+    .discovery-view .stat-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}

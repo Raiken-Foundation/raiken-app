@@ -50,6 +50,13 @@ export interface DoctorOptions {
     extraDirectories?: string[];
     /** File extensions to consider. Default: .ts, .tsx, .js, .jsx, .mjs. */
     extensions?: string[];
+    /**
+     * Also run environment checks (Playwright installed, browsers present,
+     * webServer script exists, baseURL reachable). Default true.
+     */
+    includeEnvironment?: boolean;
+    /** Test hook: inject the baseURL probe used by the environment scan. */
+    probeUrl?: (url: string) => Promise<boolean>;
 }
 
 interface Rule {
@@ -374,6 +381,17 @@ export async function scanTests(options: DoctorOptions): Promise<DoctorReport> {
     for (const root of roots) collectFiles(root, exts, files);
 
     const findings: DoctorFinding[] = [];
+
+    if (options.includeEnvironment !== false) {
+        const { scanEnvironment } = await import("./environment");
+        findings.push(
+            ...(await scanEnvironment({
+                projectPath,
+                testDirectory: options.testDirectory,
+                ...(options.probeUrl ? { probeUrl: options.probeUrl } : {}),
+            })),
+        );
+    }
 
     // Project-level checks: read playwright.config.ts once. We use the
     // detected baseURL to (a) flag mismatches with the dev-server port and

@@ -12,13 +12,14 @@
  *   - `flakiness <testFile>`: project-agnostic — runs one spec N times against
  *     the current project and scores run-to-run stability.
  *
- * Exit codes: 0 all scenarios passed (or skipped), 1 something failed,
- * 2 the harness itself errored.
+ * Exit codes: 0 all scenarios passed (or skipped), 2 bad arguments, and
+ * otherwise the shared CLI_EXIT policy — 1 for a scenario or harness failure.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import chalk from "chalk";
+import { CLI_EXIT, cliExitForRuntimeFailure } from "../errors";
 import { cliExit } from "../repl/exit";
 
 export interface EvalCommandOptions {
@@ -43,11 +44,11 @@ export async function evalCommand(
                 `Unknown eval suite "${suite}". Available: playground, benchmark, flakiness.`,
             ),
         );
-        return cliExit(2);
+        return cliExit(CLI_EXIT.USAGE);
     }
     if (suite === "flakiness" && !target) {
         console.error(chalk.red("usage: raiken eval flakiness <testFile> [--runs N]"));
-        return cliExit(2);
+        return cliExit(CLI_EXIT.USAGE);
     }
 
     const {
@@ -82,21 +83,48 @@ export async function evalCommand(
             authPlaygroundDir: path.join(root, "playground-auth"),
         });
     } else {
-        const expectTests = Number(options.expectTests);
+        // Comparing run-to-run stability needs at least two runs. Silently
+        // rounding `--runs 1` up to 2 would report a gate the user never asked
+        // for, so reject it instead.
+        const runs = options.runs === undefined ? 3 : parsePositiveInt(options.runs);
+        if (runs === null || runs < 2) {
+            console.error(
+                chalk.red(
+                    `--runs must be an integer of 2 or more — stability needs at least two runs to compare. Got "${options.runs}".`,
+                ),
+            );
+            return cliExit(CLI_EXIT.USAGE);
+        }
+
+        const expectedTests =
+            options.expectTests === undefined ? undefined : parsePositiveInt(options.expectTests);
+        if (expectedTests === null) {
+            console.error(
+                chalk.red(
+                    `--expect-tests must be a positive integer; got "${options.expectTests}".`,
+                ),
+            );
+            return cliExit(CLI_EXIT.USAGE);
+        }
+
         scenarios = [
             buildFlakinessScenario({
                 projectPath,
                 testFile: target,
-                runs: parseCount(options.runs, 3),
-                ...(Number.isFinite(expectTests) && expectTests > 0
-                    ? { expectedTests: Math.floor(expectTests) }
-                    : {}),
+                runs,
+                ...(expectedTests === undefined ? {} : { expectedTests }),
             }),
         ];
     }
 
+    const repeat = options.repeat === undefined ? 1 : parsePositiveInt(options.repeat);
+    if (repeat === null) {
+        console.error(chalk.red(`--repeat must be a positive integer; got "${options.repeat}".`));
+        return cliExit(CLI_EXIT.USAGE);
+    }
+
     const report = await runEvalScenarios(scenarios, {
-        repeat: parseCount(options.repeat, 1),
+        repeat,
         filter: options.filter,
         keepWorkDirs: options.keepWorkDirs,
         log: options.json ? undefined : (message) => console.log(chalk.dim(message)),
@@ -114,10 +142,16 @@ export async function evalCommand(
         console.log(report.passed ? rendered : chalk.red(rendered));
     }
 
-    cliExit(report.passed ? 0 : 1);
+    cliExit(cliExitForRuntimeFailure(report.passed));
 }
 
-function parseCount(raw: string | undefined, fallback: number): number {
+/**
+ * Parse a positive-integer option. Returns null when absent or unparseable so
+ * callers reject bad input rather than silently substituting a default.
+ */
+function parsePositiveInt(raw: string | undefined): number | null {
+    if (raw === undefined) return null;
     const value = Number(raw);
-    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return Math.floor(value);
 }

@@ -3,10 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CLI_EXIT } from "../../errors";
+import { withThrowExit } from "../../repl/exit";
 
 const mocks = vi.hoisted(() => ({
     loadAuthConfig: vi.fn(),
     runCustomLoginScript: vi.fn(),
+    resolveHandoffBlockers: vi.fn(() => 0),
     spinner: {
         start: vi.fn(),
         succeed: vi.fn(),
@@ -16,28 +19,17 @@ const mocks = vi.hoisted(() => ({
     },
 }));
 
-vi.mock("@raiken/core", () => ({
-    acquireProjectOperation: vi.fn(),
-    loadAuthConfig: mocks.loadAuthConfig,
-    looksLikeLoginUrl: vi.fn(() => false),
-    runCustomLoginScript: mocks.runCustomLoginScript,
-}));
-
-vi.mock("@raiken/shared", () => ({
-    resolveAuthStorageStateDestination: (projectPath: string) => {
-        try {
-            const config = JSON.parse(
-                fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
-            ) as { auth?: { storageStatePath?: string } };
-            if (config.auth?.storageStatePath) {
-                return path.resolve(projectPath, config.auth.storageStatePath);
-            }
-        } catch {
-            // Fall through to the default.
-        }
-        return path.join(projectPath, ".raiken", "auth-state.json");
-    },
-}));
+vi.mock("@raiken/core", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("@raiken/core")>();
+    return {
+        ...actual,
+        acquireProjectOperation: vi.fn(),
+        loadAuthConfig: mocks.loadAuthConfig,
+        looksLikeLoginUrl: vi.fn(() => false),
+        resolveHandoffBlockers: mocks.resolveHandoffBlockers,
+        runCustomLoginScript: mocks.runCustomLoginScript,
+    };
+});
 
 vi.mock("ora", () => ({
     default: vi.fn(() => {
@@ -54,7 +46,7 @@ describe("authCommand custom login", () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
-        projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cli-auth-"));
+        projectPath = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cli-auth-")));
         cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(projectPath);
         mocks.loadAuthConfig.mockReturnValue({ customLoginScript: "auth/login.ts" });
         mocks.runCustomLoginScript.mockResolvedValue({
@@ -76,7 +68,7 @@ describe("authCommand custom login", () => {
         expect(mocks.runCustomLoginScript).toHaveBeenCalledWith(
             expect.objectContaining({
                 projectPath,
-                storageStatePath: path.join(projectPath, ".raiken", "auth-state.json"),
+                storageStatePath: path.resolve(projectPath, ".raiken", "auth-state.json"),
             }),
         );
         expect(mocks.spinner.succeed).toHaveBeenCalled();
@@ -115,20 +107,104 @@ describe("authCommand custom login", () => {
 
         expect(mocks.runCustomLoginScript).toHaveBeenCalledWith(
             expect.objectContaining({
-                storageStatePath: path.join(projectPath, "e2e", ".auth", "admin.json"),
+                storageStatePath: path.resolve(projectPath, "e2e", ".auth", "admin.json"),
             }),
         );
     });
 
     it("rejects an invalid custom-script timeout", async () => {
-        await expect(authCommand({ timeout: "nope" })).rejects.toThrow(
-            "--timeout must be a positive number",
-        );
+        const code = await withThrowExit(() => authCommand({ timeout: "nope" }));
+        expect(code).toBe(CLI_EXIT.USAGE);
         expect(mocks.runCustomLoginScript).not.toHaveBeenCalled();
     });
 
     it("lets --manual override a configured script", () => {
         expect(shouldRunCustomLogin({ manual: true }, "auth/login.ts")).toBe(false);
         expect(shouldRunCustomLogin({}, "auth/login.ts")).toBe(true);
+    });
+});
+
+describe("authCommand --cookie import", () => {
+    let projectPath: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        projectPath = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cli-auth-")));
+        cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(projectPath);
+        mocks.loadAuthConfig.mockReturnValue({});
+    });
+
+    afterEach(() => {
+        cwdSpy.mockRestore();
+        fs.rmSync(projectPath, { recursive: true, force: true });
+    });
+
+    function readImportedState() {
+        const dest = path.join(projectPath, ".raiken", "auth-state.json");
+        return JSON.parse(fs.readFileSync(dest, "utf8")) as {
+            cookies: Array<{ name: string; value: string; domain: string; secure: boolean }>;
+            origins: Array<{ origin: string }>;
+        };
+    }
+
+    // Regression: the importer used to hardcode secure: true and a leading-dot
+    // domain — fine on 127.0.0.1 (Chromium treats it as a secure context) but
+    // silently dropped on every plain-http LAN/staging host.
+    it("infers secure: false from an explicit http scheme", async () => {
+        await authCommand({ cookie: "session=abc", domain: "http://staging.local:8080" });
+
+        const state = readImportedState();
+        expect(state.cookies).toHaveLength(1);
+        expect(state.cookies[0].secure).toBe(false);
+        // Multi-label name: domain cookie, port stripped.
+        expect(state.cookies[0].domain).toBe(".staging.local");
+    });
+
+    it("keeps secure: true and a domain cookie for https URLs (path stripped)", async () => {
+        await authCommand({ cookie: "session=abc", domain: "https://app.example.com/login" });
+
+        const state = readImportedState();
+        expect(state.cookies[0].secure).toBe(true);
+        expect(state.cookies[0].domain).toBe(".app.example.com");
+    });
+
+    it("assumes https for bare hosts", async () => {
+        await authCommand({ cookie: "session=abc", domain: "app.example.com" });
+
+        const state = readImportedState();
+        expect(state.cookies[0].secure).toBe(true);
+        expect(state.cookies[0].domain).toBe(".app.example.com");
+    });
+
+    it("writes a host-only cookie for IP literals and keeps the port out of the domain", async () => {
+        await authCommand({ cookie: "session=abc", domain: "http://127.0.0.1:8123" });
+
+        const state = readImportedState();
+        expect(state.cookies[0].secure).toBe(false);
+        expect(state.cookies[0].domain).toBe("127.0.0.1");
+    });
+
+    it("writes a host-only cookie for localhost", async () => {
+        await authCommand({ cookie: "session=abc", domain: "http://localhost:3000" });
+
+        const state = readImportedState();
+        expect(state.cookies[0].secure).toBe(false);
+        expect(state.cookies[0].domain).toBe("localhost");
+    });
+
+    it("anchors --storage origins at the parsed scheme + host:port", async () => {
+        await authCommand({ storage: ["token=xyz"], domain: "http://127.0.0.1:8123/app" });
+
+        const state = readImportedState();
+        expect(state.origins).toHaveLength(1);
+        expect(state.origins[0].origin).toBe("http://127.0.0.1:8123");
+    });
+
+    it("rejects an unparseable --domain", async () => {
+        const code = await withThrowExit(() =>
+            authCommand({ cookie: "session=abc", domain: "http://" }),
+        );
+        expect(code).toBe(CLI_EXIT.USAGE);
     });
 });

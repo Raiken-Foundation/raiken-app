@@ -264,9 +264,15 @@ export class SiteKnowledgeDB {
 
     /**
      * Save a discovered link to the database.
+     *
+     * Returns the number of rows actually inserted (0 or 1) — the insert is
+     * `INSERT OR IGNORE` keyed on the table's (project_path, from_url, to_url,
+     * selector) UNIQUE constraint, so a re-extracted duplicate reports 0.
+     * Callers that count "links found" against the persisted count must only
+     * increment when this returns > 0.
      */
-    saveLink(link: Omit<DiscoveredLink, "id">): void {
-        this.db
+    saveLink(link: Omit<DiscoveredLink, "id">): number {
+        const result = this.db
             .prepare(
                 `
             INSERT OR IGNORE INTO discovered_links (
@@ -287,6 +293,7 @@ export class SiteKnowledgeDB {
                 link.discoveredAt,
                 link.verifiedAt,
             );
+        return result.changes;
     }
 
     /**
@@ -401,56 +408,108 @@ export class SiteKnowledgeDB {
      * manual-pause path (`category: "manual"`).
      */
     saveBlocker(blocker: Omit<DiscoveryBlocker, "id">): number {
-        // Dedup: a re-visit (e.g. after auth, or a resumed crawl) would
-        // otherwise pile up an identical unresolved blocker row per hit,
-        // flooding the UI and the auth-route list. Drop any existing UNRESOLVED
-        // blocker for the same url+category+detector before inserting the fresh
-        // one. Resolved rows are kept as history.
-        this.db
-            .prepare(
-                `
-            DELETE FROM discovery_blockers
-            WHERE project_path = ? AND url = ? AND category = ?
-              AND (detector_id IS ? OR detector_id = ?)
-              AND resolved_at IS NULL
-        `,
-            )
-            .run(
-                blocker.projectPath,
-                blocker.url,
-                blocker.category,
-                blocker.detectorId,
-                blocker.detectorId,
-            );
+        // Dedup: exactly one row per (url, category, detector). A re-visit
+        // (post-auth resume, or a second pass over the same page) used to
+        // pile up a fresh row per hit — the "1 unresolved" display deduped,
+        // storage didn't. Now the existing row is updated in place: when the
+        // condition is detected again the row is RE-OPENED (resolution fields
+        // cleared by the detector path, which passes them as null) and its
+        // evidence refreshed. Any legacy duplicate rows are collapsed. The
+        // whole check-then-act runs in a transaction so two processes in WAL
+        // mode can't interleave a double insert.
+        return this.db.transaction(() => {
+            const existing = this.db
+                .prepare(
+                    `
+                SELECT id FROM discovery_blockers
+                WHERE project_path = ? AND url = ? AND category = ?
+                  AND (detector_id IS ? OR detector_id = ?)
+                ORDER BY id DESC
+                LIMIT 1
+            `,
+                )
+                .get(
+                    blocker.projectPath,
+                    blocker.url,
+                    blocker.category,
+                    blocker.detectorId,
+                    blocker.detectorId,
+                ) as { id: number } | undefined;
 
-        const result = this.db
-            .prepare(
-                `
-            INSERT INTO discovery_blockers (
-                project_path, url, category, severity,
-                detector_id, detected_elements, evidence_json,
-                screenshot_path, resolution, resolved_via,
-                resolved_at, storage_state_path, discovered_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-            )
-            .run(
-                blocker.projectPath,
-                blocker.url,
-                blocker.category,
-                blocker.severity,
-                blocker.detectorId,
-                blocker.detectedElements,
-                blocker.evidenceJson,
-                blocker.screenshotPath,
-                blocker.resolution,
-                blocker.resolvedVia,
-                blocker.resolvedAt,
-                blocker.storageStatePath,
-                blocker.discoveredAt,
-            );
+            if (existing) {
+                this.db
+                    .prepare(
+                        `
+                    UPDATE discovery_blockers
+                    SET severity = ?, detected_elements = ?, evidence_json = ?,
+                        screenshot_path = ?, resolution = ?, resolved_via = ?,
+                        resolved_at = ?, storage_state_path = ?, discovered_at = ?
+                    WHERE id = ?
+                `,
+                    )
+                    .run(
+                        blocker.severity,
+                        blocker.detectedElements,
+                        blocker.evidenceJson,
+                        blocker.screenshotPath,
+                        blocker.resolution,
+                        blocker.resolvedVia,
+                        blocker.resolvedAt,
+                        blocker.storageStatePath,
+                        blocker.discoveredAt,
+                        existing.id,
+                    );
 
-        return Number(result.lastInsertRowid);
+                this.db
+                    .prepare(
+                        `
+                    DELETE FROM discovery_blockers
+                    WHERE project_path = ? AND url = ? AND category = ?
+                      AND (detector_id IS ? OR detector_id = ?)
+                      AND id != ?
+                `,
+                    )
+                    .run(
+                        blocker.projectPath,
+                        blocker.url,
+                        blocker.category,
+                        blocker.detectorId,
+                        blocker.detectorId,
+                        existing.id,
+                    );
+
+                return existing.id;
+            }
+
+            const result = this.db
+                .prepare(
+                    `
+                INSERT INTO discovery_blockers (
+                    project_path, url, category, severity,
+                    detector_id, detected_elements, evidence_json,
+                    screenshot_path, resolution, resolved_via,
+                    resolved_at, storage_state_path, discovered_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+                )
+                .run(
+                    blocker.projectPath,
+                    blocker.url,
+                    blocker.category,
+                    blocker.severity,
+                    blocker.detectorId,
+                    blocker.detectedElements,
+                    blocker.evidenceJson,
+                    blocker.screenshotPath,
+                    blocker.resolution,
+                    blocker.resolvedVia,
+                    blocker.resolvedAt,
+                    blocker.storageStatePath,
+                    blocker.discoveredAt,
+                );
+
+            return Number(result.lastInsertRowid);
+        })();
     }
 
     /**

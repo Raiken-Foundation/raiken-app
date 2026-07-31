@@ -12,6 +12,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { raikenConfigSchema } from "../config/schema";
+import { readRawConfigSync } from "../config/store";
 import { readPlaywrightTestDir } from "../testing/playwright-config";
 import { toPosixPath } from "./path-utils";
 import type { ConfigCleanupChange, ConfigCleanupResult } from "./types";
@@ -29,7 +30,7 @@ export async function analyzeConfigCleanup(projectPath: string): Promise<ConfigC
 
     let raw: Record<string, unknown>;
     try {
-        raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        raw = readRawConfigSync(projectPath);
     } catch (err) {
         return {
             changes: [

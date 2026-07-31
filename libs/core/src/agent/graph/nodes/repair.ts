@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { loadAutonomyConfig } from "../../../config";
 import { executeRepairAttempt } from "../../../testing/repair-attempt";
 import { repairLoopService } from "../../../testing/repair-loop-service";
+import { isFailureStatus } from "../../../testing/run-outcome";
 import type { AutonomySettings } from "../../tools";
 import type { GraphStateType } from "../state";
 import type { AgentNodeDeps } from "./types";
@@ -26,7 +27,9 @@ export function shouldRepair(state: GraphStateType, autonomy: AutonomySettings):
 export const createRepairNode = (deps: AgentNodeDeps) => async (state: GraphStateType) => {
     const { callTool, gatherContext, projectPath, model } = deps;
     const results = state.testRunResult;
-    if (!results || results.every((r) => r.status === "passed")) {
+    // Skipped tests are not failures, so a run without any genuine failure has
+    // nothing to repair — `every(passed)` would loop on skip-only runs.
+    if (!results || !results.some((r) => isFailureStatus(r.status))) {
         return {};
     }
 

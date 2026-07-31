@@ -1,6 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
 import { resolveAIConfig, type SyncResult, syncCurrentTicket } from "@raiken/core";
+import { loadIntegrationsConfig } from "@raiken/shared/server";
 import chalk from "chalk";
 
 interface SyncCommandOptions {
@@ -10,15 +9,7 @@ interface SyncCommandOptions {
 export async function syncCommand(options: SyncCommandOptions): Promise<void> {
     const projectPath = process.cwd();
 
-    // Load integration config from raiken.config.json
-    let integrationConfig: Record<string, unknown> | undefined;
-    try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        integrationConfig = raw?.integrations;
-    } catch {
-        // No config file, use defaults
-    }
+    const integrationConfig = loadIntegrationsConfig(projectPath);
 
     // Provider-aware AI resolution (honors configured provider + its env var),
     // instead of only the raw `ai` block / OPENROUTER_API_KEY.

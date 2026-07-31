@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { NodePath } from "@babel/traverse";
@@ -48,23 +47,6 @@ export function formatBytes(bytes: number): string {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
 
     return `${Math.round((bytes / k ** i) * 100) / 100} ${sizes[i]}`;
-}
-
-/**
- * Read the `testDirectory` field from a project's `raiken.config.json`.
- * Returns `undefined` when the config is missing, invalid, or the field
- * is absent/empty so callers can apply their own default (usually `e2e`).
- */
-export function readConfiguredTestDirectory(projectPath: string): string | undefined {
-    try {
-        const raw = JSON.parse(readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"));
-        if (typeof raw?.testDirectory === "string" && raw.testDirectory.trim()) {
-            return raw.testDirectory;
-        }
-    } catch {
-        // ignore — config missing or invalid; caller falls back to a default
-    }
-    return undefined;
 }
 
 /**

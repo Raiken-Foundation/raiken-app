@@ -1,0 +1,40 @@
+/* ── Toast ── */
+.discovery-view .dv-toast {
+    position: fixed;
+    bottom: 1.25rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 0.4375rem;
+    padding: 0.4375rem 0.75rem;
+    background: var(--bg-bar);
+    color: var(--ink);
+    border: 1px solid var(--accent-dim);
+    border-left-width: 2px;
+    border-left-color: var(--accent);
+    font-size: 11.5px;
+    font-family: var(--mono);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    animation: dv-toast-in 0.25s ease-out;
+    z-index: 1000;
+    max-width: 90vw;
+}
+
+.discovery-view .dv-toast svg {
+    width: 0.875rem;
+    height: 0.875rem;
+    flex-shrink: 0;
+    color: var(--accent);
+}
+
+@keyframes dv-toast-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}

@@ -1,0 +1,98 @@
+.testing-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    background: var(--bg);
+    overflow: hidden;
+}
+
+.test-run-controls {
+    display: flex;
+    justify-content: flex-end;
+    padding: 8px 16px 0;
+}
+
+.cancel-run-button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+.main-content {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.sidebar-container {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    overflow: hidden;
+}
+
+.resize-handle {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 100;
+    transition: background 0.15s;
+}
+.resize-handle:hover,
+.resize-handle.resizing {
+    background: var(--accent);
+}
+
+.editor-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    border-left: 1px solid var(--hair);
+}
+
+.indexing-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3125rem 0.75rem;
+    background: var(--bg-bar);
+    border-bottom: 1px solid var(--hair);
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    flex-shrink: 0;
+}
+.indexing-spinner {
+    width: 11px;
+    height: 11px;
+    border: 1.5px solid var(--hair-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: q-spin 0.8s linear infinite;
+}
+.indexing-error {
+    color: var(--danger);
+    justify-content: space-between;
+}
+.indexing-error button {
+    padding: 2px 7px;
+    border: 1px solid var(--hair-strong);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.indexing-error button:hover {
+    border-color: var(--danger);
+}

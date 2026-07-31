@@ -358,6 +358,17 @@ export class AgentMemory {
     }
 
     /**
+     * Reset ephemeral agent working memory: goal, remembered exploration,
+     * pause reason, and observed login — without touching chat transcripts.
+     */
+    clearWorkingMemory(): void {
+        this.clearGoalState();
+        this.clearLastExploration();
+        this.setPreference("paused_reason", "");
+        this.setPreference("auth_login", "");
+    }
+
+    /**
      * Return every persisted action path (e.g. "sign out", "add to cart") the
      * agent has previously located, keyed by action name. Lets test generation
      * reuse known routes/selectors for ALL actions, not just logout.
@@ -651,6 +662,11 @@ export class AgentMemory {
         process.once("SIGTERM", cleanup);
         process.once("beforeExit", cleanup);
     }
+}
+
+/** Clear agent working memory for a project without touching chat history. */
+export function clearAgentWorkingMemory(projectPath: string): void {
+    AgentMemory.getInstance(projectPath).clearWorkingMemory();
 }
 
 // Auto-register cleanup handlers when module is loaded

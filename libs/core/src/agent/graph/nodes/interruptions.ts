@@ -97,20 +97,19 @@ export const createDetectInterruptionNode =
     async (state: GraphStateType) => {
         let summary = state.domSummary;
         if (!summary) {
+            // A failed navigate/capture leaves `summary` null on purpose. The
+            // error text is not DOM, and storing it would satisfy the generate
+            // gate's grounding check with a string containing no elements.
             if (state.targetUrl) {
                 const nav = await callTool("navigateTo", { url: state.targetUrl });
-                if (nav.success) {
-                    summary = (nav.data as { summary?: string } | undefined)?.summary || null;
-                } else {
-                    summary = `[Navigation failed: ${nav.message || "unknown error"}]`;
-                }
+                summary = nav.success
+                    ? (nav.data as { summary?: string } | undefined)?.summary || null
+                    : null;
             } else {
                 const capture = await callTool("captureCurrentPage", {});
-                if (capture.success) {
-                    summary = (capture.data as { summary?: string } | undefined)?.summary || null;
-                } else {
-                    summary = `[Capture failed: ${capture.message || "unknown error"}]`;
-                }
+                summary = capture.success
+                    ? (capture.data as { summary?: string } | undefined)?.summary || null
+                    : null;
             }
         }
 
@@ -519,9 +518,11 @@ export const createCaptureAfterResolveNode =
     ({ callTool }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
         const capture = await callTool("captureCurrentPage", {});
+        // Never surface the capture error as DOM — downstream grounding checks
+        // treat any non-empty `domSummary` as a real page snapshot.
         const summary = capture.success
             ? (capture.data as { summary?: string } | undefined)?.summary || null
-            : `[Capture failed: ${capture.message || "unknown error"}]`;
+            : null;
         const url = capture.success
             ? (capture.data as { url?: string } | undefined)?.url || null
             : null;

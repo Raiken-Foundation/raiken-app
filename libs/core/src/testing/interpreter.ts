@@ -33,6 +33,7 @@ import type { DOMContext } from "../browser/dom-capture";
 import type { AIProviderId } from "../config/schema";
 import { cleanGeneratedTestCode } from "../utils";
 import { applyEditBlocks, parseEditBlocks, stripEditMarkers } from "./edit-blocks";
+import { validateTestCode } from "./test-code-validation";
 
 export interface InterpretationAttachment {
     name: string;
@@ -719,12 +720,21 @@ export async function getTestRepair(
         });
     };
 
+    /**
+     * Same gate generation and agent repair use. Without it a truncated stream
+     * or a prose reply reaches the editor as a "fix" the developer can save.
+     */
+    const rejectIfInvalid = (code: string): RepairResult | null => {
+        const validation = validateTestCode(code);
+        if (validation.ok) return null;
+        return { fixedCode: null, error: `The model's fix ${validation.reason}.` };
+    };
+
     const fullRewrite = async (matchFailed: boolean): Promise<RepairResult> => {
         const { text } = await generate("full");
         const cleaned = cleanGeneratedTestCode(stripEditMarkers(text));
-        if (!cleaned.trim()) {
-            return { fixedCode: null, error: "The model returned no usable test code." };
-        }
+        const invalid = rejectIfInvalid(cleaned);
+        if (invalid) return invalid;
         return {
             fixedCode: cleaned,
             originalCode: context.testCode,
@@ -744,9 +754,8 @@ export async function getTestRepair(
         // markers left by a malformed/half-written block first.
         if (blocks.length === 0) {
             const cleaned = cleanGeneratedTestCode(stripEditMarkers(text));
-            if (!cleaned.trim()) {
-                return { fixedCode: null, error: "The model returned no usable test code." };
-            }
+            const invalid = rejectIfInvalid(cleaned);
+            if (invalid) return invalid;
             return {
                 fixedCode: cleaned,
                 originalCode: context.testCode,
@@ -759,8 +768,13 @@ export async function getTestRepair(
 
         // If every block matched, we have a clean, minimal, in-place edit.
         if (applied.failedBlocks.length === 0 && applied.appliedCount > 0) {
+            const edited = ensureTrailingNewline(applied.content);
+            // Edits can match textually and still leave the file unparseable
+            // (e.g. a replacement that drops a closing brace).
+            const invalid = rejectIfInvalid(edited);
+            if (invalid) return await fullRewrite(true);
             return {
-                fixedCode: ensureTrailingNewline(applied.content),
+                fixedCode: edited,
                 originalCode: context.testCode,
                 mode: "edits",
                 editCount: applied.appliedCount,

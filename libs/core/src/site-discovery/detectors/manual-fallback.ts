@@ -144,11 +144,23 @@ export function createManualFallbackDetector(
     };
 }
 
+/**
+ * proxy-chain's synthetic "bad gateway" statuses (590–599): a proxy in the
+ * loop fabricated this response because the network hop itself failed (594 =
+ * connection refused, 593 = DNS failure, …). There IS no origin error page
+ * behind them — treating one as `error_page` paused crawls against healthy
+ * apps whenever a proxy or local network split refused Chromium's
+ * connection (the "Error page returned" false positive on 200-OK sites).
+ */
+export function isSyntheticProxyStatus(status: number): boolean {
+    return status >= 590 && status <= 599;
+}
+
 function checkServerError(ctx: BlockerDetectorContext): DiscoveryBlocker | null {
     const response = ctx.response;
     if (!response) return null;
     const status = response.status();
-    if (status < 500) return null;
+    if (status < 500 || isSyntheticProxyStatus(status)) return null;
     return buildBlocker({
         ctx,
         detectorId: "manual:error_page",

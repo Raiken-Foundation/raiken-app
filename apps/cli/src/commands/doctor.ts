@@ -9,7 +9,8 @@ import {
     type DoctorFinding,
     type DoctorReport,
     type DoctorSeverity,
-    readConfiguredTestDirectory,
+    ENVIRONMENT_RULES,
+    loadTestDirectory,
     scanTests,
 } from "@raiken/core";
 import chalk from "chalk";
@@ -24,12 +25,12 @@ interface DoctorCommandOptions {
 
 export async function doctorCommand(options: DoctorCommandOptions): Promise<void> {
     const projectPath = process.cwd();
-    const testDir = options.dir ?? readConfiguredTestDirectory(projectPath) ?? "e2e";
+    const testDir = options.dir ?? loadTestDirectory(projectPath);
     const failOn = parseFailOn(options.failOn);
     const jsonOutput = options.json === true;
 
     if (!jsonOutput) {
-        console.log(chalk.cyan(`\nraiken doctor — scanning ${testDir}/\n`));
+        console.log(chalk.cyan(`\nraiken doctor — environment + ${testDir}/ lint\n`));
     }
 
     const report = await scanTests({ projectPath, testDirectory: testDir });
@@ -58,33 +59,46 @@ function shouldFail(report: DoctorReport, threshold: DoctorSeverity): boolean {
 }
 
 function printHumanReport(report: DoctorReport, testDir: string): void {
-    if (report.scannedFiles === 0) {
-        console.log(chalk.yellow(`No test files found under ${testDir}/.`));
-        return;
+    const envFindings = report.findings.filter((f) => ENVIRONMENT_RULES.has(f.rule));
+    const lintFindings = report.findings.filter((f) => !ENVIRONMENT_RULES.has(f.rule));
+
+    if (envFindings.length > 0) {
+        console.log(chalk.bold("Environment"));
+        for (const f of envFindings) {
+            console.log(`  ${severityBadge(f.severity)} ${chalk.dim(f.rule)}`);
+            console.log(`     ${f.message}`);
+            if (f.snippet) console.log(`     ${chalk.dim(f.snippet)}`);
+            console.log(`     ${chalk.cyan("→")} ${f.suggestion}`);
+        }
+        console.log();
+    } else {
+        console.log(chalk.green("✓ Environment") + chalk.dim(" — Playwright and config OK."));
+        console.log();
     }
 
-    if (report.findings.length === 0) {
+    if (report.scannedFiles === 0) {
+        console.log(chalk.yellow(`No test files found under ${testDir}/.`));
+    } else if (lintFindings.length === 0) {
         console.log(
             chalk.green(`✓ Clean. Scanned ${report.scannedFiles} file(s) — no issues found.`),
         );
-        return;
-    }
-
-    let currentFile = "";
-    for (const f of report.findings) {
-        if (f.file !== currentFile) {
-            currentFile = f.file;
-            console.log(`\n${chalk.bold(f.file)}`);
+    } else {
+        let currentFile = "";
+        for (const f of lintFindings) {
+            if (f.file !== currentFile) {
+                currentFile = f.file;
+                console.log(`\n${chalk.bold(f.file)}`);
+            }
+            console.log(
+                `  ${severityBadge(f.severity)} ${chalk.dim(`${f.line}:${f.column}`)}  ${chalk.dim(f.rule)}`,
+            );
+            console.log(`     ${f.message}`);
+            console.log(`     ${chalk.dim(f.snippet)}`);
+            console.log(`     ${chalk.cyan("→")} ${f.suggestion}`);
         }
-        console.log(
-            `  ${severityBadge(f.severity)} ${chalk.dim(`${f.line}:${f.column}`)}  ${chalk.dim(f.rule)}`,
-        );
-        console.log(`     ${f.message}`);
-        console.log(`     ${chalk.dim(f.snippet)}`);
-        console.log(`     ${chalk.cyan("→")} ${f.suggestion}`);
+        console.log();
     }
 
-    console.log();
     console.log(
         `${chalk.bold("Scanned:")} ${report.scannedFiles} file(s)   ` +
             `${chalk.bold("Errors:")} ${chalk.red(report.summary.error)}   ` +

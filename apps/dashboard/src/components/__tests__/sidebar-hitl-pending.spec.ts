@@ -18,15 +18,40 @@ function msg(overrides: Partial<Message> & { id: string }): Message {
 
 describe("computeHitlPending", () => {
     it("is false with no messages", () => {
-        expect(computeHitlPending([], {}, {})).toBe(false);
+        expect(computeHitlPending([], [])).toBe(false);
     });
 
-    it("is false when no message carries hitlData", () => {
-        const messages = [msg({ id: "1" }), msg({ id: "2", isUser: true })];
-        expect(computeHitlPending(messages, {}, {})).toBe(false);
+    it("is true for an unresolved save_approval card with active workflow", () => {
+        const workflow: HitlWorkflowRecord = {
+            id: "wf-1",
+            version: 1,
+            kind: "test_generate_repair",
+            status: "await_save_approval",
+            createdAt: 1,
+            updatedAt: 1,
+            origin: "dashboard",
+            testDraft: "test();",
+            shouldRunTests: true,
+            repairAttempts: 0,
+        };
+        const messages = [
+            msg({
+                id: "1",
+                hitlData: {
+                    type: "save",
+                    title: "t",
+                    message: "m",
+                    reasons: [],
+                    options: [],
+                    context: { workflowId: "wf-1" },
+                    kind: "save_approval",
+                },
+            }),
+        ];
+        expect(computeHitlPending(messages, [workflow])).toBe(true);
     });
 
-    it("is true for an unresolved save_approval card", () => {
+    it("is false once the save card is resolved in session", () => {
         const messages = [
             msg({
                 id: "1",
@@ -41,132 +66,7 @@ describe("computeHitlPending", () => {
                 },
             }),
         ];
-        expect(computeHitlPending(messages, {}, {})).toBe(true);
-    });
-
-    it("is false once the save_approval card is resolved", () => {
-        const messages = [
-            msg({
-                id: "1",
-                hitlData: {
-                    type: "save",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "save_approval",
-                },
-            }),
-        ];
-        expect(computeHitlPending(messages, { "1": { status: "saved" } }, {})).toBe(false);
-    });
-
-    it("is true for an unresolved run_approval card", () => {
-        const messages = [
-            msg({
-                id: "2",
-                hitlData: {
-                    type: "run",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "run_approval",
-                },
-            }),
-        ];
-        expect(computeHitlPending(messages, {}, {})).toBe(true);
-    });
-
-    it("is false once the run_approval card is resolved", () => {
-        const messages = [
-            msg({
-                id: "2",
-                hitlData: {
-                    type: "run",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "run_approval",
-                },
-            }),
-        ];
-        expect(computeHitlPending(messages, {}, { "2": { status: "skipped" } })).toBe(false);
-    });
-
-    it("ignores legacy proceed/cancel cards without a kind", () => {
-        const messages = [
-            msg({
-                id: "3",
-                hitlData: {
-                    type: "goal_classification",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                },
-            }),
-        ];
-        expect(computeHitlPending(messages, {}, {})).toBe(false);
-    });
-
-    it("ignores hitlData on user messages", () => {
-        const messages = [
-            msg({
-                id: "4",
-                isUser: true,
-                hitlData: {
-                    type: "save",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "save_approval",
-                },
-            }),
-        ];
-        expect(computeHitlPending(messages, {}, {})).toBe(false);
-    });
-
-    it("is true if any one of several messages has an unresolved card", () => {
-        const messages = [
-            msg({
-                id: "5",
-                hitlData: {
-                    type: "save",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "save_approval",
-                },
-            }),
-            msg({
-                id: "6",
-                hitlData: {
-                    type: "run",
-                    title: "t",
-                    message: "m",
-                    reasons: [],
-                    options: [],
-                    context: {},
-                    kind: "run_approval",
-                },
-            }),
-        ];
-        // "5" resolved, "6" still pending -> overall true.
-        expect(computeHitlPending(messages, { "5": { status: "saved" } }, {})).toBe(true);
-    });
-
-    it("is true when an active workflow was recovered without chat history", () => {
-        expect(computeHitlPending([], {}, {}, [{ status: "await_repair_review" }])).toBe(true);
+        expect(computeHitlPending(messages, [], { "1": { status: "saved" } })).toBe(false);
     });
 });
 

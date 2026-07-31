@@ -165,6 +165,9 @@ importers:
 
   apps/dashboard:
     dependencies:
+      '@raiken/shared':
+        specifier: workspace:*
+        version: link:../../libs/shared
       '@tailwindcss/vite':
         specifier: ^4.1.17
         version: 4.1.17(vite@7.2.4(@types/node@24.10.1)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.44.1)(yaml@2.8.1))
@@ -190,12 +193,6 @@ importers:
         specifier: ^4.1.13
         version: 4.1.13
     devDependencies:
-      autoprefixer:
-        specifier: ^10.4.22
-        version: 10.4.22(postcss@8.5.6)
-      postcss:
-        specifier: ^8.5.6
-        version: 8.5.6
       tailwindcss:
         specifier: ^4.1.17
         version: 4.1.17

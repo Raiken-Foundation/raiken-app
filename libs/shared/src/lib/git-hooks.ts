@@ -216,7 +216,7 @@ function renderHookBody(type: HookType, opts: { skipRun: boolean }): string {
         "  fi",
         "fi",
         'if [ -z "$RAIKEN_BIN" ]; then',
-        '  echo "[raiken] Skipped: CLI not installed. Run \\`npm i -D @raiken/cli\\` or \\`npx raiken\\`." >&2',
+        '  echo "[raiken] Skipped: CLI not installed. Run \\`npm i -D raiken\\` or \\`npx raiken\\`." >&2',
         "  exit 0",
         "fi",
     ];

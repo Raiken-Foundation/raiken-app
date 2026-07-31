@@ -27,6 +27,15 @@ npm install -g raiken
 
 Requires **Node.js 22.x** (see the workspace `.nvmrc`)
 
+Installing with `pnpm add -g` instead needs one extra step. pnpm blocks dependency
+build scripts by default, which leaves the native modules behind `better-sqlite3`
+(the database) and `sharp` (the embeddings model) unbuilt, so commands fail at
+runtime with `Cannot find module '../build/Release/...'`. Approve them once:
+
+```bash
+pnpm approve-builds -g
+```
+
 ---
 
 ## Quick Start
@@ -102,12 +111,86 @@ Raiken will:
 
 ## Commands
 
+Every command supports `--help`. Scripting contract: `--json` output is machine-clean on
+stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/test failure,
+`2` usage error, `3` config/auth error, `4` busy conflict, `130` cancelled.
+
+### Interactive agent & sessions
+
 | Command | Description |
 |---------|-------------|
-| `raiken init` | Initialize Raiken in your project |
+| `raiken` | Interactive chat REPL (slash commands: `/test`, `/repair`, `/report`, `/doctor`, `/ci`, `/cover`, `/sessions`, …) |
+| `raiken -p "test the login flow"` | One-shot agent request (`--json`, `--stream-json`, `--run`, `--no-save`, `--headed`, `--timeout <ms>`) |
+| `raiken sessions` | List saved sessions (`--json`) |
+| `raiken resume [name]` | Resume a saved session (latest if omitted) |
+
+### Setup
+
+| Command | Description |
+|---------|-------------|
+| `raiken init` | Initialize Raiken in your project (`-f`, `-y`, `--skip-browsers`) |
 | `raiken config` | Set the AI provider, key, model, and endpoint (interactive wizard, or via flags) |
-| `raiken start` | Start the server and dashboard on port 7101 |
-| `raiken start -p 8080` | Start on a custom port |
+| `raiken start` | Start the server and dashboard on port 7101 (`-p <port>`, `--remote`) |
+
+### Running & repairing tests
+
+| Command | Description |
+|---------|-------------|
+| `raiken test [file]` | Run the Playwright suite or one spec; exit code = pass/fail |
+| `raiken test --grep <p>` | Only tests whose title matches |
+| `raiken test --headed` / `--debug` | Visible browser / Playwright inspector |
+| `raiken test --workers <n>` `--project <name>` `--retries <n>` `--update-snapshots` | Playwright execution controls |
+| `raiken test --list` | List tests without running them |
+| `raiken test --watch` | Re-run on every project change until Ctrl+C |
+| `raiken test --only-flaky` | Run only quarantined specs |
+| `raiken test --fix` | After a failure, run the AI repair flow |
+| `raiken repair [file]` | AI-repair a failing spec: runs it, shows the fix as a diff, writes after confirmation (`--apply`, `--json`, `--no-interpret`) |
+| `raiken report [file]` | HTML/Markdown/JSON report with screenshots (`--from`, `--format`, `--output`, `--open`) |
+| `raiken show-trace [path]` | Open a Playwright trace.zip in the trace viewer (newest when omitted) |
+| `raiken cover <target>` | Draft a test from an AC reference, symbol, or free text (`-t`, `-o`, `--dir`, `--dry-run`) |
+| `raiken doctor` | Environment checks (Playwright, browsers, webServer script, baseURL) + flake anti-pattern lint (`--dir`, `--fail-on`, `--json`) |
+| `raiken eval <suite> [target]` | Eval harness: `playground`, `benchmark`, `flakiness <spec>` (`--runs`, `--expect-tests`, `--out`) |
+| `raiken organize` | AI-assisted test-dir + config cleanup (`-y`, `--tests-only`, `--config-only`) |
+
+### CI & change analysis
+
+| Command | Description |
+|---------|-------------|
+| `raiken ci` | Impact analysis + affected tests + JUnit/JSON reports (`--base`, `--staged`, `--skip-run`, `--format`) |
+| `raiken trace [stackTrace]` | Map a stack trace to the tests most likely to reproduce it |
+| `raiken sync` | Sync with the ticket system and analyze test impact (`-t <id>`) |
+| `raiken context` | Write `raiken.ctx.md`, a project snapshot for IDE AI agents |
+| `raiken hooks install` / `uninstall` / `status` | Fail-soft git hooks that run raiken on commit/push |
+
+### Project intelligence & discovery
+
+| Command | Description |
+|---------|-------------|
+| `raiken status` | Project setup at a glance (`--json`) |
+| `raiken index` | Build the code graph (`--embeddings`, `--force`) |
+| `raiken search <query>` | Semantic code search (`--limit`, `--type`, `--json`) |
+| `raiken discover [url]` | Autonomously discover web application structure (`--max-pages`, `--auth`, `--continue`, `--status`) |
+| `raiken knowledge` (alias `kb`) | Inspect discovered pages, links, and blockers |
+| `raiken memory` | What the agent has learned about this project (`show` / `clear`) |
+| `raiken auth` | Save browser session state for authenticated tests (`--url`, `--script`, `--manual`, `--cookie`) |
+
+### The everyday test loop
+
+```bash
+raiken test --watch          # inner loop: re-runs on every edit
+raiken test --list           # what would run?
+raiken test --fix            # failure → AI repair with diff review
+raiken doctor                # environment + flake lint before committing
+raiken show-trace            # open the newest failure trace
+```
+
+Quarantining a flaky spec — add it to `raiken.config.json` and it is skipped by default:
+
+```json
+{ "quarantine": { "testFiles": ["e2e/legacy-checkout.spec.ts"] } }
+```
+
+Run only the quarantine list with `raiken test --only-flaky`.
 
 ---
 

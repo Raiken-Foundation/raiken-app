@@ -7,7 +7,18 @@
  * which maps *stack traces* to tests.
  */
 
+import type { CorrelationContext } from "../observability/types";
+import type { TraceRotationOptions } from "./rotation";
+
 export type RunTraceOutcome = "completed" | "error" | "aborted";
+
+export interface RunTraceCorrelationFields {
+    correlationId?: string;
+    operationId?: string;
+    workflowId?: string;
+    discoverySessionId?: string;
+    projectRef?: string;
+}
 
 export interface RunTraceStartEvent {
     type: "run_start";
@@ -17,6 +28,7 @@ export interface RunTraceStartEvent {
     kind: string;
     /** Human-readable label — typically the user prompt or scenario id. */
     label: string;
+    contentTraces?: boolean;
     meta?: Record<string, unknown>;
 }
 
@@ -56,12 +68,14 @@ export interface RunTraceEndEvent {
     error?: string;
 }
 
-export type RunTraceEvent =
+export type RunTraceEvent = (
     | RunTraceStartEvent
     | RunTraceToolCallEvent
     | RunTraceToolResultEvent
     | RunTraceNoteEvent
-    | RunTraceEndEvent;
+    | RunTraceEndEvent
+) &
+    RunTraceCorrelationFields;
 
 export interface RunTraceRecorderOptions {
     /** Directory the JSONL file is written into (created if missing). */
@@ -71,4 +85,18 @@ export interface RunTraceRecorderOptions {
     meta?: Record<string, unknown>;
     /** Cap on any single serialized string value. Default 4000 chars. */
     maxStringLength?: number;
+    /** Reuse an existing run id when provided. */
+    runId?: string;
+    /** Inject correlation ids instead of inventing new ones. */
+    correlation?: CorrelationContext;
+    /** Operational mode — no prompt content in label. */
+    operational?: boolean;
+    /** Override content-trace capture (defaults to RAIKEN_TRACE env). */
+    contentTraces?: boolean;
+    /** Rotation policy applied on open. */
+    rotation?: TraceRotationOptions;
+    /** When set, trace dir is validated under `<projectPath>/.raiken/traces`. */
+    projectPath?: string;
 }
+
+export type { TraceRotationOptions, TraceRotationResult } from "./rotation";

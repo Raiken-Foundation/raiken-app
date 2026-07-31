@@ -1,3 +1,4 @@
+import { splitAgentStreamChunk } from "@raiken/shared";
 import chalk from "chalk";
 
 export const accent = chalk.hex("#a78bfa");
@@ -21,44 +22,13 @@ export function splitHITL(
     chunk: string,
     options: SplitHITLOptions = {},
 ): { text: string; hitl: Record<string, unknown> | null } {
-    let hitl: Record<string, unknown> | null = null;
-    let text = chunk.replace(/<!--HITL:([\s\S]*?)-->/g, (_m, payload) => {
-        try {
-            // New markers are base64-encoded JSON; older ones are raw JSON.
-            let json = payload as string;
-            if (/^[A-Za-z0-9+/=]+$/.test(json)) {
-                try {
-                    json = Buffer.from(json, "base64").toString("utf-8");
-                } catch {
-                    /* not base64 — treat as raw JSON */
-                }
-            }
-            hitl = JSON.parse(json) as Record<string, unknown>;
-        } catch {
-            /* malformed marker — drop it silently */
+    const { text, hitl, progress } = splitAgentStreamChunk(chunk);
+    for (const evt of progress) {
+        options.onProgress?.(evt.label, evt.detail);
+        if (!options.suppressProgressPrint) {
+            process.stderr.write(dim(`   … ${evt.label}${evt.detail ? ` ${evt.detail}` : ""}\n`));
         }
-        return "";
-    });
-    text = text.replace(/<!--EVENT:([A-Za-z0-9+/=]+?)-->/g, (_m, b64) => {
-        try {
-            const evt = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as {
-                kind?: string;
-                label?: string;
-                detail?: string | null;
-            };
-            if (evt.kind === "progress" && evt.label) {
-                options.onProgress?.(evt.label, evt.detail ?? null);
-                if (!options.suppressProgressPrint) {
-                    process.stderr.write(
-                        dim(`   … ${evt.label}${evt.detail ? ` ${evt.detail}` : ""}\n`),
-                    );
-                }
-            }
-        } catch {
-            /* malformed marker — drop it silently */
-        }
-        return "";
-    });
+    }
     return { text, hitl };
 }
 

@@ -64,6 +64,8 @@ describe("TestRunner abort handling", () => {
             timeout: 60_000,
         });
 
+        await Promise.resolve();
+        await Promise.resolve();
         controller.abort();
         const results = await runPromise;
 

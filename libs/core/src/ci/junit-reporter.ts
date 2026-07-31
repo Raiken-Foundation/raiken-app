@@ -42,13 +42,14 @@ function renderSuite(testFile: string, tests: TestRunResult[]): string {
         // some attempts is not a pass — report it as a failure so CI blocks.
         failed: tests.filter((t) => t.status === "failed" || t.status === "flaky").length,
         errored: tests.filter((t) => t.status === "error" || t.status === "timeout").length,
+        skipped: tests.filter((t) => t.status === "skipped").length,
     };
     const timeSec = (tests.reduce((acc, t) => acc + t.duration, 0) / 1000).toFixed(3);
 
     const cases = tests.map((t) => renderCase(testFile, t)).join("\n");
 
     return [
-        `  <testsuite name="${xmlAttr(testFile)}" tests="${totals.total}" failures="${totals.failed}" errors="${totals.errored}" time="${timeSec}">`,
+        `  <testsuite name="${xmlAttr(testFile)}" tests="${totals.total}" failures="${totals.failed}" errors="${totals.errored}" skipped="${totals.skipped}" time="${timeSec}">`,
         cases,
         `  </testsuite>`,
     ].join("\n");
@@ -78,6 +79,10 @@ function renderCase(testFile: string, t: TestRunResult): string {
             `      <failure message="${message}"><![CDATA[${cdata(body)}]]></failure>`,
             tail,
         ].join("\n");
+    }
+
+    if (t.status === "skipped") {
+        return [head, `      <skipped/>`, tail].join("\n");
     }
 
     // error or timeout

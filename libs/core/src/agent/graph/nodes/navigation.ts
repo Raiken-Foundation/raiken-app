@@ -1,10 +1,12 @@
-import * as fsSync from "node:fs";
-import * as path from "node:path";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { BrowserSession } from "../../../browser/session";
-import { mapAuthCredentialsToFields, resolveAuthCredentials } from "../../../config";
+import {
+    loadDiscoveryConfig,
+    mapAuthCredentialsToFields,
+    resolveAuthCredentials,
+} from "../../../config";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GraphStateType } from "../state";
 import type { ActionResult, InterruptionInfo, SummaryElement } from "../utils";
@@ -24,15 +26,8 @@ import { classifyInterruption } from "./classify-interruption";
 import type { AgentNodeDeps, CallTool } from "./types";
 
 function loadExploreMaxPages(projectPath: string): number {
-    try {
-        const raw = fsSync.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8");
-        const config = JSON.parse(raw) as { discovery?: { maxPages?: number } };
-        const val = config.discovery?.maxPages;
-        if (typeof val === "number" && val > 0) return val;
-    } catch {
-        // Config missing or invalid
-    }
-    return 20;
+    const maxPages = loadDiscoveryConfig(projectPath).maxPages;
+    return maxPages > 0 ? maxPages : 20;
 }
 
 // Exploration stops on its own before hitting `maxPages`: the model is asked

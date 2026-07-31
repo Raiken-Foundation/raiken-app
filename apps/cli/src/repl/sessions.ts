@@ -1,18 +1,25 @@
 /**
  * Named session snapshots for the interactive REPL.
  *
- * The live transcript still lives at `.raiken/chat-history.json` (shared with
- * the dashboard). Snapshots under `.raiken/sessions/` let you save / list /
- * resume named threads — Codex-style continuity without a full TUI.
+ * The live transcript lives at `.raiken/chat-history.json` via the core
+ * ChatHistoryStore (shared with the dashboard). Snapshots under
+ * `.raiken/sessions/` let you save / list / resume named threads — Codex-style
+ * continuity without a full TUI.
  */
 
 import fs from "node:fs";
 import path from "node:path";
+import {
+    buildExistingMessageLookups,
+    chatHistoryStore,
+    clearAgentWorkingMemory,
+    type ReplChatMessage,
+    resolveReplToCanonical,
+    toReplChatMessage,
+} from "@raiken/core";
 
-export interface ChatMessage {
-    role: string;
-    content: string;
-}
+/** REPL/session message; snapshots may omit optional canonical metadata. */
+export type ChatMessage = ReplChatMessage;
 
 export interface SessionSnapshot {
     id: string;
@@ -26,7 +33,6 @@ export interface SessionSnapshot {
 
 const HISTORY_LIMIT = 200;
 const SESSIONS_DIR = "sessions";
-const LIVE_HISTORY = "chat-history.json";
 const CURRENT_POINTER = "sessions/current.json";
 
 function raikenDir(projectPath: string): string {
@@ -35,10 +41,6 @@ function raikenDir(projectPath: string): string {
 
 function sessionsDir(projectPath: string): string {
     return path.join(raikenDir(projectPath), SESSIONS_DIR);
-}
-
-function liveHistoryPath(projectPath: string): string {
-    return path.join(raikenDir(projectPath), LIVE_HISTORY);
 }
 
 function currentPointerPath(projectPath: string): string {
@@ -66,43 +68,73 @@ function atomicWrite(file: string, payload: string): void {
     fs.renameSync(tmp, file);
 }
 
-/** Load the live chat transcript (dashboard-compatible). */
+/** Load the live chat transcript (dashboard-compatible via core store). */
 export function loadLiveHistory(projectPath: string): ChatMessage[] {
-    return loadHistoryFile(liveHistoryPath(projectPath));
+    return chatHistoryStore.list(projectPath).slice(-HISTORY_LIMIT).map(toReplChatMessage);
 }
 
-/** Persist the live chat transcript. */
-export function saveLiveHistory(projectPath: string, history: ChatMessage[]): void {
+/** Persist the live chat transcript through the canonical core store. */
+export function saveLiveHistory(
+    projectPath: string,
+    history: ChatMessage[],
+    knownPersistedIds?: ReadonlySet<string>,
+): ChatMessage[] | null {
     try {
-        const payload = JSON.stringify({ messages: history.slice(-HISTORY_LIMIT) }, null, 2);
-        atomicWrite(liveHistoryPath(projectPath), payload);
+        const trimmed = history.slice(-HISTORY_LIMIT);
+        const persisted = chatHistoryStore.updateAtomically(projectPath, (allExisting) => {
+            const existing = allExisting.slice(-HISTORY_LIMIT);
+            const lookups = buildExistingMessageLookups(existing);
+            const consumedIds = new Set<string>();
+            const baseTimestamp = Date.now();
+            const canonical = trimmed.map((message, index) =>
+                resolveReplToCanonical(message, index, baseTimestamp, lookups, consumedIds),
+            );
+            const knownTimestamps = trimmed.flatMap((message) =>
+                message.timestamp === undefined ? [] : [message.timestamp],
+            );
+            const newestKnownTimestamp =
+                knownTimestamps.length > 0 ? Math.max(...knownTimestamps) : undefined;
+
+            // Preserve messages appended by another surface after this REPL
+            // loaded its transcript. Older unconsumed messages are deliberate
+            // local deletions (for example a resumed/sliced conversation).
+            const concurrentMessages = existing.filter(
+                (message) =>
+                    !consumedIds.has(message.id) &&
+                    (knownPersistedIds
+                        ? !knownPersistedIds.has(message.id)
+                        : newestKnownTimestamp === undefined ||
+                          message.timestamp > newestKnownTimestamp),
+            );
+            return [...canonical, ...concurrentMessages].sort(
+                (left, right) => left.timestamp - right.timestamp,
+            );
+        });
+        return persisted.map(toReplChatMessage);
     } catch {
-        /* disk not writable — non-critical */
+        console.warn("  ⚠ Chat history could not be saved; this session remains in memory.");
+        return null;
     }
 }
 
-function loadHistoryFile(file: string): ChatMessage[] {
+/**
+ * Clear live chat and agent working memory. Writes to disk first via tRPC,
+ * falling back to the canonical core store when the caller is unavailable.
+ */
+export async function clearConversation(
+    projectPath: string,
+    chat: { clearChatMessages: () => { success: boolean } | Promise<unknown> },
+): Promise<void> {
     try {
-        const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-        const arr = Array.isArray(parsed)
-            ? parsed
-            : Array.isArray(parsed?.messages)
-              ? parsed.messages
-              : null;
-        if (arr) {
-            return arr
-                .filter(
-                    (m: unknown): m is ChatMessage =>
-                        !!m &&
-                        typeof (m as ChatMessage).role === "string" &&
-                        typeof (m as ChatMessage).content === "string",
-                )
-                .slice(-HISTORY_LIMIT);
+        await chat.clearChatMessages();
+    } catch {
+        chatHistoryStore.clear(projectPath);
+        try {
+            clearAgentWorkingMemory(projectPath);
+        } catch {
+            /* memory unavailable — chat still cleared */
         }
-    } catch {
-        /* missing or unreadable */
     }
-    return [];
 }
 
 function sessionPath(projectPath: string, id: string): string {

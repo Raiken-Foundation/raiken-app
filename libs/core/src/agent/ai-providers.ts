@@ -11,8 +11,6 @@
  * `createAIClient()` instead of hardcoding `OPENROUTER_API_KEY` everywhere.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { ChatAnthropic } from "@langchain/anthropic";
@@ -21,7 +19,8 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { ChatOpenAI } from "@langchain/openai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { LanguageModel } from "ai";
-import { AI_PROVIDER_IDS, type AIProviderId, raikenConfigSchema } from "../config/schema";
+import { defaultConfig, loadAIConfigSection } from "../config";
+import { AI_PROVIDER_IDS, type AIProviderId } from "../config/schema";
 
 export interface ProviderDefinition {
     id: AIProviderId;
@@ -420,28 +419,7 @@ export function resolveAIConfig(
     projectPath: string,
     override?: AIConfigOverride,
 ): ResolvedAIConfig {
-    let configFromFile: {
-        provider?: string;
-        apiKey?: string;
-        apiKeys?: Partial<Record<AIProviderId, string>>;
-        model?: string;
-        baseURL?: string;
-        maxTokens?: number;
-        temperature?: number;
-    } = {};
-
-    const configPath = path.join(projectPath, "raiken.config.json");
-    if (fs.existsSync(configPath)) {
-        try {
-            const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-            const result = raikenConfigSchema.safeParse(raw);
-            if (result.success && result.data.ai) {
-                configFromFile = result.data.ai as typeof configFromFile;
-            }
-        } catch {
-            // ignored — keep defaults
-        }
-    }
+    const configFromFile: ReturnType<typeof loadAIConfigSection> = loadAIConfigSection(projectPath);
 
     const providerId = (override?.provider ?? configFromFile.provider ?? "openrouter") as string;
     const provider = getProvider(providerId);
@@ -483,8 +461,9 @@ export function resolveAIConfig(
         apiKeyEnvVar,
         model: override?.model ?? configFromFile.model ?? provider.defaultModel,
         baseURL: override?.baseURL ?? configFromFile.baseURL ?? provider.defaultBaseURL,
-        maxTokens: override?.maxTokens ?? configFromFile.maxTokens ?? 4000,
-        temperature: override?.temperature ?? configFromFile.temperature ?? 0.7,
+        maxTokens: override?.maxTokens ?? configFromFile.maxTokens ?? defaultConfig.ai.maxTokens,
+        temperature:
+            override?.temperature ?? configFromFile.temperature ?? defaultConfig.ai.temperature,
     };
 }
 

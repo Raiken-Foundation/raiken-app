@@ -94,17 +94,22 @@ function nearestExistingAncestor(filePath: string): string {
 export function resolvePathWithinProject(projectPath: string, candidate: string): string {
     const projectRoot = fs.realpathSync(path.resolve(projectPath));
     const target = path.resolve(projectRoot, candidate);
-    if (!isLexicallyInside(projectRoot, target)) {
-        throw new PathContainmentError(candidate, projectRoot);
-    }
 
+    // Canonicalize the part of the target that exists, then re-attach the tail
+    // that doesn't. Comparing a raw path against a realpath'd root produces
+    // false escapes wherever the project sits behind a symlink — on macOS
+    // `/tmp` and `/var` are symlinks, so an absolute path to the project's own
+    // root would be rejected as being outside itself.
     const existingAncestor = nearestExistingAncestor(target);
     const realAncestor = fs.realpathSync(existingAncestor);
-    if (!isLexicallyInside(projectRoot, realAncestor)) {
+    const tail = path.relative(existingAncestor, target);
+    const realTarget = tail ? path.join(realAncestor, tail) : realAncestor;
+
+    if (!isLexicallyInside(projectRoot, realTarget)) {
         throw new PathContainmentError(candidate, projectRoot);
     }
 
-    return target;
+    return realTarget;
 }
 
 export function getConfigPath(projectPath: string): string {

@@ -95,6 +95,10 @@ RAIKEN_PLAYGROUND_AUTH_USER=admin \
 RAIKEN_PLAYGROUND_AUTH_PASSWORD=password \
 pnpm exec raiken auth
 
+# AI-backed features (eval, agent) resolve the provider key from the
+# environment — export it yourself, never commit one to raiken.config.json:
+export DEEPSEEK_API_KEY=sk-…
+
 # Minimal redirect-only wall (eval fixture, no SPA sessions)
 pnpm exec nx run @raiken/playground-auth:auth-wall
 ```

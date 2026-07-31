@@ -1,9 +1,14 @@
 #!/usr/bin/env node
+// Must stay the first import: installs the console filter before any module
+// whose init code nags (baseline-browser-mapping fires at import time).
+import "./upstream-warnings";
 import path from "node:path";
-import { getRaikenVersion } from "@raiken/shared/lib/version";
+import { getRaikenVersion } from "@raiken/shared";
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import dotenv from "dotenv";
+import { CLI_EXIT, exitUsage, handleCliError } from "./errors";
+import { cliExit } from "./repl/exit";
 
 // Load .env from the current working directory (where the user runs raiken).
 // Cheap (a local file read) so it stays eager, unlike the heavy imports below.
@@ -86,6 +91,12 @@ program
     .description("AI QA Agent for Developers")
     .version(getRaikenVersion(), "-v, --version");
 
+// Throw instead of process.exit on argv-shape errors (unknown option, missing
+// required arg, unknown subcommand, excess args) so the catch at the parse
+// site can map them to the CLI's USAGE(2) contract instead of commander's 1.
+// --help/--version carry exitCode 0 and pass through untouched.
+program.exitOverride();
+
 // Non-interactive one-shot mode (à la `claude -p`) is handled BEFORE commander
 // parses, so its flags (--json, --run, …) don't have to be declared globally —
 // declaring them globally collides with the identically-named options on
@@ -99,6 +110,7 @@ program.addHelpText(
         '  $ raiken -p "..." --run                     run the generated test (exit code = pass/fail)\n' +
         "     flags: --json  --stream-json  --run  --no-save  --headed  --timeout <ms>\n" +
         "\nSessions:\n" +
+        "  $ raiken sessions                           list saved sessions\n" +
         "  $ raiken resume                             reopen the latest saved session\n" +
         '  $ raiken resume "login-flow"                reopen a named session\n',
 );
@@ -118,7 +130,7 @@ program
             console.error(
                 chalk.red(`Invalid port: "${options.port}". Must be a number between 1 and 65535.`),
             );
-            process.exit(1);
+            cliExit(CLI_EXIT.USAGE);
         }
         await printBanner(getRaikenVersion());
         await checkApiKey();
@@ -127,11 +139,9 @@ program
             const { startServer } = await import("./server");
             await startServer({ port, remote: options.remote });
         } catch (error) {
-            console.error(
-                chalk.red("Failed to start Raiken:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Failed to start Raiken",
+            });
         }
     });
 
@@ -144,11 +154,9 @@ program.action(async () => {
         const { chatCommand } = await import("./commands/chat");
         await chatCommand();
     } catch (error) {
-        console.error(
-            chalk.red("Failed to start Raiken:"),
-            error instanceof Error ? error.message : error,
-        );
-        process.exit(1);
+        handleCliError(error, {
+            label: "Failed to start Raiken",
+        });
     }
 });
 
@@ -162,11 +170,24 @@ program
             const { chatCommand } = await import("./commands/chat");
             await chatCommand({ resume: name?.trim() ? name.trim() : true });
         } catch (error) {
-            console.error(
-                chalk.red("Failed to resume session:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Failed to resume session",
+            });
+        }
+    });
+
+program
+    .command("sessions")
+    .description("List saved interactive sessions (resumable with `raiken resume <name>`)")
+    .option("--json", "Emit the session list as JSON", false)
+    .action(async (options) => {
+        try {
+            const { sessionsCommand } = await import("./commands/sessions");
+            await sessionsCommand(options);
+        } catch (error) {
+            handleCliError(error, {
+                label: "raiken sessions failed",
+            });
         }
     });
 
@@ -175,19 +196,23 @@ program
     .description("Initialize Raiken in the current project")
     .option("-f, --force", "Overwrite existing configuration files", false)
     .option("-y, --yes", "Accept auto-detected defaults for every prompt (non-interactive)", false)
+    .option(
+        "--skip-browsers",
+        "Skip downloading Playwright browser binaries (CI containers usually pre-install them)",
+        false,
+    )
     .action(async (options) => {
         try {
             const { initializeProject } = await import("./initializer");
             await initializeProject(process.cwd(), {
                 force: options.force,
                 nonInteractive: options.yes,
+                skipBrowsers: options.skipBrowsers,
             });
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ Failed to initialize project:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Failed to initialize project",
+            });
         }
     });
 
@@ -215,11 +240,9 @@ program
             const { configCommand } = await import("./commands/config");
             await configCommand(section, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken config failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken config failed",
+            });
         }
     });
 
@@ -239,11 +262,9 @@ program
             const { discoverCommand } = await import("./commands/discover");
             await discoverCommand(url, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ Discovery failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Discovery failed",
+            });
         }
     });
 
@@ -278,11 +299,9 @@ program
             const { authCommand } = await import("./commands/auth");
             await authCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ Authentication failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Authentication failed",
+            });
         }
     });
 
@@ -304,17 +323,18 @@ program
             const { ciCommand } = await import("./commands/ci");
             await ciCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken ci failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken ci failed",
+            });
         }
     });
 
 program
     .command("doctor")
-    .description("Lint the test suite for flake-prone anti-patterns (waitForTimeout, .only, …)")
+    .description(
+        "Check the test environment (Playwright, browsers, webServer script, baseURL) " +
+            "and lint the suite for flake-prone anti-patterns",
+    )
     .option("--dir <path>", "Test directory to scan (default: from raiken.config.json or 'e2e')")
     .option(
         "--fail-on <severity>",
@@ -327,11 +347,9 @@ program
             const { doctorCommand } = await import("./commands/doctor");
             await doctorCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken doctor failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken doctor failed",
+            });
         }
     });
 
@@ -350,11 +368,9 @@ program
             const { organizeCommand } = await import("./commands/organize");
             await organizeCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken organize failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken organize failed",
+            });
         }
     });
 
@@ -380,11 +396,9 @@ program
             const { evalCommand } = await import("./commands/eval");
             await evalCommand(suite, target, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken eval failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken eval failed",
+            });
         }
     });
 
@@ -400,11 +414,9 @@ program
             const { contextCommand } = await import("./commands/context");
             await contextCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken context failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken context failed",
+            });
         }
     });
 
@@ -423,11 +435,9 @@ program
             const { coverCommand } = await import("./commands/cover");
             await coverCommand(target, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken cover failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken cover failed",
+            });
         }
     });
 
@@ -443,11 +453,9 @@ program
             const { traceCommand } = await import("./commands/trace");
             await traceCommand(stackTrace, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken trace failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken trace failed",
+            });
         }
     });
 
@@ -466,11 +474,9 @@ hooks
             const { hooksInstallCommand } = await import("./commands/hooks");
             await hooksInstallCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken hooks install failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken hooks install failed",
+            });
         }
     });
 
@@ -483,11 +489,9 @@ hooks
             const { hooksUninstallCommand } = await import("./commands/hooks");
             await hooksUninstallCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken hooks uninstall failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken hooks uninstall failed",
+            });
         }
     });
 
@@ -499,11 +503,9 @@ hooks
             const { hooksStatusCommand } = await import("./commands/hooks");
             await hooksStatusCommand();
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken hooks status failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken hooks status failed",
+            });
         }
     });
 
@@ -518,11 +520,9 @@ program
             const { statusCommand } = await import("./commands/status");
             await statusCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken status failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken status failed",
+            });
         }
     });
 
@@ -536,11 +536,9 @@ program
             const { indexCommand } = await import("./commands/indexer");
             await indexCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken index failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken index failed",
+            });
         }
     });
 
@@ -555,11 +553,9 @@ program
             const { searchCommand } = await import("./commands/search");
             await searchCommand(query, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken search failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken search failed",
+            });
         }
     });
 
@@ -571,16 +567,15 @@ program
     )
     .option("--limit <number>", "Max rows for list sections", "50")
     .option("--json", "Emit the section as JSON", false)
+    .option("-f, --force", "Skip the confirmation prompt for `clear` (scripts / CI)", false)
     .action(async (section, arg, options) => {
         try {
             const { knowledgeCommand } = await import("./commands/knowledge");
             await knowledgeCommand(section, arg, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken knowledge failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken knowledge failed",
+            });
         }
     });
 
@@ -588,16 +583,15 @@ program
     .command("memory [action]")
     .description("Inspect what the agent has learned about this project ([show] | clear)")
     .option("--json", "Emit memory as JSON", false)
+    .option("-f, --force", "Skip the confirmation prompt for `clear` (scripts / CI)", false)
     .action(async (action, options) => {
         try {
             const { memoryCommand } = await import("./commands/memory");
             await memoryCommand(action, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken memory failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken memory failed",
+            });
         }
     });
 
@@ -605,16 +599,63 @@ program
     .command("test [file]")
     .description("Run the Playwright suite (or a single spec) and report pass/fail")
     .option("--json", "Emit the run summary as JSON", false)
+    .option("--headed", "Run with visible browser windows", false)
+    .option("--debug", "Step through the test in the Playwright inspector", false)
+    .option("--grep <pattern>", "Only run tests whose title matches (Playwright -g)")
+    .option("--workers <n>", "Parallel workers (default: 1)")
+    .option("--project <name>", "Only run one Playwright project (browser) from the config")
+    .option("--retries <n>", "Retry failing tests N times")
+    .option("--update-snapshots", "Update snapshots instead of comparing them", false)
+    .option("--list", "List tests without running them", false)
+    .option("--watch", "Re-run on every project change until Ctrl+C", false)
+    .option(
+        "--only-flaky",
+        "Run only the quarantined specs (quarantine.testFiles in raiken.config.json)",
+        false,
+    )
+    .option("--fix", "After a failure, run the AI repair flow (diff + confirm)", false)
     .action(async (file, options) => {
         try {
             const { testCommand } = await import("./commands/test");
             await testCommand(file, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken test failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken test failed",
+            });
+        }
+    });
+
+program
+    .command("repair [file]")
+    .description(
+        "AI-repair a failing spec: runs it, shows the fix as a diff, writes after confirmation",
+    )
+    .option("--apply", "Write the fix without prompting (scripts / CI)", false)
+    .option("--json", "Emit the repair outcome as JSON (implies no prompt)", false)
+    .option("--no-interpret", "Skip the diagnosis step and go straight to the fix")
+    .action(async (file, options) => {
+        try {
+            const { repairCommand } = await import("./commands/repair");
+            await repairCommand(file, options);
+        } catch (error) {
+            handleCliError(error, {
+                label: "raiken repair failed",
+            });
+        }
+    });
+
+program
+    .command("show-trace [path]")
+    .description("Open a Playwright trace.zip in the trace viewer (newest when omitted)")
+    .option("--json", "Emit the outcome as JSON", false)
+    .action(async (tracePath, options) => {
+        try {
+            const { showTraceCommand } = await import("./commands/show-trace");
+            await showTraceCommand(tracePath, options);
+        } catch (error) {
+            handleCliError(error, {
+                label: "raiken show-trace failed",
+            });
         }
     });
 
@@ -635,11 +676,9 @@ program
             const { reportCommand } = await import("./commands/report");
             await reportCommand(file, options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ raiken report failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(2);
+            handleCliError(error, {
+                label: "raiken report failed",
+            });
         }
     });
 
@@ -656,11 +695,9 @@ program
             const { syncCommand } = await import("./commands/sync");
             await syncCommand(options);
         } catch (error) {
-            console.error(
-                chalk.red("\n ✗ Sync failed:"),
-                error instanceof Error ? error.message : error,
-            );
-            process.exit(1);
+            handleCliError(error, {
+                label: "Sync failed",
+            });
         }
     });
 
@@ -691,7 +728,7 @@ async function runOneShotFromArgv(argv: string[]): Promise<void> {
             console.error(
                 chalk.red(`Invalid --timeout: "${timeoutRaw}". Must be a positive number of ms.`),
             );
-            process.exit(1);
+            cliExit(CLI_EXIT.USAGE);
         }
         timeoutMs = parsed;
     }
@@ -712,15 +749,67 @@ async function runOneShotFromArgv(argv: string[]): Promise<void> {
     });
 }
 
+/** Classic Levenshtein distance — drives the did-you-mean suggestion. */
+function levenshtein(a: string, b: string): number {
+    const dp: number[] = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+        let prev = dp[0];
+        dp[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+            const tmp = dp[j];
+            dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+            prev = tmp;
+        }
+    }
+    return dp[b.length];
+}
+
+function closestCommand(input: string, candidates: string[]): string | undefined {
+    let best: string | undefined;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+        const distance = levenshtein(input, candidate);
+        // A typed prefix is a strong signal ("tes" → "test") even past distance 1.
+        const score = candidate.startsWith(input) ? Math.min(distance, 1) : distance;
+        if (score < bestScore) {
+            bestScore = score;
+            best = candidate;
+        }
+    }
+    return bestScore <= 3 ? best : undefined;
+}
+
+const knownCommands = new Set(program.commands.flatMap((cmd) => [cmd.name(), ...cmd.aliases()]));
+
 const cliArgs = process.argv.slice(2);
 if (cliArgs[0] === "-p" || cliArgs[0] === "--print") {
     runOneShotFromArgv(cliArgs).catch((error) => {
-        console.error(
-            chalk.red("Raiken one-shot failed:"),
-            error instanceof Error ? error.message : error,
-        );
-        process.exit(1);
+        handleCliError(error, { label: "Raiken one-shot failed" });
     });
 } else {
-    program.parse(process.argv);
+    // Bare `raiken` launches the REPL; a leading positional must be a real
+    // command, otherwise commander reports a misleading "too many arguments".
+    const firstArg = cliArgs[0];
+    if (firstArg && !firstArg.startsWith("-") && !knownCommands.has(firstArg)) {
+        const suggestion = closestCommand(firstArg, [...knownCommands]);
+        exitUsage(
+            `Unknown command: "${firstArg}".` +
+                (suggestion ? `\nDid you mean \`raiken ${suggestion}\`?` : "") +
+                "\nRun `raiken --help` to see available commands.",
+        );
+    }
+    try {
+        program.parse(process.argv);
+    } catch (error) {
+        // exitOverride: commander has already printed its own message. Help
+        // (explicit --help or a bare command group like `raiken hooks`) and
+        // --version are success paths; every other commander error is an
+        // argv-shape failure → USAGE(2) per contract.
+        if (error instanceof CommanderError) {
+            const isHelp = error.code.startsWith("commander.help");
+            if (!isHelp && error.exitCode !== 0) cliExit(CLI_EXIT.USAGE);
+        } else {
+            throw error;
+        }
+    }
 }

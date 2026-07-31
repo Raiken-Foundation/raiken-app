@@ -58,6 +58,11 @@ export interface ProjectInfo {
      * where Playwright itself actually looks.
      */
     existingPlaywrightConfig: { testDir?: string; baseURL?: string } | null;
+    /**
+     * Dev-server port chosen by the user during `raiken init` when no port
+     * could be detected from config files. Undefined = detect/default as usual.
+     */
+    devServerPort?: number;
 }
 
 // ============================================================================

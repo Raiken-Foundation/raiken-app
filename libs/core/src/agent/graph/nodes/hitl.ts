@@ -1,3 +1,4 @@
+import { isFailureStatus } from "../../../testing/run-outcome";
 import type { TestRunResult } from "../../../testing/runner";
 import type { GraphStateType } from "../state";
 import { resolveAutonomy } from "./repair";
@@ -106,7 +107,9 @@ export const createHitlRunNode = (deps: AgentNodeDeps) => async (state: GraphSta
     // working blind.
     const results = Array.isArray(runResult.data) ? (runResult.data as TestRunResult[]) : null;
     if (results) {
-        const stillFailing = results.some((r) => r.status !== "passed");
+        // A deliberately skipped test is not something repair can fix, so it
+        // must not keep the loop spinning until maxRetries.
+        const stillFailing = results.some((r) => isFailureStatus(r.status));
         if (stillFailing && isRepairVerification) {
             const autonomy = resolveAutonomy(deps);
             const exhausted = state.repairAttempts >= autonomy.maxRetries;

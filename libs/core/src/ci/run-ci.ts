@@ -10,9 +10,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type AffectedTestEvidence, GraphQueryService } from "../analysis/graph-query";
+import {
+    type AffectedTestEvidence,
+    GraphQueryService,
+    isLikelyTestPath,
+} from "../analysis/graph-query";
 import { parseCiRunReport } from "../testing/report-parser";
 import { writeTestRunReport } from "../testing/report-writer";
+import { summarizeTestRunCounts } from "../testing/run-outcome";
 import { TestRunner, type TestRunResult } from "../testing/runner";
 import {
     filterSourceFiles,
@@ -24,6 +29,7 @@ import {
 import { renderJUnitXml } from "./junit-reporter";
 import type {
     CiAffectedTest,
+    CiChangedFile,
     CiEvent,
     CiImpactReport,
     CiOptions,
@@ -105,6 +111,14 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
             continue;
         }
         affectedTests.push({ testFile, confidence, sourceFiles, reasons });
+    }
+
+    // A changed test file is affected BY DEFINITION — the graph only maps
+    // source → tests, so editing the suite itself previously produced
+    // `affectedTests: []` and CI ran nothing exactly when a test changed.
+    for (const entry of directlyChangedTestEntries(changedFiles)) {
+        if (byTestFile.has(entry.testFile)) continue;
+        affectedTests.push(entry);
     }
 
     // Highest-confidence first, then alphabetical for stable ordering.
@@ -192,7 +206,7 @@ async function runAffectedTests(
         finishedAt: new Date(finished).toISOString(),
         durationMs: finished - started,
         tests: allResults,
-        summary: summariseResults(allResults),
+        summary: summarizeTestRunCounts(allResults),
     };
 }
 
@@ -207,19 +221,6 @@ function emptyRunReport(): CiRunReport {
         tests: [],
         summary: { total: 0, passed: 0, failed: 0, timedOut: 0, errored: 0 },
     };
-}
-
-function summariseResults(results: TestRunResult[]): CiRunReport["summary"] {
-    const summary = { total: results.length, passed: 0, failed: 0, timedOut: 0, errored: 0 };
-    for (const r of results) {
-        if (r.status === "passed") summary.passed++;
-        // A flaky result is a failure for CI purposes: it did not pass every
-        // attempt, so the suite cannot be called green.
-        else if (r.status === "failed" || r.status === "flaky") summary.failed++;
-        else if (r.status === "timeout") summary.timedOut++;
-        else summary.errored++;
-    }
-    return summary;
 }
 
 async function writeReports(
@@ -282,3 +283,35 @@ async function writeReports(
 }
 
 export { GitError };
+
+/**
+ * Changed files that are themselves test files, expressed as affected-test
+ * entries with maximum confidence. Deletions drop out (nothing to run);
+ * renames count under their new path. Exported (pure) so the contract — "a
+ * changed spec must appear in affectedTests" — is unit-testable without a
+ * git repo or a code graph.
+ */
+export function directlyChangedTestEntries(changedFiles: CiChangedFile[]): CiAffectedTest[] {
+    const entries: CiAffectedTest[] = [];
+    const seen = new Set<string>();
+    for (const file of changedFiles) {
+        if (file.status === "removed") continue;
+        if (!isLikelyTestPath(file.path)) continue;
+        if (seen.has(file.path)) continue;
+        seen.add(file.path);
+        entries.push({
+            testFile: file.path,
+            confidence: 1.0,
+            sourceFiles: [file.path],
+            reasons: [
+                {
+                    reason: "changed_test",
+                    provenance: "static_ast",
+                    confidence: 1.0,
+                    sourceFile: file.path,
+                },
+            ],
+        });
+    }
+    return entries;
+}

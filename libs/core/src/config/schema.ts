@@ -136,6 +136,16 @@ export const indexingConfigSchema = z.object({
     fullScan: z.boolean().optional(),
 });
 
+export const quarantineConfigSchema = z.object({
+    /**
+     * Spec files temporarily excluded from `raiken test` runs (flaky
+     * quarantine). Entries are project-relative paths (`e2e/login.spec.ts`);
+     * a bare filename matches any spec with that name. Run them explicitly
+     * with `raiken test --only-flaky`.
+     */
+    testFiles: z.array(z.string()).optional(),
+});
+
 export const integrationsConfigSchema = z.object({
     /** Ticket provider: 'github', 'jira', or 'linear' (default: 'github') */
     provider: z.enum(["github", "jira", "linear"]).optional(),
@@ -195,6 +205,8 @@ export const raikenConfigSchema = z.object({
     indexing: indexingConfigSchema.optional(),
     /** Ticket system integration settings */
     integrations: integrationsConfigSchema.optional(),
+    /** Flaky-test quarantine settings */
+    quarantine: quarantineConfigSchema.optional(),
 });
 
 export type AIConfig = z.infer<typeof aiConfigSchema>;
@@ -205,6 +217,7 @@ export type AutonomyConfig = z.infer<typeof autonomyConfigSchema>;
 export type DiscoveryConfig = z.infer<typeof discoveryConfigSchema>;
 export type IndexingConfig = z.infer<typeof indexingConfigSchema>;
 export type IntegrationsConfig = z.infer<typeof integrationsConfigSchema>;
+export type QuarantineConfig = z.infer<typeof quarantineConfigSchema>;
 export type RaikenConfig = z.infer<typeof raikenConfigSchema>;
 
 export const defaultConfig = {
@@ -255,6 +268,9 @@ export const defaultConfig = {
     integrations: {
         provider: "github" as const,
     },
+    quarantine: {
+        testFiles: [] as string[],
+    },
 } satisfies Required<RaikenConfig>;
 
 export function validateConfig(config: unknown): RaikenConfig {
@@ -274,6 +290,7 @@ export type ResolvedRaikenConfig = {
     discovery: z.infer<typeof discoveryConfigSchema>;
     indexing: z.infer<typeof indexingConfigSchema>;
     integrations: z.infer<typeof integrationsConfigSchema>;
+    quarantine: z.infer<typeof quarantineConfigSchema>;
 };
 
 export function mergeConfig(userConfig: Partial<RaikenConfig>): ResolvedRaikenConfig {
@@ -290,6 +307,7 @@ export function mergeConfig(userConfig: Partial<RaikenConfig>): ResolvedRaikenCo
         discovery: { ...defaultConfig.discovery, ...userConfig.discovery },
         indexing: { ...defaultConfig.indexing, ...userConfig.indexing },
         integrations: { ...defaultConfig.integrations, ...userConfig.integrations },
+        quarantine: { ...defaultConfig.quarantine, ...userConfig.quarantine },
     };
 }
 

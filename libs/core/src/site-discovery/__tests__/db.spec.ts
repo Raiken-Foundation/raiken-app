@@ -174,6 +174,27 @@ describe("SiteKnowledgeDB", () => {
             expect(siteDb.getVerifiedLinks()).toHaveLength(1);
             expect(siteDb.getLinksFrom("http://localhost:3000")).toHaveLength(1);
         });
+
+        it("saveLink reports whether a new edge was actually inserted", () => {
+            const link = {
+                projectPath: testDir,
+                fromUrl: "http://localhost:3000",
+                toUrl: "http://localhost:3000/about",
+                selector: "a[href='/about']",
+                linkText: "About",
+                elementRole: "link",
+                status: "pending" as const,
+                errorMessage: null,
+                discoveredAt: Date.now(),
+                verifiedAt: null,
+            };
+
+            expect(siteDb.saveLink(link)).toBe(1);
+            // Same (from, to, selector) — INSERT OR IGNORE swallows it, and
+            // the crawler's links-found counter must not count it again.
+            expect(siteDb.saveLink(link)).toBe(0);
+            expect(siteDb.getLinksFrom("http://localhost:3000")).toHaveLength(1);
+        });
     });
 
     describe("Discovery Blocker Operations", () => {
@@ -346,6 +367,115 @@ describe("SiteKnowledgeDB", () => {
             });
             expect(changed).toBe(3);
             expect(siteDb.getUnresolvedBlockers()).toHaveLength(0);
+        });
+
+        // Regression: the same /login + detector was recorded 3x (2x in a
+        // single run) — the display deduped "1 unresolved", storage didn't.
+        it("re-detecting the same blocker updates the row in place instead of duplicating", () => {
+            const base = {
+                projectPath: testDir,
+                url: "http://localhost:3000/login",
+                category: "auth_required" as const,
+                severity: "pause" as const,
+                detectorId: "auth:url_pattern",
+                detectedElements: null,
+                evidenceJson: null,
+                screenshotPath: null,
+                resolution: null,
+                resolvedVia: null,
+                resolvedAt: null,
+                storageStatePath: null,
+            };
+
+            const first = siteDb.saveBlocker({ ...base, discoveredAt: 1000 });
+            const second = siteDb.saveBlocker({ ...base, discoveredAt: 2000 });
+
+            expect(second).toBe(first);
+            const all = siteDb.getAllBlockers();
+            expect(all).toHaveLength(1);
+            expect(all[0].discoveredAt).toBe(2000);
+        });
+
+        it("re-detection after resolution re-opens the same row", () => {
+            const base = {
+                projectPath: testDir,
+                url: "http://localhost:3000/login",
+                category: "auth_required" as const,
+                severity: "pause" as const,
+                detectorId: "auth:login_form",
+                detectedElements: null,
+                evidenceJson: null,
+                screenshotPath: null,
+                resolution: null,
+                resolvedVia: null,
+                resolvedAt: null,
+                storageStatePath: null,
+                discoveredAt: Date.now(),
+            };
+            const id = siteDb.saveBlocker(base);
+            siteDb.markBlockerResolved(id, { resolution: "provide_state", resolvedVia: "test" });
+            expect(siteDb.getUnresolvedBlockers()).toHaveLength(0);
+
+            // Pause -> resolve -> resume -> detector fires again: the
+            // condition is present again, so the single row re-opens.
+            const reopened = siteDb.saveBlocker(base);
+
+            expect(reopened).toBe(id);
+            const all = siteDb.getAllBlockers();
+            expect(all).toHaveLength(1);
+            expect(all[0].resolvedAt).toBeNull();
+            expect(all[0].resolution).toBeNull();
+            expect(siteDb.getUnresolvedBlockers()).toHaveLength(1);
+        });
+
+        it("collapses pre-existing duplicate rows on the next save", () => {
+            // Seed two legacy duplicates directly — the pre-upsert writer
+            // allowed them to coexist.
+            const raw = db.getRawDatabase();
+            const insert = raw.prepare(
+                `INSERT INTO discovery_blockers (
+                    project_path, url, category, severity, detector_id,
+                    detected_elements, evidence_json, screenshot_path,
+                    resolution, resolved_via, resolved_at, storage_state_path,
+                    discovered_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            );
+            for (const discoveredAt of [1000, 2000]) {
+                insert.run(
+                    testDir,
+                    "http://localhost:3000/login",
+                    "auth_required",
+                    "pause",
+                    "auth:url_pattern",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    discoveredAt,
+                );
+            }
+            expect(siteDb.getAllBlockers()).toHaveLength(2);
+
+            siteDb.saveBlocker({
+                projectPath: testDir,
+                url: "http://localhost:3000/login",
+                category: "auth_required",
+                severity: "pause",
+                detectorId: "auth:url_pattern",
+                detectedElements: null,
+                evidenceJson: null,
+                screenshotPath: null,
+                resolution: null,
+                resolvedVia: null,
+                resolvedAt: null,
+                storageStatePath: null,
+                discoveredAt: 3000,
+            });
+
+            expect(siteDb.getAllBlockers()).toHaveLength(1);
         });
     });
 

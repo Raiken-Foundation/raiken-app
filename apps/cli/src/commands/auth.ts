@@ -9,7 +9,7 @@
  *
  * Manual fallbacks:
  *   - Press Enter at any time to save the current state immediately.
- *   - Close the browser to abort cleanly.
+ *   - Close the browser to abort cleanly; any existing state is left as-is.
  */
 
 import * as fs from "node:fs";
@@ -17,14 +17,17 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import {
     acquireProjectOperation,
-    loadAuthConfig,
-    looksLikeLoginUrl,
+    HandoffBlockerResolutionError,
+    type InteractiveAuthHandoffReason,
+    resolveHandoffBlockers,
     runCustomLoginScript,
+    runInteractiveAuthHandoff,
     writeValidatedAuthState,
 } from "@raiken/core";
-import { resolveAuthStorageStateDestination } from "@raiken/shared";
+import { loadAuthConfig, resolveAuthStorageStateDestination } from "@raiken/shared/server";
 import chalk from "chalk";
 import ora from "ora";
+import { CLI_EXIT, exitUsage, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../repl/exit";
 
 export interface ManualSaveWatcher {
@@ -50,12 +53,6 @@ export interface AuthOptions {
     createManualSaveWatcher?: () => ManualSaveWatcher;
 }
 
-interface StorageBaseline {
-    cookieKeys: Set<string>;
-    originKeys: Set<string>;
-    initialUrl: string;
-}
-
 interface PlaywrightStorageStateShape {
     cookies: Array<{
         name: string;
@@ -72,11 +69,6 @@ interface PlaywrightStorageStateShape {
         localStorage: Array<{ name: string; value: string }>;
     }>;
 }
-
-const POLL_INTERVAL_MS = 1500;
-// Number of consecutive identical polls (after a change is detected) we wait
-// for before saving — this avoids snapshotting in the middle of a redirect.
-const STABILITY_POLLS = 2;
 
 export function shouldRunCustomLogin(
     options: Pick<AuthOptions, "manual" | "script">,
@@ -121,7 +113,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
                 ? undefined
                 : Number.parseInt(String(options.timeout), 10);
         if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
-            throw new Error("--timeout must be a positive number of milliseconds.");
+            exitUsage("Invalid --timeout. Must be a positive number of milliseconds.");
         }
         const scriptSpinner = ora({
             text: "Running custom login script...",
@@ -162,157 +154,96 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 
     const spinner = ora({ text: "Launching browser...", spinner: "dots" }).start();
 
-    let chromium: typeof import("playwright").chromium;
-    try {
-        const pw = require("playwright");
-        chromium = pw.chromium;
-    } catch {
-        try {
-            const pw = require("playwright-core");
-            chromium = pw.chromium;
-        } catch {
-            spinner.fail(chalk.red("Playwright is not installed. Run: npx playwright install"));
-            cliExit(1);
-        }
-    }
-
     const operation = await acquireProjectOperation(projectPath, "browser");
     try {
-        const browser = await chromium.launch({
-            headless: false,
-            args: ["--start-maximized"],
-        });
+        let browserLaunched = false;
+        let watchSpinner: ReturnType<typeof ora> | null = null;
 
-        const context = await browser.newContext({ viewport: null });
-        const page = await context.newPage();
-
-        spinner.succeed(chalk.green("Browser launched"));
-
-        if (url !== "about:blank") {
-            console.log(chalk.dim(`Navigating to ${url}…\n`));
-            try {
-                await page.goto(url, { waitUntil: "domcontentloaded" });
-            } catch (err) {
-                console.log(
-                    chalk.yellow(
-                        `⚠ Navigation reported an error (${(err as Error).message}). Continuing anyway.`,
-                    ),
-                );
-            }
-        }
-
-        const baseline = await captureBaseline(context, page);
-
-        console.log(chalk.yellow("Log in to your application in the browser window."));
-        console.log(
-            chalk.dim("   Raiken will detect the successful login and save automatically."),
-        );
-        console.log(chalk.dim("   Press Enter to save manually, or close the browser to abort.\n"));
-
-        const watchSpinner = ora({
-            text: "Waiting for login…",
-            spinner: "dots",
-        }).start();
-
-        let aborted = false;
-        type SavedReason = "auto" | "manual" | "browser-closed";
-        let savedReason: SavedReason = "auto" as SavedReason;
-
-        // Manual override: pressing Enter resolves the watcher immediately.
-        // We hold onto `enterWatcher.cancel` so we can release the readline
-        // (and unref stdin) when the auto-detector or browser-closed handler
-        // wins the race — otherwise the CLI hangs after success because
-        // readline keeps stdin referenced.
-        const enterWatcher = options.createManualSaveWatcher?.() ?? waitForEnterKey();
-        const enterPromise = enterWatcher.promise.then(() => {
-            savedReason = "manual";
-        });
-
-        // Browser close: if the user dismisses the window, we save what we have.
-        const browserClosedPromise = new Promise<void>((resolve) => {
-            browser.once("disconnected", () => {
-                savedReason = "browser-closed";
-                resolve();
-            });
-        });
-
-        const autoDetectPromise = (async () => {
-            let stableHits = 0;
-            let lastSnapshot: string | null = null;
-
-            while (!aborted) {
-                await delay(POLL_INTERVAL_MS);
-                if (aborted) return;
-
-                let storageState: Awaited<ReturnType<typeof context.storageState>>;
-                try {
-                    storageState = await context.storageState();
-                } catch {
-                    // Browser likely closing — stop polling. Browser-close handler will save.
-                    return;
-                }
-
-                const currentUrl = safePageUrl(page);
-                const detected = detectLogin(baseline, storageState, currentUrl);
-                const snapshot = snapshotKey(storageState, currentUrl);
-
-                if (detected) {
-                    if (lastSnapshot === snapshot) {
-                        stableHits += 1;
-                        watchSpinner.text = `Login detected — confirming (${stableHits}/${STABILITY_POLLS})…`;
-                    } else {
-                        stableHits = 1;
-                        watchSpinner.text = "Login detected — confirming…";
-                    }
-                    lastSnapshot = snapshot;
-                    if (stableHits >= STABILITY_POLLS) {
-                        savedReason = "auto";
-                        return;
-                    }
-                } else {
-                    stableHits = 0;
-                    lastSnapshot = snapshot;
-                    watchSpinner.text = `Waiting for login… (${storageState.cookies.length} cookies, ${storageState.origins.length} origins)`;
-                }
-            }
-        })();
-
-        await Promise.race([autoDetectPromise, enterPromise, browserClosedPromise]);
-        aborted = true;
-        watchSpinner.stop();
-        // Release the readline / stdin reference. Idempotent — safe even if
-        // the user pressed Enter (manual save), in which case the readline is
-        // already closed and this is a no-op.
-        enterWatcher.cancel();
-
-        // Snapshot whatever state is currently in the context (works even if the
-        // browser is closing — we just may get an empty state in that case).
-        let storageState: Awaited<ReturnType<typeof context.storageState>> | null = null;
+        let handoffResult: Awaited<ReturnType<typeof runInteractiveAuthHandoff>>;
         try {
-            storageState = await context.storageState();
-        } catch {
-            storageState = null;
-        }
-
-        if (!storageState) {
-            console.log(chalk.red("\n✗ Could not read browser session state. Auth aborted."));
-            try {
-                await browser.close();
-            } catch {
-                // already closed
+            handoffResult = await runInteractiveAuthHandoff({
+                projectPath,
+                url,
+                storageStatePath: authStatePath,
+                headless: false,
+                category: "auth_required",
+                createManualCompletionWatcher: options.createManualSaveWatcher ?? waitForEnterKey,
+                blockerResolution: { kind: "auth_command" },
+                onBrowserReady: () => {
+                    browserLaunched = true;
+                    spinner.succeed(chalk.green("Browser launched"));
+                    if (url !== "about:blank") {
+                        console.log(chalk.dim(`Navigating to ${url}…\n`));
+                    }
+                    console.log(chalk.yellow("Log in to your application in the browser window."));
+                    console.log(
+                        chalk.dim(
+                            "   Raiken will detect the successful login and save automatically.",
+                        ),
+                    );
+                    console.log(
+                        chalk.dim(
+                            "   Press Enter to save manually, or close the browser to abort.\n",
+                        ),
+                    );
+                    watchSpinner = ora({
+                        text: "Waiting for login…",
+                        spinner: "dots",
+                    }).start();
+                },
+                onProgress: (snapshot) => {
+                    if (!watchSpinner) return;
+                    if (snapshot.phase === "confirming") {
+                        watchSpinner.text = `Login detected — confirming (${snapshot.stableHits}/${snapshot.stabilityPolls})…`;
+                    } else if (snapshot.phase === "waiting") {
+                        watchSpinner.text = `Waiting for login… (${snapshot.cookies} cookies, ${snapshot.origins} origins)`;
+                    }
+                },
+            });
+        } catch (error) {
+            const message = safeCliErrorMessage(error);
+            if (message.includes("Playwright is not installed")) {
+                spinner.fail(chalk.red("Playwright is not installed. Run: npx playwright install"));
+                cliExit(CLI_EXIT.RUNTIME_FAILURE);
             }
-            cliExit(1);
+            if (!browserLaunched) {
+                spinner.fail(chalk.red("Failed to launch browser"));
+            }
+            throw error;
+        } finally {
+            watchSpinner?.stop();
         }
 
-        writeValidatedAuthState(authStatePath, storageState);
+        const {
+            storageState,
+            reason: savedReason,
+            persisted,
+            blockersResolved: resolvedBlockers,
+            blockerResolutionWarning,
+            errorMessage,
+        } = handoffResult;
 
-        // Mark outstanding *auth* blockers resolved so the dashboard's auto-
-        // resume logic kicks in on the next poll. Captcha / 5xx / manual-pause
-        // blockers are deliberately left alone — saved auth state doesn't
-        // unblock them, and pre-fix this loop falsely cleared them with
-        // `resolvedVia: "auth_command"`, causing the dashboard to auto-resume
-        // straight back into the same captcha and confusing the timeline.
-        const resolvedBlockers = await markAuthBlockersResolved(projectPath, authStatePath);
+        if (savedReason === "error" || !storageState) {
+            console.log(
+                chalk.red(
+                    `\n✗ ${errorMessage ?? "Could not read browser session state. Auth aborted."}`,
+                ),
+            );
+            cliExit(CLI_EXIT.RUNTIME_FAILURE);
+        }
+
+        // The handoff only writes session state once login is confirmed, so a
+        // closed browser or an expired timer leaves any previously saved state
+        // untouched rather than replacing it with a half-finished session.
+        if (!persisted) {
+            console.log();
+            console.log(chalk.yellow(`✗ ${describeUnsavedHandoff(savedReason)}`));
+            console.log(chalk.dim(`   Existing auth state at ${authStatePath} is unchanged.`));
+            console.log(
+                chalk.dim("   Re-run `raiken auth` and press Enter once you are logged in.\n"),
+            );
+            cliExit(savedReason === "timeout" ? CLI_EXIT.TIMEOUT : CLI_EXIT.CANCELLED);
+        }
 
         const cookieCount = storageState.cookies.length;
         const originCount = storageState.origins.length;
@@ -320,8 +251,6 @@ export async function authCommand(options: AuthOptions): Promise<void> {
         console.log();
         if (savedReason === "manual") {
             console.log(chalk.green("✓ Saved (manual)"));
-        } else if (savedReason === "browser-closed") {
-            console.log(chalk.green("✓ Saved (browser closed)"));
         } else {
             console.log(chalk.green("✓ Login detected — saved automatically"));
         }
@@ -335,10 +264,12 @@ export async function authCommand(options: AuthOptions): Promise<void> {
                 ),
             );
         }
+        if (blockerResolutionWarning) {
+            console.log(chalk.yellow(`⚠ ${blockerResolutionWarning}`));
+        }
         console.log();
 
-        // Warn if we saved an empty state — almost always a sign that login wasn't
-        // actually completed before the browser closed.
+        // A manual save can still capture nothing if Enter was pressed too early.
         if (cookieCount === 0 && originCount === 0) {
             console.log(
                 chalk.yellow(
@@ -348,16 +279,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             console.log(
                 chalk.dim("   Re-run `raiken auth` and complete the login before exiting.\n"),
             );
-        }
-
-        try {
-            await browser.close();
-        } catch {
-            // already closed
-        }
-
-        if (cookieCount === 0 && originCount === 0) {
-            cliExit(1);
+            cliExit(CLI_EXIT.RUNTIME_FAILURE);
         }
     } finally {
         await operation.release();
@@ -368,113 +290,20 @@ export async function authCommand(options: AuthOptions): Promise<void> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function captureBaseline(
-    context: import("playwright").BrowserContext,
-    page: import("playwright").Page,
-): Promise<StorageBaseline> {
-    let state: Awaited<ReturnType<typeof context.storageState>>;
-    try {
-        state = await context.storageState();
-    } catch {
-        return {
-            cookieKeys: new Set(),
-            originKeys: new Set(),
-            initialUrl: safePageUrl(page),
-        };
-    }
-
-    return {
-        cookieKeys: new Set(state.cookies.map(cookieKey)),
-        originKeys: new Set(state.origins.flatMap(originEntries)),
-        initialUrl: safePageUrl(page),
-    };
-}
-
-function detectLogin(
-    baseline: StorageBaseline,
-    state: Awaited<ReturnType<import("playwright").BrowserContext["storageState"]>>,
-    currentUrl: string,
-): boolean {
-    const newCookie = state.cookies.some((c) => !baseline.cookieKeys.has(cookieKey(c)));
-    const newOrigin = state.origins
-        .flatMap(originEntries)
-        .some((entry) => !baseline.originKeys.has(entry));
-
-    const initialIsLogin = isLoginOrPreNavigation(baseline.initialUrl);
-
-    // Best signal: a new cookie or storage entry shows up. URL change alone is
-    // a weaker signal (could be intra-login redirects), so we require a
-    // cred-bearing artifact OR an unambiguous redirect off the login URL.
-    if ((newCookie || newOrigin) && (!initialIsLogin || !isLoginOrPreNavigation(currentUrl))) {
-        return true;
-    }
-
-    if (initialIsLogin && currentUrl && !isLoginOrPreNavigation(currentUrl)) {
-        // Redirected away from the login page entirely — treat as logged in.
-        return true;
-    }
-
-    return false;
-}
-
-function snapshotKey(
-    state: Awaited<ReturnType<import("playwright").BrowserContext["storageState"]>>,
-    currentUrl: string,
-): string {
-    const cookies = state.cookies.map(cookieKey).sort().join("|");
-    const origins = state.origins.flatMap(originEntries).sort().join("|");
-    return `${currentUrl}::${cookies}::${origins}`;
-}
-
-function cookieKey(c: { name: string; domain: string; path: string }): string {
-    return `${c.domain}\u0000${c.path}\u0000${c.name}`;
-}
-
-function originEntries(o: { origin: string; localStorage?: Array<{ name: string }> }): string[] {
-    return (o.localStorage ?? []).map((item) => `${o.origin}\u0000${item.name}`);
-}
-
-/**
- * Treat the empty/about:blank pre-navigation state as "looks like login"
- * so the watcher waits for *any* meaningful navigation before considering
- * the session changed. The shared {@link looksLikeLoginUrl} predicate
- * (`@raiken/core`) handles every real URL.
- */
-function isLoginOrPreNavigation(url: string): boolean {
-    if (!url || url === "about:blank") return true;
-    return looksLikeLoginUrl(url);
-}
-
-function safePageUrl(page: import("playwright").Page): string {
-    try {
-        return page.url();
-    } catch {
-        return "";
-    }
-}
-
-function delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+export function describeUnsavedHandoff(reason: InteractiveAuthHandoffReason): string {
+    if (reason === "timeout") return "Timed out before login completed — nothing was saved.";
+    if (reason === "abort") return "Auth cancelled — nothing was saved.";
+    if (reason === "browser-closed")
+        return "Browser closed before login completed — nothing was saved.";
+    return "Login was not confirmed — nothing was saved.";
 }
 
 /**
  * Watcher that resolves when the user presses Enter, with an explicit
  * `cancel()` to release the underlying readline interface when another
  * race winner (auto-detect or browser-closed) fires first.
- *
- * The pre-fix version created a readline interface in a fire-and-forget
- * Promise. If the auto-detector or browser-closed handler resolved
- * `Promise.race` first, the readline kept stdin in line-input mode
- * forever — the CLI process would print "✅ Login detected" and hang
- * because Node never exits while stdin is referenced. Users hit this
- * every successful run and either Ctrl-C'd or assumed the command was
- * still working.
- *
- * Returning an object with a `cancel` makes the cleanup explicit at the
- * call site (next to the spinner stop) instead of relying on listener
- * tear-down side effects.
  */
-function waitForEnterKey(): { promise: Promise<void>; cancel: () => void } {
+function waitForEnterKey(): ManualSaveWatcher {
     let rl: readline.Interface | null = null;
     const promise = new Promise<void>((resolve) => {
         rl = readline.createInterface({
@@ -487,8 +316,6 @@ function waitForEnterKey(): { promise: Promise<void>; cancel: () => void } {
             } catch {
                 // already closed
             }
-            // Unref stdin so an open readline-less stream doesn't pin the
-            // event loop on macOS/Linux when the CLI exits.
             try {
                 process.stdin.unref?.();
             } catch {
@@ -519,7 +346,7 @@ async function importFromStateFile(src: string, dest: string, projectPath: strin
     const resolved = path.isAbsolute(src) ? src : path.resolve(projectPath, src);
     if (!fs.existsSync(resolved)) {
         console.error(chalk.red(`\n✗ State file not found: ${resolved}`));
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
     }
     let parsed: PlaywrightStorageStateShape;
     try {
@@ -527,7 +354,7 @@ async function importFromStateFile(src: string, dest: string, projectPath: strin
         parsed = JSON.parse(raw) as PlaywrightStorageStateShape;
     } catch (err) {
         console.error(chalk.red(`\n✗ Could not parse ${resolved}: ${(err as Error).message}`));
-        cliExit(1);
+        cliExit(CLI_EXIT.RUNTIME_FAILURE);
     }
     if (!Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
         console.error(
@@ -535,7 +362,7 @@ async function importFromStateFile(src: string, dest: string, projectPath: strin
                 "\n✗ File doesn't look like a Playwright storage state (missing cookies/origins arrays).",
             ),
         );
-        cliExit(1);
+        cliExit(CLI_EXIT.RUNTIME_FAILURE);
     }
 
     writeValidatedAuthState(dest, parsed);
@@ -556,22 +383,42 @@ async function importFromFlags(
     if (!options.domain) {
         console.error(
             chalk.red(
-                "\n✗ --domain is required when using --cookie or --storage (e.g. --domain app.example.com).",
+                "\n✗ --domain is required when using --cookie or --storage (e.g. --domain app.example.com or --domain http://127.0.0.1:8123).",
             ),
         );
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
     }
-    const domain = options.domain
-        .replace(/^https?:\/\//, "")
-        .replace(/\/.*$/, "")
-        .trim();
-    if (!domain) {
-        console.error(chalk.red("\n✗ --domain is empty."));
-        cliExit(1);
+    // Accept bare hosts ("app.example.com"), host:port ("127.0.0.1:8123"),
+    // or full URLs ("http://staging.internal:8080/"). A schemeless value is
+    // assumed https; an explicit scheme is honoured — it drives both the
+    // storage origin and the cookie `secure` flag, so plain-http LAN/staging
+    // hosts no longer get secure-only cookies that Chromium silently drops.
+    const rawDomain = options.domain.trim().replace(/^\.+/, "");
+    const parsedDomain = (() => {
+        const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawDomain)
+            ? rawDomain
+            : `https://${rawDomain}`;
+        try {
+            return new URL(withScheme);
+        } catch {
+            return null;
+        }
+    })();
+    if (!parsedDomain || !parsedDomain.hostname) {
+        console.error(chalk.red(`\n✗ --domain "${options.domain}" is not a valid host or URL.`));
+        cliExit(CLI_EXIT.USAGE);
     }
-    // Default the cookie domain to ".host" so subdomain variations match.
-    const cookieDomain = domain.startsWith(".") ? domain : `.${domain}`;
-    const origin = `https://${domain}`;
+    const scheme = parsedDomain.protocol === "http:" ? "http" : "https";
+    const host = parsedDomain.hostname.replace(/^\[|\]$/g, "");
+    const domain = parsedDomain.host;
+    // RFC 6265: cookie domains never carry a port, and the leading-dot
+    // "domain cookie" form only makes sense for registrable names — IP
+    // literals and single-label hosts (localhost, staging) must be host-only.
+    const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
+    const isSingleLabel = !host.includes(".");
+    const cookieDomain = isIpLiteral || isSingleLabel ? host : `.${host}`;
+    const origin = `${scheme}://${parsedDomain.host}`;
+    const secureCookies = scheme === "https";
 
     const cookies: PlaywrightStorageStateShape["cookies"] = [];
     if (options.cookie) {
@@ -590,7 +437,7 @@ async function importFromFlags(
                 path: "/",
                 expires: -1,
                 httpOnly: false,
-                secure: true,
+                secure: secureCookies,
                 sameSite: "Lax",
             });
         }
@@ -611,7 +458,7 @@ async function importFromFlags(
 
     if (cookies.length === 0 && localStorage.length === 0) {
         console.error(chalk.red("\n✗ No cookies or storage entries to import."));
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
     }
 
     const state: PlaywrightStorageStateShape = {
@@ -629,44 +476,17 @@ async function importFromFlags(
     console.log(chalk.dim(`   Storage origins: ${state.origins.length}\n`));
 }
 
-/**
- * Mark every unresolved `auth_required` blocker as `provide_state` against
- * the freshly-written storage state. Returns the number of blockers
- * touched so the caller can show a "N blockers cleared" hint.
- *
- * Crucially scoped to `auth_required` only:
- *  - A captcha pause isn't unblocked by saved cookies; the user has to
- *    solve the challenge in a browser.
- *  - A 5xx error_page pause isn't unblocked by auth state; the server
- *    is broken.
- *  - A manual user pause is — by definition — the user driving the
- *    crawl. Auto-resolving it would steal control from them.
- *
- * Pre-fix this function (and its inline twin in `authCommand`) looped
- * over EVERY unresolved blocker, leaving the timeline showing
- * "Resolved: provide_state via auth_command" on rows it had no business
- * touching, and triggering false-positive auto-resume cycles.
- */
 async function markAuthBlockersResolved(projectPath: string, statePath: string): Promise<number> {
     try {
-        const { CodeGraphDB, SiteKnowledgeDB } = await import("@raiken/core");
-        const db = new CodeGraphDB(projectPath);
-        try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
-            const blockers = siteDb.getUnresolvedBlockers();
-            let touched = 0;
-            for (const blocker of blockers) {
-                if (blocker.id && blocker.category === "auth_required") {
-                    siteDb.markBlockerResolved(blocker.id, statePath);
-                    touched += 1;
-                }
-            }
-            return touched;
-        } finally {
-            db.close();
+        return resolveHandoffBlockers(projectPath, {
+            storageStatePath: statePath,
+            strategy: { kind: "auth_command" },
+        });
+    } catch (error) {
+        if (error instanceof HandoffBlockerResolutionError) {
+            console.log(chalk.yellow(`⚠ ${error.message}`));
+            return error.blockersResolved;
         }
-    } catch {
-        // Non-fatal — the saved storage state is the important artifact.
-        return 0;
+        throw error;
     }
 }

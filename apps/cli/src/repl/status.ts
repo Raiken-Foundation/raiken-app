@@ -1,5 +1,9 @@
-import { BrowserSession, getProvider, resolveAIConfig } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import {
+    BrowserSession,
+    createProjectApplication,
+    getProvider,
+    resolveAIConfig,
+} from "@raiken/core";
 import { accent, dim } from "../agent-stream";
 import { formatDiscoverChip, getBackgroundDiscoverStatus } from "./background-discover";
 import { type PermissionMode, permissionModeLabel } from "./permissions";
@@ -43,8 +47,8 @@ export async function gatherStatusSnapshot(
 
     let pagesKnown: number | null = null;
     try {
-        const caller = appRouter.createCaller({ projectPath });
-        const stats = await caller.getDiscoveryStats({});
+        const app = createProjectApplication(projectPath);
+        const stats = app.discovery.getStats();
         pagesKnown = typeof stats?.pagesCount === "number" ? stats.pagesCount : null;
     } catch {
         /* discovery DB unavailable */

@@ -444,7 +444,18 @@ export class CodeGraph {
 
     private async getIgnoreMatcher(): Promise<Ignore> {
         const matcher = ignore();
-        const criticalExcludes = [".git", "node_modules", ".raiken"];
+        // Test/report artifact dirs are never source code: their .gitignore
+        // exceptions (e.g. `!.gitignore` inside test-results/) otherwise get
+        // indexed as project files and show up as top-level "modules".
+        const criticalExcludes = [
+            ".git",
+            "node_modules",
+            ".raiken",
+            "test-results",
+            "test-reports",
+            "playwright-report",
+            "blob-report",
+        ];
         matcher.add(criticalExcludes.map((name) => `${name}/`));
         matcher.add(criticalExcludes);
 

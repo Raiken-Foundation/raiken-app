@@ -5,6 +5,7 @@ import {
     createGatherContextNode,
     createGenerateTestsNode,
 } from "./nodes/context";
+import { createManageDiscoveryNode } from "./nodes/discovery-management";
 import { createHitlRunNode, createHitlSaveNode } from "./nodes/hitl";
 import {
     createAwaitUserNode,
@@ -29,6 +30,32 @@ function userClearlyWantsTest(prompt: string): boolean {
     );
 }
 
+export function routeAfterGoalClassification(state: GraphStateType): string {
+    if (state.awaitUserMessage) return "awaitUser";
+    // Resuming a live-page blocker (auth/otp/consent/…): go straight
+    // back to the interruption path so supplied credentials are used.
+    if (state.resumeBlocker) return "detectInterruption";
+    // A concrete discovery mutation outranks the broad intent label. A
+    // classifier can call a combined request "generateTests"; it must not
+    // silently skip an explicit clear/start action.
+    if (state.nextTool === "discoveryManage") return "manageDiscovery";
+    if (state.intent === "generateTests") {
+        if (state.nextTool === "domCapture" || state.targetUrl) return "navigate";
+        return "gatherContext";
+    }
+    if (state.nextTool === "discoveryRead") return "answerQuestions";
+    if (
+        state.nextTool === "codeSearch" ||
+        state.nextTool === "testGen" ||
+        state.nextTool === "explain" ||
+        state.nextTool === "none"
+    ) {
+        return "gatherContext";
+    }
+    if (state.nextTool === "domCapture") return "detectInterruption";
+    return "navigate";
+}
+
 export function createAgentGraph(deps: AgentNodeDeps) {
     // Resolved once per graph (not per-node) so every routing decision in
     // this run sees the exact same autonomy snapshot.
@@ -43,53 +70,21 @@ export function createAgentGraph(deps: AgentNodeDeps) {
         .addNode("explore", createExploreNode(deps))
         .addNode("gatherContext", createGatherContextNode(deps))
         .addNode("answerQuestions", createAnswerQuestionsNode(deps))
+        .addNode("manageDiscovery", createManageDiscoveryNode(deps))
         .addNode("generateTests", createGenerateTestsNode(deps))
         .addNode("hitlSave", createHitlSaveNode(deps))
         .addNode("hitlRun", createHitlRunNode(deps))
         .addNode("repair", createRepairNode(deps))
         .addNode("summarize", createSummarizeNode())
         .addEdge(START, "classifyGoal")
-        .addConditionalEdges(
-            "classifyGoal",
-            (state: GraphStateType) => {
-                if (state.awaitUserMessage) return "awaitUser";
-                // Resuming a live-page blocker (auth/otp/consent/…): go straight
-                // back to the interruption path so the credentials the user just
-                // supplied actually get filled and submitted. Without this, a bare
-                // "password" reply is misrouted by nextTool and the page stays stuck.
-                if (state.resumeBlocker) return "detectInterruption";
-                // Intent is authoritative for test generation. A request to
-                // CREATE tests must always reach the generator, even when
-                // discovery data exists and the classifier over-eagerly picks
-                // nextTool="discoveryRead" (which would otherwise divert us to a
-                // discovery summary and never write a spec). Take the live DOM
-                // path only when the classifier explicitly points at the browser
-                // or a specific URL; otherwise gather code/discovery context and
-                // generate directly.
-                if (state.intent === "generateTests") {
-                    if (state.nextTool === "domCapture" || state.targetUrl) {
-                        return "navigate";
-                    }
-                    return "gatherContext";
-                }
-                if (state.nextTool === "discoveryRead") {
-                    return "answerQuestions";
-                }
-                if (
-                    state.nextTool === "codeSearch" ||
-                    state.nextTool === "testGen" ||
-                    state.nextTool === "explain" ||
-                    state.nextTool === "none"
-                ) {
-                    return "gatherContext";
-                }
-                if (state.nextTool === "domCapture") {
-                    return "detectInterruption";
-                }
-                return "navigate";
-            },
-            ["awaitUser", "answerQuestions", "gatherContext", "detectInterruption", "navigate"],
-        )
+        .addConditionalEdges("classifyGoal", routeAfterGoalClassification, [
+            "awaitUser",
+            "answerQuestions",
+            "manageDiscovery",
+            "gatherContext",
+            "detectInterruption",
+            "navigate",
+        ])
         .addConditionalEdges(
             "navigate",
             (state: GraphStateType) => {
@@ -144,6 +139,14 @@ export function createAgentGraph(deps: AgentNodeDeps) {
             ["generateTests", "answerQuestions", "summarize"],
         )
         .addEdge("answerQuestions", "summarize")
+        .addConditionalEdges(
+            "manageDiscovery",
+            (state: GraphStateType) => {
+                if (state.shouldPause || state.awaitUserMessage) return "awaitUser";
+                return "summarize";
+            },
+            ["awaitUser", "summarize"],
+        )
         .addEdge("generateTests", "hitlSave")
         .addConditionalEdges(
             "hitlSave",

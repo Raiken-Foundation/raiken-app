@@ -15,6 +15,12 @@ import { runToolAgent, type ToolAgentOptions, type ToolAgentResult } from "../ag
 import type { HITLAction } from "../agent/hitl-types";
 import type { AutonomySettings, ToolResult } from "../agent/tools";
 import { acquireBrowserSessionLease, type BrowserSessionLease } from "../browser/registry";
+import {
+    beginOperationScope,
+    correlationFields,
+    mergeCorrelationContext,
+    obs,
+} from "../observability";
 import { acquireProjectOperation, type ProjectOperationLease } from "../operations";
 import { RunTraceRecorder } from "../run-traces";
 
@@ -91,6 +97,24 @@ export interface OrchestratorResult {
 export async function* runOrchestrator(
     options: RunOrchestratorOptions,
 ): AsyncGenerator<string, OrchestratorResult, unknown> {
+    const runKey = path.resolve(options.projectPath);
+    if (activeAgentRuns.has(runKey)) {
+        const busyMessage =
+            "\n\nAnother agent run is already in progress for this project. " +
+            "Please wait for it to finish (or stop it) before sending a new request.";
+        yield busyMessage;
+        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+    }
+
+    return yield* beginOperationScope({ projectPath: options.projectPath }, () =>
+        runOrchestratorInScope(options, runKey),
+    );
+}
+
+async function* runOrchestratorInScope(
+    options: RunOrchestratorOptions,
+    runKey: string,
+): AsyncGenerator<string, OrchestratorResult, unknown> {
     const {
         userPrompt,
         projectPath,
@@ -104,14 +128,6 @@ export async function* runOrchestrator(
         origin,
     } = options;
 
-    const runKey = path.resolve(projectPath);
-    if (activeAgentRuns.has(runKey)) {
-        const busyMessage =
-            "\n\nAnother agent run is already in progress for this project. " +
-            "Please wait for it to finish (or stop it) before sending a new request.";
-        yield busyMessage;
-        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
-    }
     activeAgentRuns.add(runKey);
     let operation: ProjectOperationLease;
     let browserLease: BrowserSessionLease | undefined;
@@ -136,7 +152,17 @@ export async function* runOrchestrator(
     const trace =
         options.trace !== undefined
             ? options.trace
-            : RunTraceRecorder.fromEnv(projectPath, "agent", userPrompt);
+            : (RunTraceRecorder.fromEnv(projectPath, "agent", userPrompt) ??
+              RunTraceRecorder.forOperational(projectPath, "agent", correlationFields(), {
+                  origin: origin ?? "unknown",
+              }));
+
+    mergeCorrelationContext({ runId: trace?.runId, projectPath });
+    const agentStartedAt = Date.now();
+    obs.info("agent.run.started", {
+        operationId: trace?.runId,
+        meta: { origin: origin ?? "unknown" },
+    });
 
     const agentOptions: ToolAgentOptions = {
         userPrompt,
@@ -177,8 +203,18 @@ export async function* runOrchestrator(
             yield value as string;
         }
         trace?.end(signal?.aborted ? "aborted" : "completed");
+        obs.duration("agent.run.completed", agentStartedAt, {
+            status: signal?.aborted ? "aborted" : "completed",
+            operationId: trace?.runId,
+        });
     } catch (error) {
         trace?.end("error", error instanceof Error ? error.message : String(error));
+        obs.duration("agent.run.completed", agentStartedAt, {
+            level: "error",
+            status: "error",
+            operationId: trace?.runId,
+            message: error instanceof Error ? error.message : String(error),
+        });
         throw error;
     } finally {
         if (signal?.aborted) {

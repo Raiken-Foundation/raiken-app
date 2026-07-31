@@ -6,7 +6,7 @@
 import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import type { SiteKnowledge } from "../site-discovery";
 import type { ParsedClass, ParsedFunction, ParsedImport, TemplateSelector } from "../types";
-import type { AgentIntent } from "./graph/utils";
+import type { AgentIntent, DiscoveryManagementAction } from "./graph/utils";
 
 export interface ContextData {
     files: Array<{
@@ -90,7 +90,16 @@ export interface AgentClassifierResult {
     targetUrl: string | null;
     targetAction?: string | null;
     performAction?: boolean;
-    nextTool: "domCapture" | "codeSearch" | "testGen" | "explain" | "discoveryRead" | "none" | null;
+    nextTool:
+        | "domCapture"
+        | "codeSearch"
+        | "testGen"
+        | "explain"
+        | "discoveryRead"
+        | "discoveryManage"
+        | "none"
+        | null;
+    discoveryAction?: DiscoveryManagementAction | null;
     missingContext: string[];
 }
 
@@ -252,6 +261,7 @@ QA + senior engineer helping a teammate understand and test the product.
 [RULES]
 - Treat the request as a task even if not a question. Pick the most likely interpretation; only ask a follow-up if missing input blocks progress.
 - Use only the provided context. Do not claim actions you did not take.
+- If the requested action is not available through the provided tools, state that limitation explicitly, say that no action was taken, and give the exact command or UI action the user can use instead.
 - intent=explain → describe flow; intent=explore → map features to files/components.
 - Multi-part requests → numbered list under "Answers".
 
@@ -372,8 +382,10 @@ export function buildAgentClassifierPrompt(input: {
 Rules:
 - Valid JSON, double quotes. Unknown → null. missingContext is string[] (use []).
 - intent ∈ explore | generateTests | explain.
-- nextTool ∈ domCapture | codeSearch | testGen | explain | discoveryRead | none | null.
+- nextTool ∈ domCapture | codeSearch | testGen | explain | discoveryRead | discoveryManage | none | null.
 - discoveryRead when the user asks for persisted discovery data (pages, snapshots, stats, blockers).
+- discoveryManage when the user asks to clear/reset discovery data or start/re-run a site-discovery crawl.
+- discoveryAction ∈ clear | start | clearAndStart | null. Use clearAndStart only when both deletion and a fresh crawl are requested.
 - targetAction: the concrete on-page control the user wants located or performed (e.g. "sign out", "add to cart", "delete account"). null when the request is not about a specific UI action.
 - performAction=true when the user wants that action actually carried out in the browser now (e.g. "sign out", "log me out", "click delete"); false when they only ask about it or want a test written for it.
 - isContinuation=true ONLY when directly replying to the Pause below; false otherwise or when no Pause.
@@ -387,5 +399,5 @@ CurrentPrompt:
 ${input.userPrompt}
 
 Schema:
-{"intent":"explore|generateTests|explain","goal":string|null,"targetFeature":string|null,"targetUrl":string|null,"targetAction":string|null,"performAction":boolean,"nextTool":"domCapture|codeSearch|testGen|explain|discoveryRead|none"|null,"missingContext":string[],"shouldRunTests":boolean,"isContinuation":boolean}`;
+{"intent":"explore|generateTests|explain","goal":string|null,"targetFeature":string|null,"targetUrl":string|null,"targetAction":string|null,"performAction":boolean,"nextTool":"domCapture|codeSearch|testGen|explain|discoveryRead|discoveryManage|none"|null,"discoveryAction":"clear|start|clearAndStart"|null,"missingContext":string[],"shouldRunTests":boolean,"isContinuation":boolean}`;
 }

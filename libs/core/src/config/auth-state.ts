@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { authError } from "../errors";
+import { loadAuthConfig } from "./load";
 import { resolvePathWithinProject } from "./store";
 
 const DEFAULT_AUTH_STATE_PATH = path.join(".raiken", "auth-state.json");
@@ -51,10 +53,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readConfiguredStorageStatePath(projectPath: string): string | null {
     try {
-        const configPath = resolvePathWithinProject(projectPath, "raiken.config.json");
-        const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as unknown;
-        if (!isRecord(parsed) || !isRecord(parsed["auth"])) return null;
-        const configured = parsed["auth"]["storageStatePath"];
+        const configured = loadAuthConfig(projectPath).storageStatePath;
         if (typeof configured !== "string" || configured.trim().length === 0) return null;
         return resolvePathWithinProject(projectPath, configured.trim());
     } catch (error) {
@@ -248,9 +247,10 @@ export function writeValidatedAuthState(
         });
         const inspection = inspectAuthState(temporary);
         if (inspection.status !== "valid") {
-            throw new Error(
+            throw authError(
                 describeAuthStateProblem(inspection) ??
                     "Captured auth state is not usable. Complete login and try again.",
+                { code: "AUTH_STATE_INVALID", cause: inspection },
             );
         }
         fs.renameSync(temporary, resolved);

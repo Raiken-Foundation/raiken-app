@@ -1,8 +1,9 @@
 /**
  * `raiken config` — set the AI provider, API key, model, and base URL from
  * the terminal, writing to the same `raiken.config.json#ai` section the
- * dashboard's Settings → AI Provider panel does (via the same `updateConfig`
- * tRPC procedure, so both surfaces stay in sync and get the same validation).
+ * dashboard's Settings → AI Provider panel does (via the same
+ * `ConfigApplication.updateConfig` path, so both surfaces stay in sync and get
+ * the same validation).
  *
  * Two intentional paths:
  *   - Flags are kept for scripts and automation.
@@ -12,80 +13,33 @@
  */
 
 import {
-    AI_PROVIDER_IDS,
-    type AIProviderId,
+    type ConfigApplication,
+    createProjectApplication,
     getProvider,
     listProviderModels,
     listProviders,
     type ModelInfo,
     type ProviderDefinition,
     readApiKeyFromEnv,
-    readRawConfigSync,
     resolveAIConfig,
 } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import {
+    AI_PROVIDER_IDS,
+    type AIProviderId,
+    type AiConfigPatchOptions,
+    aiConfigWithRememberedKey,
+    buildAiConfigPatch,
+    getStoredProviderKeys,
+} from "@raiken/shared/server";
 import chalk from "chalk";
 import ora from "ora";
 import { accent, dim } from "../agent-stream";
+import { CLI_EXIT } from "../errors";
 import { cliExit } from "../repl/exit";
 
-type Caller = ReturnType<typeof appRouter.createCaller>;
+type ConfigApp = ConfigApplication;
 type ReplAsk = (query: string) => Promise<string | null>;
 type StoredProviderKeys = Partial<Record<AIProviderId, string>>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Read remembered provider keys while supporting the original one-key config
- * shape. The active legacy key is folded into the map in memory, so the next
- * provider change upgrades the file without losing a credential.
- */
-function readStoredProviderKeys(config: unknown): StoredProviderKeys {
-    if (!isRecord(config) || !isRecord(config.ai)) return {};
-    const ai = config.ai;
-    const keys: StoredProviderKeys = {};
-    if (isRecord(ai.apiKeys)) {
-        for (const providerId of AI_PROVIDER_IDS) {
-            const key = ai.apiKeys[providerId];
-            if (typeof key === "string" && key.trim()) keys[providerId] = key;
-        }
-    }
-
-    const legacyKey = typeof ai.apiKey === "string" && ai.apiKey.trim() ? ai.apiKey : undefined;
-    const activeProvider =
-        typeof ai.provider === "string" &&
-        (AI_PROVIDER_IDS as readonly string[]).includes(ai.provider)
-            ? (ai.provider as AIProviderId)
-            : "openrouter";
-    if (legacyKey && !keys[activeProvider]) keys[activeProvider] = legacyKey;
-    return keys;
-}
-
-function getStoredProviderKeys(projectPath: string): StoredProviderKeys {
-    try {
-        return readStoredProviderKeys(readRawConfigSync(projectPath));
-    } catch {
-        return {};
-    }
-}
-
-function aiConfigWithRememberedKey(
-    ai: Record<string, unknown>,
-    providerId: AIProviderId,
-    keys: StoredProviderKeys,
-): Record<string, unknown> {
-    const key = ai.apiKey;
-    if (typeof key !== "string") return ai;
-    return {
-        ...ai,
-        apiKeys: {
-            ...keys,
-            [providerId]: key,
-        },
-    };
-}
 
 const KNOWN_KEY_PREFIXES = [
     "sk-or-v1-",
@@ -118,13 +72,10 @@ export function looksLikeApiKey(text: string): boolean {
     return trimmed.length >= 32 && /[0-9]/.test(trimmed) && /[A-Za-z]/.test(trimmed);
 }
 
-export interface ConfigCommandOptions {
-    provider?: string;
-    apiKey?: string;
-    model?: string;
-    baseUrl?: string;
-    /** Clear the saved key (falls back to an env var, if one is set). */
-    unsetKey?: boolean;
+export type { AiConfigPatchOptions as ConfigPatchOptions };
+export { buildAiConfigPatch };
+
+export interface ConfigCommandOptions extends AiConfigPatchOptions {
     /** Show the provider catalog + current AI config; don't change anything. */
     list?: boolean;
     json?: boolean;
@@ -153,37 +104,6 @@ export interface ConfigCommandOptions {
     replAskSecret?: ReplAsk;
 }
 
-/**
- * Pure patch-builder so the flag precedence/validation is unit-testable
- * without touching the filesystem or a tRPC caller.
- */
-export function buildAiConfigPatch(
-    options: ConfigCommandOptions,
-): { patch: Record<string, unknown>; clearSecrets?: string[] } | { error: string } {
-    if (options.provider) {
-        const id = options.provider.trim().toLowerCase();
-        if (!(AI_PROVIDER_IDS as readonly string[]).includes(id)) {
-            return {
-                error:
-                    `Unknown provider: "${options.provider}". ` +
-                    `Valid providers: ${AI_PROVIDER_IDS.join(", ")}`,
-            };
-        }
-    }
-
-    const patch: Record<string, unknown> = {};
-    if (options.provider) patch.provider = options.provider.trim().toLowerCase();
-    if (options.model) patch.model = options.model;
-    if (options.baseUrl) patch.baseURL = options.baseUrl;
-    // `--unset-key` wins over a simultaneously-passed `--api-key`. Secrets
-    // use explicit clear instructions so an empty dashboard/CLI draft can
-    // never erase a previously saved credential by accident.
-    if (options.unsetKey) return { patch, clearSecrets: ["ai.apiKey"] };
-    else if (options.apiKey) patch.apiKey = options.apiKey;
-
-    return { patch };
-}
-
 export async function configCommand(
     section: string | undefined,
     options: ConfigCommandOptions,
@@ -204,7 +124,7 @@ export async function configCommand(
                         "Run `raiken config` and paste it into the masked key prompt.",
                 ),
             );
-            cliExit(1);
+            cliExit(CLI_EXIT.CONFIG_AUTH);
             return;
         } else {
             console.error(
@@ -213,16 +133,16 @@ export async function configCommand(
                         `Use "ai" or a provider id.`,
                 ),
             );
-            cliExit(1);
+            cliExit(CLI_EXIT.CONFIG_AUTH);
             return;
         }
     }
 
     const projectPath = options.projectPath ?? process.cwd();
-    const caller = appRouter.createCaller({ projectPath });
+    const app = createProjectApplication(projectPath);
 
     if (options.list) {
-        await printProviderList(caller, options.json);
+        await printProviderList(app.config, options.json);
         return;
     }
 
@@ -231,13 +151,13 @@ export async function configCommand(
     );
 
     if (hasDirectFlags) {
-        await applyDirectFlags(caller, projectPath, options);
+        await applyDirectFlags(app.config, projectPath, options);
         return;
     }
 
     if (options.fromRepl && options.replAsk) {
         await runReplConfigWizard(
-            caller,
+            app.config,
             projectPath,
             options.replAsk,
             options.replAskSecret ?? options.replAsk,
@@ -247,7 +167,7 @@ export async function configCommand(
     }
 
     if (options.fromRepl || !process.stdin.isTTY) {
-        await printProviderList(caller, false);
+        await printProviderList(app.config, false);
         // Note the command prefix explicitly (`/config` vs `raiken config`) —
         // without it, typing just the flags at the next prompt gets sent as a
         // plain chat message instead of running the command.
@@ -264,11 +184,11 @@ export async function configCommand(
         return;
     }
 
-    await runInteractiveWizard(caller, projectPath, options.initialProvider);
+    await runInteractiveWizard(app.config, projectPath, options.initialProvider);
 }
 
-async function printProviderList(caller: Caller, json: boolean | undefined): Promise<void> {
-    const { providers, current } = await caller.listAIProviders();
+async function printProviderList(config: ConfigApp, json: boolean | undefined): Promise<void> {
+    const { providers, current } = config.listAIProviders();
 
     if (json) {
         process.stdout.write(`${JSON.stringify({ providers, current }, null, 2)}\n`);
@@ -299,7 +219,7 @@ async function printProviderList(caller: Caller, json: boolean | undefined): Pro
 }
 
 async function applyDirectFlags(
-    caller: Caller,
+    config: ConfigApp,
     projectPath: string,
     options: ConfigCommandOptions,
 ): Promise<void> {
@@ -322,7 +242,7 @@ async function applyDirectFlags(
                     "Example: raiken config custom --base-url http://localhost:1234/v1 --model my-model",
             ),
         );
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
         return;
     }
 
@@ -345,7 +265,7 @@ async function applyDirectFlags(
     const built = buildAiConfigPatch(effectiveOptions);
     if ("error" in built) {
         console.error(chalk.red(`✗ ${built.error}`));
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
         return;
     }
 
@@ -359,14 +279,14 @@ async function applyDirectFlags(
         ...(built.clearSecrets ?? []),
         ...(options.unsetKey ? [`ai.apiKeys.${targetProviderId}`] : []),
     ];
-    const result = await caller.updateConfig({
+    const result = await config.updateConfig({
         config: { ai: aiPatch },
         ...(clearSecrets.length > 0 ? { clearSecrets } : {}),
     });
     if (!result.success) {
         console.error(chalk.red("\n✗ Invalid configuration:"));
         for (const err of result.errors ?? []) console.error(chalk.red(`  - ${err}`));
-        cliExit(1);
+        cliExit(CLI_EXIT.USAGE);
         return;
     }
 
@@ -494,7 +414,7 @@ function getProviderKeyState(
  * adapters, so they cannot drift into different setup experiences.
  */
 async function runGuidedConfigWizard(
-    caller: Caller,
+    config: ConfigApp,
     projectPath: string,
     prompts: GuidedSetupPrompts,
     initialProvider?: AIProviderId,
@@ -608,7 +528,7 @@ async function runGuidedConfigWizard(
         return;
     }
 
-    const result = await caller.updateConfig({
+    const result = await config.updateConfig({
         config: {
             ai: aiConfigWithRememberedKey(
                 {
@@ -635,13 +555,13 @@ async function runGuidedConfigWizard(
 }
 
 async function runInteractiveWizard(
-    caller: Caller,
+    config: ConfigApp,
     projectPath: string,
     initialProvider?: AIProviderId,
 ): Promise<void> {
     const { confirm, input, password, select } = await import("@inquirer/prompts");
     await runGuidedConfigWizard(
-        caller,
+        config,
         projectPath,
         {
             chooseProvider: async ({ providers, currentProvider, initialProvider: initial }) =>
@@ -817,14 +737,14 @@ function shortlistModels(
  * other cancelable REPL prompt.
  */
 export async function runReplConfigWizard(
-    caller: Caller,
+    config: ConfigApp,
     projectPath: string,
     ask: ReplAsk,
     askSecret: ReplAsk = ask,
     initialProvider?: AIProviderId,
 ): Promise<void> {
     await runGuidedConfigWizard(
-        caller,
+        config,
         projectPath,
         {
             chooseProvider: async ({ providers, currentProvider, initialProvider: initial }) => {

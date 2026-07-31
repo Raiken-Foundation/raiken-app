@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { queryTrace, type TraceResult } from "@raiken/core";
 import chalk from "chalk";
+import { CLI_EXIT } from "../errors";
 import { cliExit } from "../repl/exit";
 
 interface TraceCommandOptions {
@@ -35,7 +36,7 @@ export async function traceCommand(
                 "No stack trace provided. Pass --file <path>, a positional arg, or pipe via stdin.",
             ),
         );
-        cliExit(2);
+        cliExit(CLI_EXIT.USAGE);
     }
 
     // Guard against non-numeric / out-of-range CLI input (e.g. `--limit abc`

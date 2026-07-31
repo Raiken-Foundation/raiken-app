@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
     matchSlashCommands,
@@ -103,21 +101,15 @@ describe("slashCompleter", () => {
         expect(matchSlashCommands("rep").map((command) => command.name)).toContain("report");
     });
 
-    // Registry entries drive Tab completion, the live menu overlay, and
-    // /help — but dispatch lives separately in chat.ts's `handleSlash`
-    // (handlers close over live browser/session/tRPC state, so it can't be
-    // data-driven from here). This is a lightweight static guard against the
-    // two drifting apart: a registry entry with no matching dispatch site
-    // shows up everywhere as a real command but fails with "Unknown
-    // command" the moment someone runs it (exactly what happened when
-    // `organize` shipped in bin.ts before it was wired into the REPL).
-    it("every registered slash command has a dispatch site in chat.ts", () => {
-        const chatSource = fs.readFileSync(path.join(__dirname, "../../commands/chat.ts"), "utf-8");
-        const unhandled = SLASH_COMMAND_REGISTRY.filter((command) => {
-            const asCaseOrCheck = `"${command.name}"`;
-            const asObjectKey = `${command.name}:`;
-            return !chatSource.includes(asCaseOrCheck) && !chatSource.includes(asObjectKey);
-        });
-        expect(unhandled.map((command) => command.name)).toEqual([]);
+    // Registry entries drive Tab completion, the live menu overlay, /help, and
+    // dispatch handlers in repl/chat/slash/dispatch.ts.
+    it("every registered slash command has a dispatch handler", async () => {
+        const { assertSlashDispatchParity, SLASH_DISPATCH_HANDLERS } = await import(
+            "../chat/slash/dispatch"
+        );
+        expect(() => assertSlashDispatchParity()).not.toThrow();
+        for (const command of SLASH_COMMAND_REGISTRY) {
+            expect(SLASH_DISPATCH_HANDLERS[command.name]).toBeTypeOf("function");
+        }
     });
 });

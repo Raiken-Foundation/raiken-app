@@ -11,14 +11,23 @@ export interface NormalizeUrlOptions {
 }
 
 /**
+ * `…/index.html` / `…/index.htm` collapse onto their directory URL. Static
+ * servers answer the same document at both spellings; treating them as
+ * distinct URLs duplicated kb page rows and inflated page/link stats.
+ */
+const INDEX_FILE_SUFFIX = /\/index\.html?$/i;
+
+/**
  * Normalize a URL for consistent comparison.
- * Strips fragments and trailing slashes (except root). Query parameters are
- * stripped by default; pass `preserveQueryParams` to keep them (sorted).
+ * Strips fragments, index-file suffixes, and trailing slashes (except root).
+ * Query parameters are stripped by default; pass `preserveQueryParams` to
+ * keep them (sorted).
  */
 export function normalizeUrl(url: string, options: NormalizeUrlOptions = {}): string {
     try {
         const parsed = new URL(url);
-        let normalized = `${parsed.origin}${parsed.pathname}`;
+        const pathname = parsed.pathname.replace(INDEX_FILE_SUFFIX, "/");
+        let normalized = `${parsed.origin}${pathname}`;
         if (normalized.endsWith("/") && normalized !== `${parsed.origin}/`) {
             normalized = normalized.slice(0, -1);
         }

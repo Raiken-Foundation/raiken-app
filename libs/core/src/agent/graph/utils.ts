@@ -1,5 +1,6 @@
 export type AgentIntent = "explore" | "generateTests" | "explain";
 export type AuthPrecondition = "authenticated" | "unauthenticated" | "login_flow";
+export type DiscoveryManagementAction = "clear" | "start" | "clearAndStart";
 
 export type InterruptionType =
     | "auth"
@@ -618,5 +619,7 @@ export function buildSummary(state: {
             lines.push(`- ...and ${state.groundingViolations.length - 5} more`);
         }
     }
-    return lines.length > 0 ? lines.join("\n") : "Exploration complete.";
+    return lines.length > 0
+        ? lines.join("\n")
+        : "I could not complete an action or produce a grounded result. Please restate the request, or use `/help` to see the actions available in chat.";
 }

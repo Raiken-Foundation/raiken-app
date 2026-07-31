@@ -8,7 +8,7 @@ import {
     listProviders,
     writeConfigAtomic,
 } from "@raiken/core";
-import { createConfig } from "@raiken/shared";
+import { createConfig } from "@raiken/shared/server";
 import chalk from "chalk";
 import {
     detectProject,
@@ -51,12 +51,66 @@ interface UserPreferences {
     testDirectory: string;
     installPlaywright: boolean;
     generateExampleTest: boolean;
+    /** Chosen interactively when no port could be detected; undefined = auto-detect. */
+    devServerPort?: number;
+}
+
+/** Sentinel fallback so we can tell "found in project config" from "defaulted". */
+const PORT_NOT_DETECTED = -1;
+
+/**
+ * Ask which port the dev server listens on — only worth asking when Playwright
+ * will get a `webServer` block AND no port could be scraped from the project's
+ * own config (vite.config, angular.json, --port flag). When detection already
+ * succeeded we trust it silently; bug class this prevents: init hardcodes
+ * 3000 for an app that actually runs elsewhere, and the first `raiken test`
+ * dies with an opaque webServer error.
+ */
+async function askDevServerPort(
+    projectPath: string,
+    projectInfo: ProjectInfo,
+    resolvedType: ProjectType,
+    resolvedFramework: TestFramework,
+): Promise<number | undefined> {
+    if (resolvedFramework !== "playwright") return undefined;
+    if (!getDevCommand(projectInfo)) return undefined;
+    const detected = await detectDevServerPort(projectPath, PORT_NOT_DETECTED);
+    if (detected !== PORT_NOT_DETECTED) return undefined;
+
+    const answer = await input({
+        message: "Which port does your dev server listen on?",
+        default: String(getDefaultPort(resolvedType)),
+        validate: (value) => {
+            const port = Number(value);
+            return (
+                (Number.isInteger(port) && port > 0 && port < 65536) ||
+                "Port must be a whole number between 1 and 65535"
+            );
+        },
+    });
+    return Number(answer);
+}
+
+/** Inquirer rejects with this when stdin closes mid-prompt (Ctrl+C, no TTY). */
+function isPromptCancelled(error: unknown): boolean {
+    return (
+        error instanceof Error &&
+        (error.name === "ExitPromptError" || error.message.includes("force closed"))
+    );
 }
 
 async function promptUserPreferences(
     projectInfo: ProjectInfo,
     nonInteractive = false,
+    projectPath: string = projectInfo.rootDir,
 ): Promise<UserPreferences> {
+    if (!nonInteractive && !process.stdin.isTTY) {
+        throw new Error(
+            "Init needs answers but can't prompt here (no interactive terminal). " +
+                "Re-run with `raiken init -y` to accept the auto-detected defaults.",
+        );
+    }
+
     console.log(chalk.cyan("\nDetected project information:"));
     console.log(chalk.gray(`   Project: ${projectInfo.name}`));
     console.log(chalk.gray(`   Type: ${projectInfo.type}`));
@@ -124,6 +178,12 @@ async function promptUserPreferences(
                 testDirectory: projectInfo.testDir,
                 installPlaywright,
                 generateExampleTest,
+                devServerPort: await askDevServerPort(
+                    projectPath,
+                    projectInfo,
+                    projectInfo.type,
+                    projectInfo.testFramework,
+                ),
             };
         }
 
@@ -251,6 +311,7 @@ async function promptUserPreferences(
         testDirectory: testDirectory.trim(),
         installPlaywright,
         generateExampleTest,
+        devServerPort: await askDevServerPort(projectPath, projectInfo, projectType, testFramework),
     };
 }
 
@@ -261,6 +322,8 @@ async function promptUserPreferences(
 export interface InitializeProjectOptions {
     force?: boolean;
     nonInteractive?: boolean;
+    /** Skip downloading Playwright browser binaries (e.g. on a metered/CI box). */
+    skipBrowsers?: boolean;
 }
 
 export async function initializeProject(
@@ -272,6 +335,7 @@ export async function initializeProject(
         typeof options === "boolean" ? { force: options } : options;
     const force = opts.force ?? false;
     const nonInteractive = opts.nonInteractive ?? false;
+    const skipBrowsers = opts.skipBrowsers ?? false;
 
     // Check for package.json first
     const pkgPath = path.join(projectPath, "package.json");
@@ -306,7 +370,15 @@ export async function initializeProject(
     const projectInfo = await detectProject(projectPath);
 
     // Step 2: Prompt user for preferences
-    const preferences = await promptUserPreferences(projectInfo, nonInteractive);
+    let preferences: UserPreferences;
+    try {
+        preferences = await promptUserPreferences(projectInfo, nonInteractive, projectPath);
+    } catch (error) {
+        if (isPromptCancelled(error)) {
+            throw new Error("Init cancelled — nothing was changed.");
+        }
+        throw error;
+    }
 
     // Merge preferences with project info
     const finalProjectInfo: ProjectInfo = {
@@ -314,6 +386,7 @@ export async function initializeProject(
         type: preferences.projectType,
         testFramework: preferences.testFramework,
         testDir: preferences.testDirectory,
+        devServerPort: preferences.devServerPort,
     };
 
     console.log(
@@ -332,8 +405,9 @@ export async function initializeProject(
         // is a point-in-time snapshot from before init ran anything.
         let playwrightPackageReady = finalProjectInfo.hasPlaywrightPackage;
 
+        let webServerConfigured = false;
         if (preferences.testFramework === "playwright") {
-            await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
+            webServerConfigured = await setupPlaywrightConfig(projectPath, finalProjectInfo, force);
 
             // Pre-fix: init would happily write playwright.config.ts *and*
             // an example test importing '@playwright/test' without ever
@@ -362,7 +436,7 @@ export async function initializeProject(
         }
 
         // Step 11: Install Playwright browsers (if requested)
-        if (preferences.installPlaywright) {
+        if (preferences.installPlaywright && !skipBrowsers) {
             await installPlaywrightBrowsers(projectPath, playwrightPackageReady);
         }
 
@@ -383,16 +457,32 @@ export async function initializeProject(
 
         console.log(chalk.green("\n✓ Project initialization complete!"));
         console.log(chalk.cyan("\nNext steps:"));
-        console.log(chalk.gray('  1. Run "raiken" to start the interactive agent'));
-        console.log(chalk.gray('  2. Use "/config" anytime to update this project\'s AI setup'));
         console.log(
-            chalk.gray('  3. Or open "raiken start" — the dashboard uses the same AI setting\n'),
+            chalk.gray('  1. Run "raiken test" — the example spec passes with no app needed'),
+        );
+        console.log(chalk.gray('  2. Run "raiken" to start the interactive agent'));
+        console.log(chalk.gray('  3. Use "/config" anytime to update this project\'s AI setup'));
+        console.log(
+            chalk.gray('  4. Or open "raiken start" — the dashboard uses the same AI setting\n'),
         );
 
+        if (preferences.testFramework === "playwright" && !webServerConfigured) {
+            console.log(chalk.yellow("⚠ No dev/start/serve script found in package.json."));
+            console.log(
+                chalk.gray(
+                    "   Tests against your app need it running first — start it yourself, or add a\n" +
+                        "   dev script and reinstate the webServer block noted in playwright.config.ts.\n",
+                ),
+            );
+        }
+
         // Additional info based on choices
-        if (!preferences.installPlaywright && preferences.testFramework === "playwright") {
+        if (
+            (!preferences.installPlaywright || skipBrowsers) &&
+            preferences.testFramework === "playwright"
+        ) {
             console.log(chalk.yellow("⚠ Remember to install Playwright browsers:"));
-            console.log(chalk.gray("   npx playwright install\n"));
+            console.log(chalk.gray("   npx playwright install chromium\n"));
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
@@ -605,7 +695,7 @@ async function setupPlaywrightConfig(
     projectPath: string,
     projectInfo: ProjectInfo,
     force: boolean,
-): Promise<void> {
+): Promise<boolean> {
     const configPath = path.join(projectPath, "playwright.config.ts");
 
     // Prefer a port discovered from the project's actual config files
@@ -615,7 +705,9 @@ async function setupPlaywrightConfig(
     // uses this — it's what Playwright polls to know the *local* dev
     // server is ready, so it has to stay a real local port regardless of
     // what `use.baseURL` displays.
-    const detectedPort = await detectDevServerPort(projectPath, getDefaultPort(projectInfo.type));
+    const detectedPort =
+        projectInfo.devServerPort ??
+        (await detectDevServerPort(projectPath, getDefaultPort(projectInfo.type)));
 
     // If we're about to overwrite an existing config (--force), keep its
     // baseURL rather than clobbering a deliberately-set value (e.g. a
@@ -624,6 +716,26 @@ async function setupPlaywrightConfig(
     // there's nothing to preserve.
     const baseURL =
         projectInfo.existingPlaywrightConfig?.baseURL ?? `http://localhost:${detectedPort}`;
+
+    const devCommand = getDevCommand(projectInfo);
+
+    // Only wire `webServer` when a real script exists to start the app. A
+    // scaffold that references a non-existent script makes every test run
+    // fail before a single spec executes; omitting the block lets Playwright
+    // run against whatever the user starts themselves (or the self-contained
+    // example spec, which needs no server at all).
+    const webServerBlock = devCommand
+        ? `  webServer: {
+    command: '${devCommand}',
+    port: ${detectedPort},
+    reuseExistingServer: !process.env.CI,
+  },
+`
+        : `  // No dev/start/serve script was found in package.json, so no webServer
+  // block was generated. Start your app yourself before running tests against
+  // it — or add a dev script and reinstate:
+  // webServer: { command: 'npm run dev', port: ${detectedPort}, reuseExistingServer: !process.env.CI },
+`;
 
     const config = `import { defineConfig, devices } from '@playwright/test';
 
@@ -656,12 +768,7 @@ export default defineConfig({
     //   use: { ...devices['Desktop Safari'] },
     // },
   ],
-  webServer: {
-    command: '${getDevCommand(projectInfo)}',
-    port: ${detectedPort},
-    reuseExistingServer: !process.env.CI,
-  },
-});
+${webServerBlock}});
 `;
 
     try {
@@ -670,7 +777,7 @@ export default defineConfig({
             console.log(
                 chalk.yellow("⚠ playwright.config.ts already exists (use --force to overwrite)"),
             );
-            return;
+            return devCommand !== null;
         }
     } catch {
         // File doesn't exist, proceed
@@ -678,6 +785,7 @@ export default defineConfig({
 
     await fs.writeFile(configPath, config);
     console.log(chalk.green("✓ Created playwright.config.ts"));
+    return devCommand !== null;
 }
 
 async function updatePackageScripts(
@@ -752,27 +860,27 @@ async function createExampleTest(projectPath: string, projectInfo: ProjectInfo):
 
     switch (projectInfo.testFramework) {
         case "playwright":
+            // The first test is deliberately self-contained: it proves the
+            // Playwright toolchain works (package installed, browsers
+            // downloaded, config loads) without needing the app to be
+            // running. A title-asserts-project-name test against `/` fails
+            // out of the box for almost every scaffold and teaches new users
+            // that raiken tests are flaky — the opposite of its purpose.
             exampleTest = `import { test, expect } from '@playwright/test';
 
-test('example test - home page loads', async ({ page }) => {
-  // Navigate to your application
-  await page.goto('/');
-  
-  // Example: Check if the page loads successfully
-  await expect(page).toHaveTitle(/.*${projectInfo.name}.*/i);
-  
-  // Add your test steps here:
-  // await page.click('button[data-testid="my-button"]');
-  // await expect(page.getByText('Success!')).toBeVisible();
+test('playwright setup works', async ({ page }) => {
+  // Self-contained smoke test — no app server required.
+  await page.setContent('<h1>Hello from Raiken</h1>');
+  await expect(page.locator('h1')).toHaveText('Hello from Raiken');
 });
 
-test('example test - navigation works', async ({ page }) => {
-  await page.goto('/');
-  
-  // Test navigation or interactions
-  // await page.click('a[href="/about"]');
-  // await expect(page).toHaveURL(/.*about/);
-});
+// Ready for your real app? Add another spec in this directory and:
+//   1. Navigate with page.goto('/') — Playwright starts your app automatically
+//      when playwright.config.ts has a webServer block.
+//   2. Assert with expect(page.getByRole('heading')).toBeVisible(), click with
+//      page.click('button[data-testid="my-button"]'), and so on.
+// (raiken doctor flags commented-out page.goto lines as debug leftovers, so
+// this template is prose on purpose.)
 `;
             break;
 
@@ -851,7 +959,15 @@ function getDefaultPort(projectType: string): number {
     }
 }
 
-function getDevCommand(projectInfo: ProjectInfo): string {
+/**
+ * The dev-server command for Playwright's `webServer` block, or null when the
+ * project has no script that could start one. Previously this fell back to
+ * `npm run dev` unconditionally — for a project without a `dev` script the
+ * generated config then pointed Playwright at a command that cannot exist, so
+ * the very first `raiken test` died with "Missing script: dev" before running
+ * a single test.
+ */
+function getDevCommand(projectInfo: ProjectInfo): string | null {
     // Determine the package manager command
     const runCommand =
         projectInfo.packageManager === "npm" ? "npm run" : projectInfo.packageManager;
@@ -861,8 +977,7 @@ function getDevCommand(projectInfo: ProjectInfo): string {
     if (projectInfo.scripts.start) return `${runCommand} start`;
     if (projectInfo.scripts.serve) return `${runCommand} serve`;
 
-    // Fallback to dev
-    return `${runCommand} dev`;
+    return null;
 }
 
 /**
@@ -898,10 +1013,15 @@ async function installPlaywrightPackage(
     const { cmd, args } = getPlaywrightInstallCommand(projectInfo.packageManager);
     console.log(chalk.blue(`Installing @playwright/test (${cmd} ${args.join(" ")})...`));
 
+    // The timeout handle must be cleared once the race settles — an uncleared
+    // 120s timer keeps the Node event loop (and so the whole `raiken init`
+    // process) alive for two minutes after the completion message.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let child: ReturnType<typeof spawn> | undefined;
     try {
         await Promise.race([
             new Promise<void>((resolve, reject) => {
-                const child = spawn(cmd, args, { cwd: projectPath, stdio: "inherit" });
+                child = spawn(cmd, args, { cwd: projectPath, stdio: "inherit" });
                 child.on("close", (code: number) => {
                     if (code === 0) {
                         console.log(chalk.green("✓ Installed @playwright/test"));
@@ -914,9 +1034,12 @@ async function installPlaywrightPackage(
                     reject(new Error(`Failed to start ${cmd}: ${error.message}`));
                 });
             }),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("@playwright/test install timed out")), 120000),
-            ),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    if (child && !child.killed) child.kill("SIGTERM");
+                    reject(new Error("@playwright/test install timed out"));
+                }, 120000);
+            }),
         ]);
         return true;
     } catch (error) {
@@ -927,6 +1050,8 @@ async function installPlaywrightPackage(
                 chalk.gray("   Tests won't run until it's installed."),
         );
         return false;
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }
 
@@ -945,20 +1070,28 @@ async function installPlaywrightBrowsers(
         return;
     }
 
-    console.log(chalk.blue("Installing Playwright browsers..."));
+    // The generated playwright.config.ts only enables the chromium project,
+    // so only install chromium — a bare `playwright install` downloads every
+    // browser (~450 MB) for engines the config never uses. Users who
+    // uncomment firefox/webkit can install those explicitly later.
+    console.log(chalk.blue("Installing Playwright chromium browser..."));
 
+    // Same un-cleared-timer pitfall as installPlaywrightPackage — without
+    // clearTimeout, the process lingers for the full two minutes.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let child: ReturnType<typeof spawn> | undefined;
     try {
         // Use Promise.race to implement timeout
         await Promise.race([
             new Promise<void>((resolve, reject) => {
-                const child = spawn("npx", ["playwright", "install"], {
+                child = spawn("npx", ["playwright", "install", "chromium"], {
                     cwd: projectPath,
                     stdio: "inherit", // Show output to user
                 });
 
                 child.on("close", (code: number) => {
                     if (code === 0) {
-                        console.log(chalk.green("✓ Playwright browsers installed successfully"));
+                        console.log(chalk.green("✓ Playwright chromium installed successfully"));
                         resolve();
                     } else {
                         console.log(
@@ -973,17 +1106,22 @@ async function installPlaywrightBrowsers(
                     reject(new Error(`Failed to start Playwright install: ${error.message}`));
                 });
             }),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => {
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    if (child && !child.killed) child.kill("SIGTERM");
                     console.log(chalk.yellow("⚠ Playwright browser installation timed out"));
                     reject(new Error("Playwright browser installation timed out after 2 minutes"));
-                }, 120000),
-            ),
+                }, 120000);
+            }),
         ]);
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         console.log(chalk.yellow(`⚠ Playwright browser installation failed: ${message}`));
-        console.log(chalk.gray("  You can install them manually with: npx playwright install"));
+        console.log(
+            chalk.gray("  You can install them manually with: npx playwright install chromium"),
+        );
         // Don't re-throw - this is not critical for setup completion
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }

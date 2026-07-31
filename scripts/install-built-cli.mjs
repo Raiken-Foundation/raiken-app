@@ -35,4 +35,31 @@ if (result.error) {
     console.error(result.error.message);
     process.exit(1);
 }
-process.exit(result.status ?? 1);
+if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+}
+
+// Post-install sanity check: an older raiken installed through a different
+// package manager (npm, Homebrew, …) earlier on PATH silently shadows this
+// fresh install — same version number, missing features. Warn explicitly so
+// nobody dogfoods a stale binary.
+if (process.platform !== "win32") {
+    const binDir =
+        globalBinDir ?? spawnSync(pnpm, ["bin", "--global"], { encoding: "utf8" }).stdout?.trim();
+    // Resolve with the user's PATH (process.env), not the install env — the
+    // install env prepends the fresh bin dir, which would hide a shadowing
+    // older install further down the real PATH.
+    const which = spawnSync("which", ["-a", "raiken"], { encoding: "utf8" });
+    const firstOnPath = which.stdout
+        ?.split("\n")
+        .map((line) => line.trim())
+        .find(Boolean);
+    if (binDir && firstOnPath && !firstOnPath.startsWith(path.resolve(binDir))) {
+        console.warn(
+            `\n⚠ Installed to ${binDir}, but \`raiken\` on your PATH resolves to ${firstOnPath}.\n` +
+                "  That older install shadows this one — remove it (e.g. `npm rm -g raiken` " +
+                "or delete the shim) or fix your PATH order, then run `raiken --help` to verify.",
+        );
+    }
+}
+process.exit(0);

@@ -22,10 +22,10 @@ import {
     LLM_REQUEST_TIMEOUT_MS,
     type ResolvedAIConfig,
 } from "../agent/ai-providers";
+import { loadTestDirectory } from "../config";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
-import { readConfiguredTestDirectory } from "../utils";
 
 export type CoverTargetKind = "ac" | "symbol" | "free";
 
@@ -90,7 +90,7 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     });
 
     // ---- 3. Determine output path
-    const testDir = options.testDirectory ?? readConfiguredTestDirectory(projectPath) ?? "e2e";
+    const testDir = options.testDirectory ?? loadTestDirectory(projectPath);
     const outputPath = options.outputPath
         ? path.resolve(projectPath, options.outputPath)
         : path.resolve(projectPath, testDir, defaultFileName(kind, options.target));

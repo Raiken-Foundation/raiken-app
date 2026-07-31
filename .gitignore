@@ -49,8 +49,6 @@ raiken.config.json
 storage/
 .env
 
-# Local / generated docs
-/docs/
 raiken.ctx.md
 
 # Playwright and test runner output

@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import {
     AgentMemory,
     CodeGraph,
@@ -9,6 +7,7 @@ import {
     ProjectContext,
     parseTicketFromBranch,
 } from "@raiken/core";
+import { loadIndexingConfig, loadIntegrationsConfig } from "@raiken/shared/server";
 
 export interface BootstrapOptions {
     /** Start the live file watcher for incremental indexing. Default true. */
@@ -56,8 +55,14 @@ export async function bootstrapProject(
 ): Promise<BootstrapResult> {
     const { watch = true, verbose = true } = options;
     const warnings: string[] = [];
+    // Diagnostics belong on stderr, always — callers shouldn't need to wrap
+    // this in routeDiagnosticsToStderr() to keep stdout machine-clean, and
+    // interactive surfaces show the same text either way.
     const log = (...args: unknown[]) => {
-        if (verbose) console.log(...args);
+        if (!verbose) return;
+        process.stderr.write(
+            `${args.map((a) => (typeof a === "string" ? a : String(a))).join(" ")}\n`,
+        );
     };
     const warn = (message: string) => {
         warnings.push(message);
@@ -65,14 +70,7 @@ export async function bootstrapProject(
     };
 
     log("Initializing project context...");
-    let fullScan = false;
-    try {
-        const configPath = path.join(projectPath, "raiken.config.json");
-        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-        fullScan = Boolean(config?.indexing?.fullScan);
-    } catch {
-        // Config not found or invalid — default (fullScan: false) is fine.
-    }
+    const fullScan = loadIndexingConfig(projectPath).fullScan;
 
     // Opening the DB is the one failure that makes everything downstream
     // pointless (graph, embeddings, memory all live in it) — this is the
@@ -181,7 +179,10 @@ export async function bootstrapProject(
 
     try {
         const projectContext = ProjectContext.getInstance(projectPath);
-        await projectContext.initialize(verbose);
+        // Bootstrap narrates its own consolidated lines (above/below); the
+        // engine's internal step logs ("Initializing ProjectContext...") are
+        // debug noise that leaked into user output before.
+        await projectContext.initialize(false);
 
         if (watch) {
             projectContext.startWatching();
@@ -209,7 +210,7 @@ export async function bootstrapProject(
 
     try {
         const agentMemory = AgentMemory.getInstance(projectPath);
-        agentMemory.initialize(verbose);
+        agentMemory.initialize(false);
         const prefCount = Object.keys(agentMemory.getAllPreferences()).length;
         if (prefCount > 0) log(`Memory: ${prefCount} preferences loaded`);
     } catch (error) {
@@ -224,13 +225,7 @@ export async function bootstrapProject(
     try {
         const branch = getCurrentBranch(projectPath);
         if (branch) {
-            let integrationConfig: Record<string, unknown> | undefined;
-            try {
-                const cfgPath = path.join(projectPath, "raiken.config.json");
-                integrationConfig = JSON.parse(fs.readFileSync(cfgPath, "utf-8"))?.integrations;
-            } catch {
-                /* no config */
-            }
+            const integrationConfig = loadIntegrationsConfig(projectPath);
             const parsed = parseTicketFromBranch(
                 branch,
                 integrationConfig as Parameters<typeof parseTicketFromBranch>[1],

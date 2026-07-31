@@ -7,8 +7,9 @@
  */
 
 import * as path from "node:path";
-import { getHookStatus, type HookType, installHook, uninstallHook } from "@raiken/shared";
+import { getHookStatus, type HookType, installHook, uninstallHook } from "@raiken/shared/server";
 import chalk from "chalk";
+import { exitUsage } from "../errors";
 
 interface HooksInstallOptions {
     type?: string;
@@ -24,7 +25,9 @@ function coerceType(value: string | undefined): HookType | undefined {
     if (!value) return undefined;
     const v = value.toLowerCase();
     if (v === "pre-commit" || v === "pre-push") return v;
-    throw new Error(`Unknown hook type "${value}". Use pre-commit or pre-push.`);
+    // Usage error — a plain throw would surface as the masked
+    // "An unexpected error occurred." with a runtime-failure exit code.
+    exitUsage(`Unknown hook type: "${value}". Use pre-commit or pre-push.`);
 }
 
 export async function hooksInstallCommand(options: HooksInstallOptions): Promise<void> {

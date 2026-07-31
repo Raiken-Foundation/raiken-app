@@ -11,9 +11,12 @@ import {
     writeTestFile,
 } from "../agent/tools";
 import { loadAutonomyConfig } from "../config";
+import { mergeCorrelationContext, runDetachedOperation } from "../observability";
 import { acquireProjectOperation } from "../operations";
 import { executeRepairAttempt } from "../testing/repair-attempt";
 import { repairLoopService } from "../testing/repair-loop-service";
+import { parsedRunToTestRunResults } from "../testing/run-outcome";
+import { testExecutionService } from "../testing/test-execution-service";
 import { type HitlWorkflowRecord, WorkflowStore } from "./workflow-store";
 
 export type ContinueHitlWorkflowInput =
@@ -23,6 +26,7 @@ export type ContinueHitlWorkflowInput =
           action: "save";
           decision: "approve" | "reject";
           filePath?: string;
+          avoidOverwrite?: boolean;
       }
     | {
           projectPath: string;
@@ -42,6 +46,28 @@ export interface HitlWorkflowDependencies {
     repairAttempt?: typeof executeRepairAttempt;
     writeTest?: typeof writeTestFile;
     executeRun?: typeof executeTestRun;
+}
+
+async function executeApprovedUserRun(
+    projectPath: string,
+    testFile: string,
+): Promise<ExecuteTestRunResult> {
+    const result = await testExecutionService.run(
+        projectPath,
+        { testFile },
+        { operationHeld: true },
+    );
+    return {
+        success: result.success,
+        results: result.parsedRun
+            ? parsedRunToTestRunResults(result.parsedRun, testFile)
+            : undefined,
+        message: result.success
+            ? "Test passed"
+            : result.cancelled
+              ? "Test run cancelled"
+              : result.stderr || "Test failed",
+    };
 }
 
 export async function persistHitlPauseWorkflow(input: {
@@ -203,113 +229,146 @@ export async function advanceHitlWorkflow(
     },
     dependencies: HitlWorkflowDependencies = {},
 ): Promise<HitlWorkflowRecord> {
-    const store = new WorkflowStore(input.projectPath);
-    const workflow = await store.load(input.workflowId);
-    if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
-    if (workflow.status !== "repairing") return workflow;
-    const lease = await acquireProjectOperation(input.projectPath, "test");
-    try {
-        return await driveRepairLoop(store, workflow, input.projectPath, undefined, dependencies);
-    } finally {
-        await lease.release();
-    }
+    return runDetachedOperation(
+        { workflowId: input.workflowId, projectPath: input.projectPath },
+        async () => {
+            mergeCorrelationContext({
+                workflowId: input.workflowId,
+                projectPath: input.projectPath,
+            });
+            const store = new WorkflowStore(input.projectPath);
+            const workflow = await store.load(input.workflowId);
+            if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
+            if (workflow.status !== "repairing") return workflow;
+            const lease = await acquireProjectOperation(input.projectPath, "test");
+            try {
+                return await driveRepairLoop(
+                    store,
+                    workflow,
+                    input.projectPath,
+                    undefined,
+                    dependencies,
+                );
+            } finally {
+                await lease.release();
+            }
+        },
+    );
 }
 
 export async function continueHitlWorkflow(
     input: ContinueHitlWorkflowInput,
     dependencies: HitlWorkflowDependencies = {},
 ): Promise<ContinueHitlWorkflowResult> {
-    const store = new WorkflowStore(input.projectPath);
-    const workflow = await store.load(input.workflowId);
-    if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
-
-    if (input.action === "save") {
-        if (workflow.status !== "await_save_approval") {
-            throw new Error("This workflow is not awaiting a save decision.");
-        }
-        if (input.decision === "reject") {
-            const cancelled = await store.update(workflow.id, {
-                status: "cancelled",
-                pendingAction: undefined,
+    return runDetachedOperation(
+        { workflowId: input.workflowId, projectPath: input.projectPath },
+        async () => {
+            mergeCorrelationContext({
+                workflowId: input.workflowId,
+                projectPath: input.projectPath,
             });
-            return { workflow: cancelled ?? workflow };
-        }
+            const store = new WorkflowStore(input.projectPath);
+            const workflow = await store.load(input.workflowId);
+            if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
 
-        const filePath = input.filePath?.trim() || workflow.savedTestPath;
-        if (!filePath || !workflow.testDraft)
-            throw new Error("The saved test draft is unavailable.");
-        const lease = await acquireProjectOperation(input.projectPath, "test");
-        try {
-            const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
-            const saved = await writeTestFile(
-                input.projectPath,
-                filePath,
-                workflow.testDraft,
-                workflow.testName,
-                autonomy,
-            );
-            if (!saved.success) {
-                const failed = await store.update(workflow.id, {
-                    status: "failed",
+            if (input.action === "save") {
+                if (workflow.status !== "await_save_approval") {
+                    throw new Error("This workflow is not awaiting a save decision.");
+                }
+                if (input.decision === "reject") {
+                    const cancelled = await store.update(workflow.id, {
+                        status: "cancelled",
+                        pendingAction: undefined,
+                    });
+                    return { workflow: cancelled ?? workflow };
+                }
+
+                const filePath = input.filePath?.trim() || workflow.savedTestPath;
+                if (!filePath || !workflow.testDraft)
+                    throw new Error("The saved test draft is unavailable.");
+                const lease = await acquireProjectOperation(input.projectPath, "test");
+                try {
+                    const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
+                    const saved = await writeTestFile(
+                        input.projectPath,
+                        filePath,
+                        workflow.testDraft,
+                        workflow.testName,
+                        autonomy,
+                        { avoidOverwrite: input.avoidOverwrite },
+                    );
+                    if (!saved.success) {
+                        const failed = await store.update(workflow.id, {
+                            status: "failed",
+                            pendingAction: undefined,
+                        });
+                        return { workflow: failed ?? workflow };
+                    }
+                    const updated = await store.update(workflow.id, {
+                        savedTestPath: filePath,
+                        status: workflow.shouldRunTests ? "await_run_approval" : "completed",
+                        pendingAction: workflow.shouldRunTests ? "run" : undefined,
+                    });
+                    return { workflow: updated ?? workflow, savedPath: filePath };
+                } finally {
+                    await lease.release();
+                }
+            }
+
+            if (workflow.status !== "await_run_approval") {
+                throw new Error("This workflow is not awaiting a run decision.");
+            }
+            if (input.decision === "reject") {
+                const cancelled = await store.update(workflow.id, {
+                    status: "cancelled",
                     pendingAction: undefined,
                 });
-                return { workflow: failed ?? workflow };
+                return { workflow: cancelled ?? workflow };
             }
-            const updated = await store.update(workflow.id, {
-                savedTestPath: filePath,
-                status: workflow.shouldRunTests ? "await_run_approval" : "completed",
-                pendingAction: workflow.shouldRunTests ? "run" : undefined,
-            });
-            return { workflow: updated ?? workflow, savedPath: filePath };
-        } finally {
-            await lease.release();
-        }
-    }
+            if (!workflow.savedTestPath) throw new Error("The saved test path is unavailable.");
 
-    if (workflow.status !== "await_run_approval") {
-        throw new Error("This workflow is not awaiting a run decision.");
-    }
-    if (input.decision === "reject") {
-        const cancelled = await store.update(workflow.id, {
-            status: "cancelled",
-            pendingAction: undefined,
-        });
-        return { workflow: cancelled ?? workflow };
-    }
-    if (!workflow.savedTestPath) throw new Error("The saved test path is unavailable.");
-
-    const lease = await acquireProjectOperation(input.projectPath, "test");
-    try {
-        const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
-        const run = await (dependencies.executeRun ?? executeTestRun)(
-            input.projectPath,
-            workflow.savedTestPath,
-            false,
-            autonomy,
-            undefined,
-            true,
-        );
-        const results = run.results ?? [];
-        const next = repairLoopService.nextStatus(
-            { testRunResult: results, repairAttempts: workflow.repairAttempts },
-            autonomy,
-        );
-        const updated = await store.update(workflow.id, {
-            status: next,
-            pendingAction: undefined,
-            runSummary: {
-                passed: run.success,
-                failureCount: results.filter((result) => result.status !== "passed").length,
-            },
-            lastRunResults: results,
-            statusMessage: run.message,
-        });
-        const nextWorkflow =
-            updated?.status === "repairing"
-                ? await driveRepairLoop(store, updated, input.projectPath, undefined, dependencies)
-                : (updated ?? workflow);
-        return { workflow: nextWorkflow, run };
-    } finally {
-        await lease.release();
-    }
+            const lease = await acquireProjectOperation(input.projectPath, "test");
+            try {
+                const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
+                const run = dependencies.executeRun
+                    ? await dependencies.executeRun(
+                          input.projectPath,
+                          workflow.savedTestPath,
+                          false,
+                          autonomy,
+                          undefined,
+                          true,
+                      )
+                    : await executeApprovedUserRun(input.projectPath, workflow.savedTestPath);
+                const results = run.results ?? [];
+                const next = repairLoopService.nextStatus(
+                    { testRunResult: results, repairAttempts: workflow.repairAttempts },
+                    autonomy,
+                );
+                const updated = await store.update(workflow.id, {
+                    status: next,
+                    pendingAction: undefined,
+                    runSummary: {
+                        passed: run.success,
+                        failureCount: results.filter((result) => result.status !== "passed").length,
+                    },
+                    lastRunResults: results,
+                    statusMessage: run.message,
+                });
+                const nextWorkflow =
+                    updated?.status === "repairing"
+                        ? await driveRepairLoop(
+                              store,
+                              updated,
+                              input.projectPath,
+                              undefined,
+                              dependencies,
+                          )
+                        : (updated ?? workflow);
+                return { workflow: nextWorkflow, run };
+            } finally {
+                await lease.release();
+            }
+        },
+    );
 }

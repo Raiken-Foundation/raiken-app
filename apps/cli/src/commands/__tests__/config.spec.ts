@@ -15,9 +15,6 @@ import type { ModelInfo } from "@raiken/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withThrowExit } from "../../repl/exit";
 
-// The REPL wizard's model step fetches the live model catalog. Stubbed to an
-// empty list by default (falls back to freeform text entry, no network) —
-// the one test that needs the numbered picker overrides this per-call.
 const mockListProviderModels = vi.fn(async () => ({ models: [] as ModelInfo[] }));
 
 vi.mock(import("@raiken/core"), async (importOriginal) => {
@@ -28,7 +25,7 @@ vi.mock(import("@raiken/core"), async (importOriginal) => {
     };
 });
 
-const { buildAiConfigPatch, configCommand, looksLikeApiKey } = await import("../config");
+const { configCommand, looksLikeApiKey } = await import("../config");
 
 const AI_ENV_VARS = [
     "OPENROUTER_API_KEY",
@@ -44,38 +41,6 @@ const AI_ENV_VARS = [
     "PERPLEXITY_API_KEY",
     "AI_API_KEY",
 ];
-
-describe("buildAiConfigPatch", () => {
-    it("builds a patch from provider/model/baseUrl flags", () => {
-        const result = buildAiConfigPatch({ provider: "openai", model: "gpt-4o" });
-        expect(result).toEqual({ patch: { provider: "openai", model: "gpt-4o" } });
-    });
-
-    it("lowercases and trims a provider id", () => {
-        const result = buildAiConfigPatch({ provider: " OpenAI " });
-        expect(result).toEqual({ patch: { provider: "openai" } });
-    });
-
-    it("rejects an unknown provider id", () => {
-        const result = buildAiConfigPatch({ provider: "bogus" });
-        expect("error" in result && result.error).toContain('Unknown provider: "bogus"');
-    });
-
-    it("sets apiKey from --api-key", () => {
-        const result = buildAiConfigPatch({ apiKey: "sk-test-123" });
-        expect(result).toEqual({ patch: { apiKey: "sk-test-123" } });
-    });
-
-    it("--unset-key uses an explicit secret clear instruction", () => {
-        const result = buildAiConfigPatch({ apiKey: "sk-test-123", unsetKey: true });
-        expect(result).toEqual({ patch: {}, clearSecrets: ["ai.apiKey"] });
-    });
-
-    it("returns an empty patch when no relevant flags are set", () => {
-        const result = buildAiConfigPatch({ json: true, list: true });
-        expect(result).toEqual({ patch: {} });
-    });
-});
 
 describe("looksLikeApiKey", () => {
     it("recognizes known provider key prefixes", () => {
@@ -166,22 +131,22 @@ describe("configCommand", () => {
         expect((readConfig().ai as Record<string, unknown>).apiKey).toBeUndefined();
     });
 
-    it("rejects an unknown provider with exit code 1 and no file write", async () => {
+    it("rejects an unknown provider with exit code 2 and no file write", async () => {
         const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
         const code = await withThrowExit(() => configCommand(undefined, { provider: "bogus" }));
 
-        expect(code).toBe(1);
+        expect(code).toBe(2);
         expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown provider: "bogus"'));
         expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
     });
 
-    it("rejects an unsupported config section with exit code 1", async () => {
+    it("rejects an unsupported config section with exit code 3", async () => {
         const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
         const code = await withThrowExit(() => configCommand("testing", {}));
 
-        expect(code).toBe(1);
+        expect(code).toBe(3);
         expect(errorSpy).toHaveBeenCalledWith(
             expect.stringContaining("Unknown provider or config section"),
         );
@@ -194,7 +159,7 @@ describe("configCommand", () => {
             configCommand("sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789", {}),
         );
 
-        expect(code).toBe(1);
+        expect(code).toBe(3);
         expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("masked key prompt"));
         expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
     });
@@ -253,7 +218,7 @@ describe("configCommand", () => {
 
         const code = await withThrowExit(() => configCommand(undefined, { provider: "custom" }));
 
-        expect(code).toBe(1);
+        expect(code).toBe(2);
         expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("require --base-url"));
         expect(fs.existsSync(path.join(projectPath, "raiken.config.json"))).toBe(false);
     });

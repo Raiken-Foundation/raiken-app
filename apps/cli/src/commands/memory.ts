@@ -1,10 +1,15 @@
-import { AgentMemory } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import { AgentMemory, createProjectApplication } from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
+import { exitUsage } from "../errors";
+import { confirmDestructive } from "./confirm-destructive";
 
 interface MemoryOptions {
     json?: boolean;
+    /** Skip the confirmation prompt for destructive actions (scripts / CI). */
+    force?: boolean;
+    /** REPL-injected confirm prompt (inquirer can't run inside the REPL). */
+    confirm?: (message: string) => Promise<boolean>;
 }
 
 /** Group a flat preference map into human-friendly sections for display. */
@@ -40,9 +45,18 @@ export async function memoryCommand(
 ): Promise<void> {
     const projectPath = process.cwd();
 
-    if ((sub || "").toLowerCase() === "clear") {
-        const caller = appRouter.createCaller({ projectPath });
-        await caller.clearChatMessages();
+    const action = (sub || "").toLowerCase();
+
+    if (action === "clear") {
+        const ok = await confirmDestructive(
+            "Reset agent working memory (goal, remembered exploration, pause + observed login) for this project",
+            { force: options.force, confirm: options.confirm },
+        );
+        if (!ok) {
+            console.log(dim("\n  Clear cancelled.\n"));
+            return;
+        }
+        createProjectApplication(projectPath).chat.clearAgentMemory();
         console.log(
             chalk.green("\n  ✓ Reset agent working memory") +
                 dim(" (goal, remembered exploration, pause + observed login).\n"),
@@ -50,11 +64,19 @@ export async function memoryCommand(
         return;
     }
 
-    // Route diagnostics to stderr BEFORE initialize() (which logs) so --json
-    // stdout stays clean for scripting.
+    // "show" is the documented default action (bare `raiken memory`) — accept
+    // it explicitly; anything else is a usage error.
+    if (action && action !== "show") {
+        exitUsage(
+            `Unknown memory action: '${sub}'\nUsage: raiken memory [show|clear] [--json] [--force]`,
+        );
+    }
+
+    // Route diagnostics to stderr BEFORE initialize() so --json stdout stays
+    // clean for scripting. initialize(false): this command renders its own UI.
     const restore = options.json ? routeDiagnosticsToStderr() : null;
     const mem = AgentMemory.getInstance(projectPath);
-    mem.initialize();
+    mem.initialize(false);
     const prefs = mem.getAllPreferences();
 
     if (options.json) {

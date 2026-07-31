@@ -19,6 +19,7 @@
         "paths": {
             "@raiken/core": ["libs/core/src/index.ts"],
             "@raiken/shared": ["libs/shared/src/index.ts"],
+            "@raiken/shared/server": ["libs/shared/src/server.ts"],
             "@raiken/shared/lib/version": ["libs/shared/src/lib/version.ts"]
         }
     },

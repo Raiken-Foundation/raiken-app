@@ -4,6 +4,8 @@
 export * from "./agent/index";
 // Analysis module
 export * from "./analysis/index";
+// Application seam (project-scoped orchestration)
+export * from "./application/index";
 // Project artifact access
 export * from "./artifacts/index";
 // Browser module
@@ -22,10 +24,14 @@ export * from "./cover/index";
 export * from "./database/index";
 // Doctor (test-suite anti-pattern lint)
 export * from "./doctor/index";
+// Production error taxonomy
+export * from "./errors/index";
 // Evals (agent eval harness: scenarios, targets, scorers, runner)
 export * from "./evals/index";
 // Integrations module
 export * from "./integrations/index";
+// Structured observability (correlation, logging, health probes)
+export * from "./observability/index";
 // Cross-process operation coordination
 export * from "./operations/index";
 // Orchestrator

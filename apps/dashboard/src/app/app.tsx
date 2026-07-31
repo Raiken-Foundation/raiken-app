@@ -2,6 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { NavRail } from "../components/nav-rail";
 import type { DashboardRoute } from "../utils/slash-commands";
 import { trpc } from "../utils/trpc";
+import {
+    ConnectionDegraded,
+    ConnectionError,
+    ConnectionNotReady,
+    deriveConnectionFlags,
+} from "./connection-status";
 // `TestingView` is *not* lazy because it owns the chat sidebar, and we
 // need to keep that subtree mounted across navigation. If we lazy-load
 // it, the very first nav to `#/discovery` (without TestingView ever
@@ -48,90 +54,6 @@ function ViewLoader() {
     );
 }
 
-function ConnectionError() {
-    return (
-        <div className="connection-error-overlay">
-            <div className="connection-error-card">
-                <header className="connection-error-head">
-                    <span className="q-sev q-sev--fail">OFFLINE</span>
-                    <span>raiken/server</span>
-                </header>
-                <div className="connection-error-body">
-                    <p className="connection-error-msg">
-                        backend not responding. start it from a terminal:
-                    </p>
-                    <pre className="connection-error-cmd">
-                        <span className="connection-error-prompt">$</span> raiken start
-                    </pre>
-                    <button
-                        type="button"
-                        className="q-btn q-btn--primary"
-                        onClick={() => window.location.reload()}
-                    >
-                        retry
-                    </button>
-                </div>
-            </div>
-            <style>{`
-                .connection-error-overlay {
-                    position: fixed;
-                    inset: 0;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: rgba(0, 0, 0, 0.85);
-                    z-index: 9999;
-                    backdrop-filter: blur(4px);
-                }
-                .connection-error-card {
-                    display: flex;
-                    flex-direction: column;
-                    background: var(--bg-elev);
-                    border: 1px solid var(--hair);
-                    width: 420px;
-                    max-width: calc(100vw - 2rem);
-                    font-family: var(--mono);
-                }
-                .connection-error-head {
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                    padding: 0.5rem 0.75rem;
-                    background: var(--bg-bar);
-                    border-bottom: 1px solid var(--hair);
-                    font-size: 11px;
-                    color: var(--ink-dim);
-                }
-                .connection-error-body {
-                    padding: 1.25rem;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0.875rem;
-                }
-                .connection-error-msg {
-                    margin: 0;
-                    color: var(--ink);
-                    font-size: 12.5px;
-                    line-height: 1.55;
-                }
-                .connection-error-cmd {
-                    margin: 0;
-                    padding: 0.5rem 0.75rem;
-                    background: var(--bg);
-                    border: 1px solid var(--hair);
-                    color: var(--ink);
-                    font-family: var(--mono);
-                    font-size: 12.5px;
-                }
-                .connection-error-prompt {
-                    color: var(--accent);
-                    margin-right: 0.4375rem;
-                }
-            `}</style>
-        </div>
-    );
-}
-
 // Attention badges are cheap "does anything need a look" checks, not
 // realtime telemetry — a slow 30s poll keeps the nav rail honest without
 // adding meaningful load, matching the getHealth poll below.
@@ -149,7 +71,10 @@ export function App() {
         retryDelay: 1000,
         refetchInterval: 30000,
     });
-    const isBackendDown = healthQuery.isError;
+    const { isBackendDown, isBackendNotReady, isBackendDegraded } = deriveConnectionFlags({
+        isError: healthQuery.isError,
+        data: healthQuery.data,
+    });
 
     // Nav-rail attention dots — the same "don't make the user go hunting for
     // what needs them" idea as the REPL's startup banner, just live-updating
@@ -225,6 +150,16 @@ export function App() {
     return (
         <div className="app-shell">
             {isBackendDown && <ConnectionError />}
+            {isBackendNotReady && (
+                <ConnectionNotReady
+                    checks={healthQuery.data?.checks as Record<string, string> | undefined}
+                />
+            )}
+            {isBackendDegraded && (
+                <ConnectionDegraded
+                    checks={healthQuery.data?.checks as Record<string, string> | undefined}
+                />
+            )}
             <NavRail
                 activeView={currentView}
                 activeSidebarTab={sidebarTab}

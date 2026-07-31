@@ -22,7 +22,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { CodeGraphDB, SiteKnowledgeDB } from "@raiken/core";
+import { CodeGraphDB, canonicalProjectPath, SiteKnowledgeDB } from "@raiken/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     getResumeContext,
@@ -42,11 +42,12 @@ describe("discover --continue resume context (disc-5)", () => {
     });
 
     function seedPausedAuthSession(): { sessionId: number; blockerId: number } {
+        const canonicalPath = canonicalProjectPath(projectPath);
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), canonicalPath);
             const sessionId = siteDb.saveSession({
-                projectPath,
+                projectPath: canonicalPath,
                 startUrl: "https://example.test/",
                 status: "paused",
                 pagesDiscovered: 2,
@@ -59,7 +60,7 @@ describe("discover --continue resume context (disc-5)", () => {
                 maxDepth: 3,
             });
             const blockerId = siteDb.saveAuthBlocker({
-                projectPath,
+                projectPath: canonicalPath,
                 url: "https://example.test/dashboard",
                 blockerType: "login_redirect",
                 discoveredAt: Date.now(),
@@ -81,11 +82,12 @@ describe("discover --continue resume context (disc-5)", () => {
     });
 
     it("returns no pending auth blockers when the session paused for an unrelated reason", async () => {
+        const canonicalPath = canonicalProjectPath(projectPath);
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), canonicalPath);
             siteDb.saveSession({
-                projectPath,
+                projectPath: canonicalPath,
                 startUrl: "https://example.test/",
                 status: "paused",
                 pagesDiscovered: 10,
@@ -130,7 +132,10 @@ describe("discover --continue resume context (disc-5)", () => {
         // any future audit both depend on this being traceable.
         const db = new CodeGraphDB(projectPath);
         try {
-            const siteDb = new SiteKnowledgeDB(db.getRawDatabase(), projectPath);
+            const siteDb = new SiteKnowledgeDB(
+                db.getRawDatabase(),
+                canonicalProjectPath(projectPath),
+            );
             const all = siteDb.getAllBlockers();
             expect(all).toHaveLength(1);
             expect(all[0]?.resolution).toBe("provide_state");

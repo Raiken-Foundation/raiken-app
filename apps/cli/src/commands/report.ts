@@ -8,10 +8,12 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { appRouter } from "@raiken/shared";
+import { createProjectApplication, type TestExecutionInput } from "@raiken/core";
 import chalk from "chalk";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
+import { CLI_EXIT, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../repl/exit";
+import { partitionSuiteSpecs, quarantineSkipNotice } from "./run-scope";
 
 interface ReportOptions {
     from?: string;
@@ -78,8 +80,24 @@ export async function reportCommand(
 ): Promise<void> {
     const projectPath = process.cwd();
     const restore = options.json ? routeDiagnosticsToStderr() : null;
-    const caller = appRouter.createCaller({ projectPath });
+    const app = createProjectApplication(projectPath);
     const formats = parseFormats(options.format);
+
+    // Validate the output directory BEFORE running the suite — the report
+    // generator enforces the same containment, but discovering a bad --output
+    // after a full test run wastes the entire run.
+    if (options.output) {
+        const resolvedOutput = path.resolve(projectPath, options.output);
+        const rel = path.relative(projectPath, resolvedOutput);
+        if (rel.startsWith("..") || path.isAbsolute(rel)) {
+            restore?.();
+            process.stderr.write(
+                chalk.red("\n  ✗ Report output directory must be inside the project.\n"),
+            );
+            cliExit(CLI_EXIT.USAGE);
+            return;
+        }
+    }
 
     let report: unknown;
     let rawOutput: string | undefined;
@@ -95,19 +113,36 @@ export async function reportCommand(
             restore?.();
             process.stderr.write(
                 chalk.red(
-                    `\n  ✗ Could not read report JSON at ${options.from}: ${
-                        err instanceof Error ? err.message : err
-                    }\n`,
+                    `\n  ✗ Could not read report JSON at ${options.from}: ${safeCliErrorMessage(err)}\n`,
                 ),
             );
-            cliExit(2);
+            cliExit(CLI_EXIT.USAGE);
             return;
         }
     } else {
         if (!options.json) {
             process.stderr.write(dim(`\n  Running tests${file ? ` for ${file}` : ""}…\n`));
         }
-        const run = (await caller.runTests(file ? { testFile: file } : {})) as RunTestsResult;
+        // Full-suite reports honor the quarantine list, same as `raiken test` —
+        // a report "10 tests, 8 failed" must not secretly include known-flaky
+        // specs the test command skipped. An explicit file argument runs as-is.
+        let runInput: TestExecutionInput = file ? { testFile: file } : {};
+        if (!file) {
+            const partition = await partitionSuiteSpecs(projectPath);
+            if (partition) {
+                if (partition.excluded.length > 0) {
+                    process.stderr.write(dim(quarantineSkipNotice(partition.excluded)));
+                }
+                if (partition.included.length === 0) {
+                    restore?.();
+                    process.stderr.write(dim("  Every spec is quarantined — nothing to run.\n"));
+                    cliExit(0);
+                    return;
+                }
+                runInput = { testFiles: partition.included };
+            }
+        }
+        const run = (await app.testing.runTests(runInput)) as RunTestsResult;
         report = run.results;
         rawOutput = run.stdout;
         testSuccess = run.success;
@@ -117,12 +152,13 @@ export async function reportCommand(
                 chalk.red("\n  ✗ Test run produced no parseable report.\n") +
                     (run.stderr ? dim(run.stderr.split("\n").slice(0, 8).join("\n")) : ""),
             );
-            cliExit(2);
+            // The invocation was valid; the run itself failed to produce output.
+            cliExit(CLI_EXIT.RUNTIME_FAILURE);
             return;
         }
     }
 
-    const result = (await caller.generateTestReport({
+    const result = (await app.testing.generateTestReport({
         report,
         rawOutput,
         testFile: file,

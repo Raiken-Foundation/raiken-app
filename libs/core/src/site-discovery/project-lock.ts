@@ -24,7 +24,13 @@
  * dead holder can never wedge a project's discovery forever.
  */
 
-import { acquireProjectOperation } from "../operations";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { lock as lockfileLock } from "proper-lockfile";
+import { conflictError } from "../errors";
+
+const STALE_MS = 45_000;
+const UPDATE_MS = 15_000;
 
 /**
  * Stale threshold for the lock's mtime. Generous relative to the
@@ -43,6 +49,30 @@ export interface DiscoveryLockHandle {
  * rather than silently proceeding.
  */
 export async function acquireDiscoveryLock(projectPath: string): Promise<DiscoveryLockHandle> {
-    const lease = await acquireProjectOperation(projectPath, "discovery");
-    return { release: () => lease.release() };
+    const directory = path.join(projectPath, ".raiken");
+    fs.mkdirSync(directory, { recursive: true });
+
+    try {
+        const releaseLock = await lockfileLock(path.join(directory, "discovery.lock"), {
+            realpath: false,
+            stale: STALE_MS,
+            update: UPDATE_MS,
+            retries: 0,
+        });
+        let released = false;
+        return {
+            async release() {
+                if (released) return;
+                released = true;
+                await releaseLock();
+            },
+        };
+    } catch (error) {
+        if ((error as { code?: string })?.code === "ELOCKED") {
+            throw conflictError("Discovery is already running for this project.", {
+                code: "DISCOVERY_ALREADY_RUNNING",
+            });
+        }
+        throw error;
+    }
 }

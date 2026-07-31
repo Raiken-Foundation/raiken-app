@@ -9,7 +9,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { checkLoginRedirectChain, detectAuth, looksLikeLoginUrl } from "../detectors/auth";
+import {
+    checkLoginRedirectChain,
+    detectAuth,
+    looksLikeLoginUrl,
+    looksLikeLogoutUrl,
+} from "../detectors/auth";
 
 const PROJECT_PATH = "/test/project";
 
@@ -383,5 +388,42 @@ describe("looksLikeLoginUrl", () => {
         "http://example.com/login/callback",
     ])("does NOT match auth-completion URL: %s", (url) => {
         expect(looksLikeLoginUrl(url)).toBe(false);
+    });
+});
+
+describe("looksLikeLogoutUrl", () => {
+    // The crawler consults this at the enqueue layer: while a storage
+    // state is loaded, navigating one of these would destroy the session
+    // the crawl is running on (the auth detector already excludes them
+    // from wall-detection, but that never stopped the navigation).
+    it.each([
+        "http://example.com/logout",
+        "http://example.com/logout/",
+        "http://example.com/log-out",
+        "http://example.com/log_out",
+        "http://example.com/signout",
+        "http://example.com/sign-out",
+        "http://example.com/sign_out",
+        "http://example.com/users/sign_out",
+        "http://example.com/auth/signout",
+        "http://example.com/account/logout?next=/",
+    ])("matches logout-shaped URL: %s", (url) => {
+        expect(looksLikeLogoutUrl(url)).toBe(true);
+    });
+
+    it.each([
+        "http://example.com/",
+        "http://example.com/login",
+        "http://example.com/dashboard",
+        // A benign return-URL in the query string is not a logout action —
+        // the predicate matches on the pathname only.
+        "http://example.com/login?next=/logout",
+        "http://example.com/settings?return=/signout",
+        // Segment-anchored: a longer segment that merely contains the
+        // word must not match.
+        "http://example.com/signout-everywhere",
+        "http://example.com/logoutism",
+    ])("does not match non-logout URL: %s", (url) => {
+        expect(looksLikeLogoutUrl(url)).toBe(false);
     });
 });

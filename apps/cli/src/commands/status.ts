@@ -1,5 +1,4 @@
-import { AgentMemory, getProvider, resolveAIConfig } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import { AgentMemory, createProjectApplication, getProvider, resolveAIConfig } from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 
@@ -12,27 +11,31 @@ import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 export async function statusCommand(options: { json?: boolean }): Promise<void> {
     const projectPath = process.cwd();
     const restore = options.json ? routeDiagnosticsToStderr() : null;
-    const caller = appRouter.createCaller({ projectPath });
+    const app = createProjectApplication(projectPath);
 
     const [graph, embeddings, discSession, discStats] = await Promise.all([
-        caller.getGraphStats({}).catch(() => null),
-        caller.getEmbeddingsStats({}).catch(() => null),
-        caller.getDiscoverySession({}).catch(() => null),
-        caller.getDiscoveryStats({}).catch(() => null),
+        Promise.resolve(app.indexing.getGraphStats({})).catch(() => null),
+        Promise.resolve(app.indexing.getEmbeddingsStats({})).catch(() => null),
+        Promise.resolve(app.discovery.getSessionView()).catch(() => null),
+        Promise.resolve(app.discovery.getStats()).catch(() => null),
     ]);
 
+    // Count spec files from disk (the same source `raiken test --list` and the
+    // dashboard use) — NOT the code graph: the graph isn't built until
+    // `raiken index` and doesn't reliably include the test directory, so a
+    // graph-based count reported 0 for fully working suites.
     let testCount = 0;
     try {
-        const files = await caller.getGraphFiles({ limit: 5000, offset: 0 });
-        testCount = files.files.filter((f) => /\.(spec|test|e2e)\.[tj]sx?$/.test(f.path)).length;
+        const { files } = await app.testing.listTestFiles();
+        testCount = files.length;
     } catch {
-        /* graph not built yet */
+        /* test directory unreadable */
     }
 
     let prefCount = 0;
     try {
         const mem = AgentMemory.getInstance(projectPath);
-        mem.initialize();
+        mem.initialize(false);
         prefCount = Object.keys(mem.getAllPreferences()).length;
     } catch {
         /* memory unavailable */
@@ -75,14 +78,8 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
         ai.apiKey
             ? chalk.green(`configured (${ai.apiKeySource})`)
             : providerDef.envVars.length === 0
-              ? // e.g. Ollama — a local, unauthenticated server. Reporting
-                // "missing" here would be a false alarm.
-                chalk.gray("not required for this provider")
-              : // `raiken init` never asks for or writes an API key, so
-                // pointing there was a dead end — an env var (checked
-                // automatically), `raiken config`, or the dashboard's
-                // Settings view all write ai.apiKey to raiken.config.json.
-                chalk.yellow(
+              ? chalk.gray("not required for this provider")
+              : chalk.yellow(
                     `missing — set ${providerDef.envVars[0]}, run \`raiken config\`, or configure ` +
                         "it in the dashboard's Settings view",
                 ),

@@ -4,14 +4,17 @@ import { fullAstToSearchableText } from "../analysis/ast-parser";
 import { EntryPointDetector } from "../analysis/entry-points";
 import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import { ProjectContext } from "../analysis/project-context";
-import { loadAutonomyConfig } from "../config";
+import { loadAutonomyConfig, loadTestDirectory } from "../config";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
+import { persistenceError } from "../errors";
+import { mergeCorrelationContext } from "../observability";
 import type { ParsedFile, TemplateSelector } from "../types";
 import { persistHitlPauseWorkflow } from "../workflows";
 import { createLangChainModel, getProvider, resolveAIConfig } from "./ai-providers";
 import { createAgentGraph } from "./graph/graph";
+import { explicitlyRequestsDiscoveryClear } from "./graph/nodes/discovery-management";
 import {
     type AgentIntent,
     type AuthPrecondition,
@@ -102,17 +105,7 @@ export async function gatherContext(
 ): Promise<ContextData> {
     const db = new CodeGraphDB(projectPath);
 
-    // Load config for test directory
-    const configPath = path.join(projectPath, "raiken.config.json");
-    let testDirectory = "e2e";
-    if (fs.existsSync(configPath)) {
-        try {
-            const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-            testDirectory = config.testDirectory || testDirectory;
-        } catch {
-            // Config not found, use default
-        }
-    }
+    const testDirectory = loadTestDirectory(projectPath);
 
     const files: ContextData["files"] = [];
     let totalTokens = 0;
@@ -347,6 +340,7 @@ export async function gatherContext(
 // ============================================================================
 
 import { type AutonomySettings, createAgentTools, type HITLAction, type ToolResult } from "./tools";
+import { redactToolArgs } from "./tools/shared/redaction";
 
 /**
  * Load autonomy settings from raiken.config.json, optionally overridden for
@@ -547,6 +541,8 @@ export function humanizeToolCall(toolName: string): string {
         getDiscoveryOverview: "Reviewing site map",
         listDiscoveredPages: "Listing discovered pages",
         getDiscoveredPageSnapshot: "Loading page snapshot",
+        clearDiscoveryData: "Clearing discovery data",
+        startDiscovery: "Starting site discovery",
         startBrowser: "Starting browser",
         closeBrowser: "Closing browser",
         navigateTo: "Navigating",
@@ -569,27 +565,7 @@ export function humanizeToolCall(toolName: string): string {
     return labels[toolName] ?? `Running ${toolName}...`;
 }
 
-const SECRET_TOOL_ARGUMENT = /password|passwd|secret|token|credential|api.?key|cookie/i;
-
-export function redactToolArgs(toolName: string, args: unknown): unknown {
-    const textEntryTool = toolName === "fillInput" || toolName === "typeText";
-    const visit = (value: unknown, key = ""): unknown => {
-        if (SECRET_TOOL_ARGUMENT.test(key) || (textEntryTool && /^(value|text)$/i.test(key))) {
-            return "[REDACTED]";
-        }
-        if (Array.isArray(value)) return value.map((entry) => visit(entry));
-        if (value && typeof value === "object") {
-            return Object.fromEntries(
-                Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [
-                    childKey,
-                    visit(childValue, childKey),
-                ]),
-            );
-        }
-        return value;
-    };
-    return visit(args);
-}
+export { redactToolArgs };
 
 /**
  * Options for the tool-based agent
@@ -673,9 +649,12 @@ export async function* runToolAgent(
         const provider = configuredProvider;
         const envHint = provider.envVars[0] ?? "AI_API_KEY";
         yield "**API Key Required**\n\n";
-        yield `No key found for **${provider.label}**. Fastest fix: run \`raiken config <your-key>\` ` +
-            "(or `/config <your-key>` in this session) to save it — same settings as the dashboard's " +
-            "Settings → AI Provider panel, so it only needs to be set once.\n\n" +
+        // Deliberately points at the interactive wizard rather than
+        // `raiken config <key>`: keys on the command line land in shell
+        // history, which the README explicitly warns against.
+        yield `No key found for **${provider.label}**. Fastest fix: run \`raiken config\` ` +
+            "(or `/config` in this session) to pick a provider and save a key — same settings as " +
+            "the dashboard's Settings → AI Provider panel, so it only needs to be set once.\n\n" +
             `You can also set ${envHint} in your environment.\n\n`;
         return {
             text: "",
@@ -716,6 +695,8 @@ export async function* runToolAgent(
             autonomy,
             signal,
             operationHeld,
+            isActionAuthorized: (action) =>
+                action === "clearDiscoveryData" && explicitlyRequestsDiscoveryClear(userPrompt),
             getAuthPrecondition: () => authPreconditionRef.current,
         });
         const toolMap = tools as Record<
@@ -931,6 +912,9 @@ export async function* runToolAgent(
 
         if (finalState.awaitUserMessage) {
             const userMessage = finalState.awaitUserMessage;
+            const pendingAction = hitlActions.at(-1);
+            const requiresDurableWorkflow =
+                pendingAction?.type === "save" || pendingAction?.type === "run";
             let workflowId: string | undefined;
             try {
                 workflowId = (
@@ -944,10 +928,24 @@ export async function* runToolAgent(
                     })
                 )?.id;
             } catch (error) {
+                if (requiresDurableWorkflow) {
+                    throw persistenceError(
+                        "Unable to persist the approval workflow. No save or run action was exposed.",
+                        { cause: error },
+                    );
+                }
                 console.warn(
                     "Failed to persist HITL continuation:",
                     error instanceof Error ? error.message : error,
                 );
+            }
+            if (requiresDurableWorkflow && !workflowId) {
+                throw persistenceError(
+                    "Unable to persist the approval workflow. No save or run action was exposed.",
+                );
+            }
+            if (workflowId) {
+                mergeCorrelationContext({ workflowId });
             }
 
             // If we're paused because saveFile/runTest asked for HITL approval,

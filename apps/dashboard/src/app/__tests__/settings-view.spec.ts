@@ -1,6 +1,6 @@
 import type { PublicRaikenConfig } from "@raiken/shared";
+import { createSettingsConfigPatch } from "@raiken/shared";
 import { describe, expect, it } from "vitest";
-import { createSettingsConfigPatch } from "../settings-view";
 
 describe("createSettingsConfigPatch", () => {
     const publicConfig: Partial<PublicRaikenConfig> = {

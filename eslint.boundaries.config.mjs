@@ -6,7 +6,11 @@ export default [
         ignores: ["**/dist/**", "**/node_modules/**", "**/out-tsc/**"],
     },
     {
-        files: ["apps/**/*.{ts,tsx,js,jsx}", "libs/**/*.{ts,tsx,js,jsx}"],
+        files: [
+            "apps/**/*.{ts,tsx,js,jsx}",
+            "libs/**/*.{ts,tsx,js,jsx}",
+            "tools/**/*.{ts,tsx,js,jsx}",
+        ],
         linterOptions: {
             reportUnusedDisableDirectives: false,
         },
@@ -38,6 +42,10 @@ export default [
                         },
                         {
                             sourceTag: "scope:core",
+                            onlyDependOnLibsWithTags: [],
+                        },
+                        {
+                            sourceTag: "scope:playground",
                             onlyDependOnLibsWithTags: [],
                         },
                     ],

@@ -7,6 +7,7 @@ import type {
     AgentIntent,
     AuthPrecondition,
     ContextPlan,
+    DiscoveryManagementAction,
     InterruptionInfo,
 } from "./utils";
 
@@ -73,6 +74,10 @@ export const GraphState = Annotation.Root({
         default: () => [],
     }),
     nextTool: Annotation<string | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
+    discoveryAction: Annotation<DiscoveryManagementAction | null>({
         value: (_left, right) => right,
         default: () => null,
     }),

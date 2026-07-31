@@ -1,10 +1,16 @@
-import { appRouter } from "@raiken/shared";
+import { createProjectApplication } from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
+import { exitUsage } from "../errors";
+import { confirmDestructive } from "./confirm-destructive";
 
 interface KnowledgeOptions {
     limit?: string;
     json?: boolean;
+    /** Skip the confirmation prompt for destructive actions (scripts / CI). */
+    force?: boolean;
+    /** REPL-injected confirm prompt (inquirer can't run inside the REPL). */
+    confirm?: (message: string) => Promise<boolean>;
 }
 
 /**
@@ -21,7 +27,8 @@ export async function knowledgeCommand(
 ): Promise<void> {
     const projectPath = process.cwd();
     const restore = options.json ? routeDiagnosticsToStderr() : null;
-    const caller = appRouter.createCaller({ projectPath });
+    const app = createProjectApplication(projectPath);
+    const discovery = app.discovery;
     const limit = options.limit ? Math.max(1, Number(options.limit) || 50) : 50;
     const section = (sub || "overview").toLowerCase();
 
@@ -32,18 +39,16 @@ export async function knowledgeCommand(
 
     switch (section) {
         case "overview": {
-            const [session, stats] = await Promise.all([
-                caller.getDiscoverySession({}),
-                caller.getDiscoveryStats({}),
-            ]);
-            if (options.json) return out({ session, stats });
-            if (!session) {
+            const sessionView = discovery.getSessionView();
+            const stats = discovery.getStats();
+            if (options.json) return out({ session: sessionView, stats });
+            if (!sessionView) {
                 console.log(dim("\n  No discovery data yet. Run `raiken discover <url>`.\n"));
                 return;
             }
             const row = (l: string, v: string) => console.log(`  ${dim(l.padEnd(14))} ${v}`);
-            console.log(accent("\n  Site knowledge") + dim(`  ·  ${session.startUrl}`));
-            row("Session", session.status);
+            console.log(accent("\n  Site knowledge") + dim(`  ·  ${sessionView.startUrl}`));
+            row("Session", sessionView.status);
             row("Pages", String(stats.pagesCount));
             row(
                 "Links",
@@ -58,7 +63,12 @@ export async function knowledgeCommand(
         }
 
         case "pages": {
-            const res = await caller.getDiscoveredPages({ limit });
+            const result = discovery.listDiscoveredPages({ limit, offset: 0 });
+            const res = {
+                pages: result.pages,
+                total: result.total,
+                hasMore: result.hasMore,
+            };
             if (options.json) return out(res);
             if (res.pages.length === 0) {
                 console.log(dim("\n  No pages discovered. Run `raiken discover <url>`.\n"));
@@ -81,7 +91,7 @@ export async function knowledgeCommand(
         }
 
         case "links": {
-            const res = await caller.getVerifiedLinks({ limit });
+            const res = discovery.getVerifiedLinks(limit);
             if (options.json) return out(res);
             console.log(
                 accent("\n  Links") +
@@ -109,7 +119,8 @@ export async function knowledgeCommand(
         }
 
         case "blockers": {
-            const res = await caller.getAuthBlockers({});
+            const { blockers, total } = discovery.getAuthBlockers();
+            const res = { blockers, total };
             if (options.json) return out(res);
             if (res.total === 0) {
                 console.log(dim("\n  No unresolved blockers.\n"));
@@ -123,37 +134,37 @@ export async function knowledgeCommand(
                 );
                 console.log(`      ${dim(b.url)}`);
             }
-            console.log(dim("\n  Tip: run `raiken auth` to clear auth blockers.\n"));
+            // getAuthBlockers returns ALL unresolved blockers despite the name —
+            // only suggest `raiken auth` when one is actually auth-related
+            // (an error_page blocker isn't cleared by logging in).
+            if (res.blockers.some((b) => (b.category || b.blockerType) === "auth_required")) {
+                console.log(dim("\n  Tip: run `raiken auth` to clear auth blockers.\n"));
+            }
             return;
         }
 
         case "page": {
             if (!arg) {
-                console.log(chalk.red("  usage: raiken knowledge page <url>"));
-                return;
+                exitUsage("Usage: raiken knowledge page <url>");
             }
-            let page: Awaited<ReturnType<typeof caller.getDiscoveredPageSnapshot>> = null;
+            let view = null;
             try {
-                page = await caller.getDiscoveredPageSnapshot({ url: arg });
+                view = discovery.getDiscoveredPageSnapshot(arg);
             } catch {
                 console.log(chalk.red(`  Invalid or unknown URL: ${arg}`));
                 return;
             }
-            if (options.json) return out(page);
-            if (!page) {
+            if (options.json) return out(view);
+            if (!view) {
                 console.log(dim(`\n  No snapshot stored for ${arg}\n`));
                 return;
             }
-            console.log(accent(`\n  ${page.title || "(untitled)"}`) + dim(`  ·  ${page.url}`));
+            console.log(accent(`\n  ${view.title || "(untitled)"}`) + dim(`  ·  ${view.url}`));
             console.log(
-                `  ${dim("depth")} ${page.depth}   ${dim("discovered")} ${page.discoveredAt}`,
+                `  ${dim("depth")} ${view.depth}   ${dim("discovered")} ${view.discoveredAt}`,
             );
-            // The snapshot is Playwright's ARIA accessibility tree (a YAML-like
-            // text outline) — the same structure the agent grounds test
-            // generation on. Render it directly, capped so a huge page stays
-            // scannable (use --json for the full snapshot).
-            if (page.snapshotJson?.trim()) {
-                const lines = page.snapshotJson.split("\n");
+            if (view.snapshotJson?.trim()) {
+                const lines = view.snapshotJson.split("\n");
                 console.log(accent("\n  Accessibility snapshot"));
                 for (const line of lines.slice(0, 40)) console.log(dim(`  ${line}`));
                 if (lines.length > 40) {
@@ -167,15 +178,22 @@ export async function knowledgeCommand(
         }
 
         case "clear": {
-            await caller.clearDiscoveryData({});
+            const ok = await confirmDestructive(
+                "Clear all discovery knowledge (pages, links, blockers) for this project",
+                { force: options.force, confirm: options.confirm },
+            );
+            if (!ok) {
+                console.log(dim("\n  Clear cancelled.\n"));
+                return;
+            }
+            await discovery.clearData();
             console.log(chalk.green("\n  ✓ Discovery data cleared.\n"));
             return;
         }
 
         default:
-            console.log(
-                chalk.red(`  Unknown section: ${section}`) +
-                    dim("  — pages | links | blockers | page <url> | clear"),
+            exitUsage(
+                `Unknown knowledge section: '${section}'\nSections: overview | pages | links | blockers | page <url> | clear`,
             );
     }
 }

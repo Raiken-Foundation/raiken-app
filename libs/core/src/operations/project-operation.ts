@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 import { lock as lockfileLock } from "proper-lockfile";
+import { cancelledError, conflictError } from "../errors";
 
 export type ProjectOperationKind = "agent" | "test" | "discovery" | "browser";
 
@@ -24,7 +25,9 @@ export async function acquireProjectOperation(
     kind: ProjectOperationKind,
     signal?: AbortSignal,
 ): Promise<ProjectOperationLease> {
-    if (signal?.aborted) throw new DOMException("Operation cancelled", "AbortError");
+    if (signal?.aborted) {
+        throw cancelledError("Operation cancelled.");
+    }
     const dir = path.join(projectPath, ".raiken");
     fs.mkdirSync(dir, { recursive: true });
     const lockTarget = path.join(dir, "operation.lock");
@@ -57,8 +60,9 @@ export async function acquireProjectOperation(
             } catch {
                 // A stale or pre-manifest lock still gets a useful generic error.
             }
-            throw new Error(
+            throw conflictError(
                 `${holder} is already active for this project. Please wait or cancel it.`,
+                { code: "OPERATION_BUSY", details: { holder } },
             );
         }
         throw error;

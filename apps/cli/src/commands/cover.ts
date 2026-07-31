@@ -5,7 +5,6 @@
  * Triggered locally or by the `/raiken cover ...` GitHub workflow.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import {
     type CoverEvent,
@@ -14,7 +13,9 @@ import {
     resolveAIConfig,
     runCover,
 } from "@raiken/core";
+import { loadIntegrationsConfig } from "@raiken/shared/server";
 import chalk from "chalk";
+import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../repl/exit";
 
 interface CoverCommandOptions {
@@ -34,10 +35,10 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
                 'Missing target. Usage: raiken cover <AC-N | symbolName | "free-text scenario">',
             ),
         );
-        cliExit(2);
+        cliExit(CLI_EXIT.USAGE);
     }
 
-    const integrationConfig = loadIntegrationConfig(projectPath);
+    const integrationConfig = loadIntegrationsConfig(projectPath);
     // Use the shared provider-aware resolver so `cover` honors the configured
     // provider + provider-specific env vars (e.g. ANTHROPIC_API_KEY), not just
     // OPENROUTER_API_KEY / the raw `ai` block.
@@ -72,10 +73,8 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
             onEvent: options.json ? undefined : (event) => logEvent(event),
         });
     } catch (err) {
-        console.error(
-            chalk.red(`\n✗ raiken cover failed: ${err instanceof Error ? err.message : err}`),
-        );
-        cliExit(2);
+        console.error(chalk.red(`\n✗ raiken cover failed: ${safeCliErrorMessage(err)}`));
+        cliExit(mapErrorToCliExitCode(err));
     }
 
     if (options.json) {
@@ -100,7 +99,7 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     console.log(
         chalk.dim(
             "Review the draft, replace TODOs, and run with " +
-                `${chalk.bold(`npx playwright test ${path.relative(projectPath, result.outputPath)}`)}.`,
+                `${chalk.bold(`raiken test ${path.relative(projectPath, result.outputPath)}`)}.`,
         ),
     );
 }
@@ -131,20 +130,5 @@ function logEvent(event: CoverEvent): void {
         case "file_written":
             // Final summary handles this; suppress the noisy mid-stream log.
             break;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Config loaders
-// ---------------------------------------------------------------------------
-
-function loadIntegrationConfig(projectPath: string) {
-    try {
-        const raw = JSON.parse(
-            fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
-        );
-        return raw?.integrations;
-    } catch {
-        return undefined;
     }
 }

@@ -1,19 +1,27 @@
+import * as crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import fastifyStatic from "@fastify/static";
 import {
     BrowserSession,
+    correlationFields,
+    disposeAllProjectApplications,
     humanizeToolCall,
+    type OrchestratorResult,
+    obs,
     PathContainmentError,
     ProjectArtifactService,
     ProjectContext,
     runOrchestrator,
+    serializeSafeClientError,
+    serializeSafeHttpErrorBody,
     type ToolResult,
 } from "@raiken/core";
-import { appRouter } from "@raiken/shared";
+import { appRouter } from "@raiken/shared/server";
 import { fastifyTRPCPlugin } from "@trpc/server/adapters/fastify";
 import fastify from "fastify";
 import { bootstrapProject } from "./bootstrap";
+import { CLI_EXIT } from "./errors";
 import { detectProject } from "./project-detector";
 import {
     createServerSession,
@@ -22,6 +30,7 @@ import {
     isSessionAuthorized,
     redactRequestUrl,
 } from "./server-auth";
+import { registerCorrelationScope } from "./server-correlation";
 
 export interface StartServerOptions {
     port?: number;
@@ -37,23 +46,53 @@ export async function startServer(options: StartServerOptions | number = 7101) {
     // Fastify's default maxParamLength (100) truncates long tRPC batch
     // URLs like `/api/trpc/getA,getB,getC,...` and returns 404 before the
     // adapter sees the request. Bump it so realistic batches of dashboard
-    // queries (commonly 8-15 procedures) resolve correctly.
+    // queries (commonly 8-15 procedures) resolve correctly. (Lives under
+    // `routerOptions` — top-level router options are deprecated, FSTDEP022.)
     const app = fastify({
+        genReqId: () => crypto.randomBytes(8).toString("hex"),
+        requestIdHeader: "x-request-id",
         logger: {
-            level: "info",
+            // "warn": `raiken start` prints its own startup line; info-level
+            // pino JSON (listen banner, per-request logs) is noise on a CLI.
+            // Handler request.log.error(...) calls still surface.
+            level: "warn",
             serializers: {
                 req(request) {
                     return {
                         method: request.method,
                         url: redactRequestUrl(request.url),
+                        requestId: request.id,
                     };
                 },
             },
         },
-        maxParamLength: 8192,
+        routerOptions: {
+            maxParamLength: 8192,
+        },
     });
     const projectPath = process.cwd();
     const artifactService = new ProjectArtifactService(projectPath);
+
+    registerCorrelationScope(app, projectPath);
+
+    app.addHook("onRequest", async (request) => {
+        (request.raw as { __raikenStartedAt?: number }).__raikenStartedAt = Date.now();
+    });
+
+    app.addHook("onResponse", async (request, reply) => {
+        if (!request.url.startsWith("/api")) return;
+        const startedAt =
+            (request.raw as { __raikenStartedAt?: number }).__raikenStartedAt ?? Date.now();
+        const correlation = request.raikenCorrelation ?? correlationFields();
+        obs.duration("http.request.completed", startedAt, {
+            level: reply.statusCode >= 500 ? "error" : reply.statusCode >= 400 ? "warn" : "info",
+            status: reply.statusCode,
+            message: `${request.method} ${redactRequestUrl(request.url)}`,
+            requestId: request.id,
+            correlationId: correlation.correlationId,
+            operationId: correlation.operationId,
+        });
+    });
 
     // All API routes, including tRPC, artifacts, and the SSE endpoint, are
     // token-protected in explicitly enabled remote mode. Loopback mode relies
@@ -99,8 +138,13 @@ export async function startServer(options: StartServerOptions | number = 7101) {
         prefix: "/api/trpc",
         trpcOptions: {
             router: appRouter,
-            createContext: () => ({
+            createContext: ({ req }) => ({
                 projectPath,
+                correlationId:
+                    (typeof req.headers["x-correlation-id"] === "string" &&
+                        req.headers["x-correlation-id"]) ||
+                    undefined,
+                requestId: req.id,
             }),
         },
     });
@@ -121,8 +165,9 @@ export async function startServer(options: StartServerOptions | number = 7101) {
         try {
             resolved = artifactService.resolve(filePath);
         } catch (error) {
-            if (!(error instanceof PathContainmentError)) throw error;
-            return reply.code(403).send({ error: "forbidden" });
+            const body = serializeSafeHttpErrorBody(error);
+            const status = error instanceof PathContainmentError ? 403 : 400;
+            return reply.code(status).send(body);
         }
         if (!fs.existsSync(resolved)) {
             return reply.code(404).send({ error: "artifact not found" });
@@ -143,11 +188,16 @@ export async function startServer(options: StartServerOptions | number = 7101) {
             };
         } catch (err) {
             request.log?.error?.(err as Error);
-            reply.code(500).send({ error: "failed to detect project", detail: String(err) });
+            reply.code(500).send(serializeSafeHttpErrorBody(err));
         }
     });
 
-    // AI Test Generation - Server-Sent Events (SSE) endpoint
+    // AI Test Generation — Server-Sent Events (SSE) transport adapter.
+    //
+    // Orchestration runs through `runOrchestrator` (same agent graph as the CLI
+    // REPL). This route is intentionally NOT migrated to tRPC: SSE streaming
+    // semantics stay on a dedicated HTTP endpoint until a unified transport
+    // migration is scoped separately from the application seam.
     app.post("/api/generate-test", async (request, reply) => {
         try {
             const body = request.body as {
@@ -201,8 +251,8 @@ export async function startServer(options: StartServerOptions | number = 7101) {
                 reply.raw.write(`data: ${JSON.stringify({ type: "tool", ...event })}\n\n`);
             };
 
+            const agentStartedAt = Date.now();
             try {
-                // Route through orchestrator (LLM decides what tools to call)
                 const stream = runOrchestrator({
                     userPrompt: prompt,
                     projectPath: process.cwd(),
@@ -229,14 +279,18 @@ export async function startServer(options: StartServerOptions | number = 7101) {
                 });
 
                 let hasData = false;
+                let agentResult: OrchestratorResult | undefined;
 
-                for await (const chunk of stream) {
+                while (true) {
+                    const { value, done } = await stream.next();
+                    if (done) {
+                        agentResult = value;
+                        break;
+                    }
                     if (clientGone) break;
                     hasData = true;
-
-                    // Send chunk as SSE
                     if (!reply.raw.writableEnded) {
-                        reply.raw.write(`data: ${JSON.stringify({ chunk })}\n\n`);
+                        reply.raw.write(`data: ${JSON.stringify({ chunk: value })}\n\n`);
                     }
                 }
 
@@ -254,30 +308,51 @@ export async function startServer(options: StartServerOptions | number = 7101) {
                     );
                 }
 
-                // Mark finished BEFORE ending so the "close" our own end() emits
-                // isn't mistaken for a client disconnect.
                 finished = true;
-                // Send completion signal
-                reply.raw.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+                const correlation = correlationFields();
+                if (agentResult?.workflowId) {
+                    correlation.workflowId = agentResult.workflowId;
+                }
+                obs.duration("agent.handoff.completed", agentStartedAt, {
+                    status: "completed",
+                    workflowId: agentResult?.workflowId,
+                    runId: correlation.runId,
+                });
+                reply.raw.write(
+                    `data: ${JSON.stringify({
+                        done: true,
+                        workflowId: agentResult?.workflowId,
+                        correlationId: correlation.correlationId,
+                        runId: correlation.runId,
+                        operationId: correlation.operationId,
+                    })}\n\n`,
+                );
                 reply.raw.end();
             } catch (error) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                console.error("Stream error:", errorMessage);
+                const safe = serializeSafeClientError(error);
+                console.error("Stream error:", safe.message);
                 if (!clientGone && !reply.raw.writableEnded) {
                     finished = true;
-                    reply.raw.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
+                    reply.raw.write(
+                        `data: ${JSON.stringify({
+                            error: {
+                                message: safe.message,
+                                raikenCode: safe.code,
+                                retryable: safe.retryable,
+                                correlationId: safe.correlationId,
+                                operationId: safe.operationId,
+                            },
+                        })}\n\n`,
+                    );
                     reply.raw.end();
                 }
             } finally {
                 reply.raw.off("close", onClientClose);
             }
         } catch (err) {
-            request.log?.error?.(err as Error);
-            console.error("Request error:", err);
-            reply.code(500).send({
-                error: "Test generation failed",
-                detail: String(err),
-            });
+            const body = serializeSafeHttpErrorBody(err);
+            request.log?.error?.({ err: body.error, raikenCode: body.raiken.code });
+            reply.code(500).send(body);
         }
     });
 
@@ -323,7 +398,7 @@ export async function startServer(options: StartServerOptions | number = 7101) {
         try {
             await app.close();
         } catch (err) {
-            console.warn("Error closing HTTP server:", err);
+            console.warn("Error closing HTTP server:", serializeSafeClientError(err).message);
         }
         try {
             ProjectContext.getInstance(projectPath).stopWatching();
@@ -331,9 +406,17 @@ export async function startServer(options: StartServerOptions | number = 7101) {
             /* watcher not active */
         }
         try {
+            await disposeAllProjectApplications();
+        } catch (err) {
+            console.warn(
+                "Error disposing application services:",
+                serializeSafeClientError(err).message,
+            );
+        }
+        try {
             await BrowserSession.closeInstance();
         } catch (err) {
-            console.warn("Error closing browser:", err);
+            console.warn("Error closing browser:", serializeSafeClientError(err).message);
         }
         process.exit(exitCode);
     };
@@ -345,11 +428,14 @@ export async function startServer(options: StartServerOptions | number = 7101) {
     // silently take the whole server down. Log rejections and keep serving;
     // an uncaught exception is unrecoverable, so shut down cleanly.
     process.on("unhandledRejection", (reason) => {
-        console.error("Unhandled promise rejection (continuing):", reason);
+        console.error(
+            "Unhandled promise rejection (continuing):",
+            serializeSafeClientError(reason).message,
+        );
     });
     process.on("uncaughtException", (err) => {
-        console.error("Uncaught exception:", err);
-        void shutdown("uncaughtException", 1);
+        console.error("Uncaught exception:", serializeSafeClientError(err).message);
+        void shutdown("uncaughtException", CLI_EXIT.RUNTIME_FAILURE);
     });
 
     try {
@@ -362,7 +448,20 @@ export async function startServer(options: StartServerOptions | number = 7101) {
             );
         }
     } catch (err) {
-        app.log.error(err);
-        process.exit(1);
+        const code = (err as { code?: string }).code;
+        if (code === "EADDRINUSE") {
+            // Typical cause: a previous `raiken start` (or its orphaned
+            // server) still holds the port. Name that, not a pino stack.
+            console.error(
+                `\n  Port ${port} is already in use — is another \`raiken start\` still running?` +
+                    `\n  Stop it (or run \`lsof -i :${port}\` to find the process), ` +
+                    `or use \`raiken start --port ${port + 1}\`.`,
+            );
+        } else {
+            console.error(
+                `\n  Could not start the dashboard server: ${serializeSafeClientError(err).message}`,
+            );
+        }
+        process.exit(CLI_EXIT.RUNTIME_FAILURE);
     }
 }

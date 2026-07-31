@@ -4,9 +4,13 @@
  * works on any repo — the "not only for the playground" half of the harness.
  */
 
+import type { RunOutcomeStatus } from "../../testing/run-outcome";
 import { TestRunner, type TestRunResult } from "../../testing/runner";
 import { scorer } from "../scorers";
 import type { EvalScenario } from "../types";
+
+/** Statuses only a test Playwright actually ran can carry. */
+const EXECUTED_STATUSES = new Set<RunOutcomeStatus>(["passed", "failed", "flaky", "timeout"]);
 
 export interface FlakinessEvalOptions {
     projectPath: string;
@@ -26,7 +30,12 @@ export interface FlakinessEvalOptions {
 export function buildFlakinessScenario(
     options: FlakinessEvalOptions,
 ): EvalScenario<TestRunResult[][]> {
-    const runs = Math.max(2, options.runs ?? 3);
+    const runs = options.runs ?? 3;
+    if (!Number.isInteger(runs) || runs < 2) {
+        throw new Error(
+            `buildFlakinessScenario: runs must be an integer of 2 or more, got ${options.runs}`,
+        );
+    }
 
     return {
         id: "suite-flakiness",
@@ -44,9 +53,12 @@ export function buildFlakinessScenario(
             return allRuns;
         },
         scorers: [
+            // A spawn failure produces a single synthetic `error` row, which is
+            // "not skipped" — so this has to check for a status only a test
+            // Playwright actually executed can carry.
             scorer("every-run-executed-tests", (allRuns) => ({
                 passed: allRuns.every((results) =>
-                    results.some((result) => result.status !== "skipped"),
+                    results.some((result) => EXECUTED_STATUSES.has(result.status)),
                 ),
                 detail: allRuns.map((results) => `${results.length} result(s)`).join(", "),
             })),

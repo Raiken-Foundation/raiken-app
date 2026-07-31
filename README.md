@@ -112,33 +112,120 @@ nx serve dashboard
    ```
    - Serves both API and dashboard on `http://localhost:7101`
 
-### CLI Commands
+### CLI Command Reference
 
-After installing and building Raiken, these commands are available:
+After installing and building Raiken, the full command surface is available (every command also supports `--help`):
+
+#### Interactive agent & sessions
 
 ```bash
-raiken start [options]         # Start the Raiken dashboard and agent server
-  -p, --port <number>          # Port to run on (default: 7101)
+raiken                         # Interactive chat REPL (slash commands: /test /repair /report /doctor /ci /cover /sessions …)
+raiken -p "test the login flow"  # One-shot, non-interactive agent request
+  --json                       # Machine-readable result
+  --stream-json                # NDJSON events (start/tool/text/done)
+  --run                        # Run the generated test; exit code = pass/fail
+  --no-save                    # Don't persist the generated test
+  --headed  --timeout <ms>
 
-raiken init [options]          # Initialize Raiken in the current project
-  -f, --force                  # Overwrite existing configuration files
-
-raiken discover [url] [options]  # Autonomously discover web application structure
-  --max-pages <number>         # Maximum pages to discover (default: 100)
-  --max-depth <number>         # Maximum navigation depth (default: 5)
-  --timeout <number>           # Timeout per page in ms (default: 30000)
-  --auth                       # Prompt for authentication before discovery
-  --skip-auth                  # Skip authentication-required routes
-  --continue                   # Resume a paused discovery session
-  --status                     # Show discovery statistics
-
-raiken auth [options]          # Authenticate to save browser session state
-  --url <url>                  # URL to navigate to for authentication
-  --script <path>              # Run a project-local custom login script
-  --manual                     # Ignore configured script; use an interactive browser
-  --headed                     # Show the scripted-login browser
-  --timeout <ms>               # Script timeout
+raiken sessions [--json]       # List saved sessions
+raiken resume [name]           # Resume a saved session (latest if omitted)
 ```
+
+#### Setup
+
+```bash
+raiken start [-p <port>] [--remote]            # Dashboard & agent server (default :7101)
+raiken init [-f] [-y] [--skip-browsers]        # Initialize Raiken in the current project
+raiken config [provider-or-key] [options]      # AI provider/key/model wizard (or flags)
+  --provider <id>  --api-key <key>  --model <id>  --base-url <url>
+  --unset-key  --list  --json
+```
+
+#### Running & repairing tests
+
+```bash
+raiken test [file]             # Run the Playwright suite (or one spec); exit code = pass/fail
+  --grep <pattern>             # Only tests whose title matches (Playwright -g)
+  --workers <n>  --project <name>  --retries <n>
+  --headed                     # Visible browser windows
+  --debug                      # Step through in the Playwright inspector
+  --update-snapshots
+  --list                       # List tests without running them
+  --watch                      # Re-run on every project change until Ctrl+C
+  --only-flaky                 # Run only quarantined specs (see quarantine.testFiles)
+  --fix                        # After a failure, run the AI repair flow
+  --json
+
+raiken repair [file]           # AI-repair a failing spec: run it, show fix as diff, write on confirm
+  --apply                      # Write without prompting (scripts / CI)
+  --json                       # Machine-readable outcome (diff included when not applied)
+  --no-interpret               # Skip the diagnosis step
+
+raiken report [file]           # HTML/Markdown/JSON report with screenshots
+  --from <json>  --format <formats>  --output <dir>  --open  --no-embed-screenshots  --json
+
+raiken show-trace [path]       # Open a Playwright trace.zip (newest when omitted)
+
+raiken cover <target>          # Draft a Playwright test from an AC, symbol, or free text
+  -t, --ticket <id>  -o, --output <path>  --dir <path>  --dry-run  --json
+
+raiken doctor                  # Environment checks + flake anti-pattern lint
+  --dir <path>  --fail-on <error|warning|info>  --json
+
+raiken eval <suite> [target]   # Eval harness: playground | benchmark | flakiness <spec>
+  --runs <n>  --expect-tests <n>  --repeat <n>  --out <path>  --json
+
+raiken organize                # AI-assisted test-dir + config cleanup (proposes, then applies)
+  -y, --yes  --tests-only  --config-only  --json
+```
+
+Quarantining flaky specs: add them to `raiken.config.json` and they are skipped by default:
+
+```json
+{ "quarantine": { "testFiles": ["e2e/legacy-checkout.spec.ts"] } }
+```
+
+#### CI & change analysis
+
+```bash
+raiken ci                      # Impact analysis + affected tests + JUnit/JSON reports
+  --base <ref>  --head <ref>  --staged  --output-dir <path>  --format <junit|json|both>
+  --confidence <n>  --max-tests <n>  --timeout <ms>  --skip-run  --json
+
+raiken trace [stackTrace]      # Map a stack trace to the tests most likely to reproduce it
+  -f, --file <path>  --min-confidence <n>  --limit <n>  --json
+
+raiken sync [-t <ticket>]      # Sync with the ticket system and analyze test impact
+raiken context                 # Write raiken.ctx.md (project snapshot for IDE AI agents)
+  --output <path>  --max-rows <n>  --no-impact  --json
+
+raiken hooks install           # Git hook that runs raiken on commit/push (fail-soft)
+  --type <pre-commit|pre-push>  --skip-run  --husky
+raiken hooks uninstall [--type <type>]
+raiken hooks status
+```
+
+#### Project intelligence & discovery
+
+```bash
+raiken status [--json]         # Project setup at a glance
+raiken index [--embeddings] [--force]     # Build the code graph / semantic index
+raiken search <query> [--limit <n>] [--type <t>] [--json]   # Semantic code search
+
+raiken discover [url]          # Autonomously discover web application structure
+  --max-pages <n>  --max-depth <n>  --timeout <ms>
+  --auth  --skip-auth  --continue  --status
+
+raiken knowledge|kb [section] [arg] [--limit <n>] [--json] [-f]
+                               # Inspect discovered site knowledge (pages, links, blockers)
+raiken memory [show|clear] [--json] [-f]  # What the agent has learned about this project
+
+raiken auth                    # Save browser session state for authenticated tests
+  --url <url>  --script <path>  --manual  --headed  --timeout <ms>
+  --cookie <pairs> --domain <host>  --storage <k=v>  --from-state-file <path>
+```
+
+Exit codes are scriptable: `0` success, `1` runtime/test failure, `2` usage error, `3` config/auth error, `4` busy conflict, `130` cancelled.
 
 ### Configuration
 
@@ -195,9 +282,15 @@ Raiken is configured via `raiken.config.json` in your project root (created by `
   },
   "indexing": {
     "fullScan": false
+  },
+  "quarantine": {
+    "testFiles": []
   }
 }
 ```
+
+`quarantine.testFiles` holds flaky specs (project-relative paths) that `raiken test` skips by
+default; run them explicitly with `raiken test --only-flaky`.
 
 The API key can also be set via the `OPENROUTER_API_KEY` environment variable (recommended) or in a `.env` file in your project root.
 
@@ -335,7 +428,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
 - **discovery-integration** — serialized Playwright-backed discovery integration specs (`pnpm test:integration`)
 - **cli-smoke** — builds the CLI on Ubuntu and runs `pnpm smoke:cli`
 
-Release version metadata lives in `apps/cli/package.json`. The CLI `--version` flag reads it via `getRaikenVersion()` in `libs/shared/src/lib/version.ts`. Wire the health endpoint to the same helper when updating `libs/shared/src/lib/router.ts`.
+Release version metadata lives in `apps/cli/package.json`. The Node host reads it through `@raiken/shared/server`; the browser-safe version constant is parity-tested against the same package version. Health is composed in the split router under `libs/shared/src/lib/router/`.
 
 ### Build Errors
 ```bash

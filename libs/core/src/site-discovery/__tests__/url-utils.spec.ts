@@ -38,4 +38,27 @@ describe("normalizeUrl", () => {
     it("returns the raw string for an unparsable URL", () => {
         expect(normalizeUrl("not a url")).toBe("not a url");
     });
+
+    it("collapses index.html onto the directory URL", () => {
+        expect(normalizeUrl("https://example.com/index.html")).toBe("https://example.com/");
+        expect(normalizeUrl("https://example.com/docs/index.html")).toBe(
+            "https://example.com/docs",
+        );
+        expect(normalizeUrl("https://example.com/docs/index.htm")).toBe(
+            "https://example.com/docs",
+        );
+    });
+
+    it("keeps distinct pages distinct (suffix match only)", () => {
+        expect(normalizeUrl("https://example.com/index.htmlify")).toBe(
+            "https://example.com/index.htmlify",
+        );
+        expect(normalizeUrl("https://example.com/my-index.html/page")).toBe(
+            "https://example.com/my-index.html/page",
+        );
+    });
+
+    it("still strips the query after collapsing the index file", () => {
+        expect(normalizeUrl("https://example.com/index.html?a=1")).toBe("https://example.com/");
+    });
 });

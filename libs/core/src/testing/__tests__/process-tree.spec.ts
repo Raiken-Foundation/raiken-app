@@ -53,7 +53,8 @@ describe.skipIf(isWin)("killProcessTree", () => {
             ],
             { detached: true, stdio: "ignore" },
         );
-        const rootPid = root.pid!;
+        const rootPid = root.pid;
+        if (rootPid === undefined) throw new Error("spawn did not return a pid");
         root.unref();
         cleanup.push(() => {
             try {
@@ -96,7 +97,8 @@ describe.skipIf(isWin)("killProcessTree", () => {
             detached: true,
             stdio: "ignore",
         });
-        const orphanPid = orphan.pid!;
+        const orphanPid = orphan.pid;
+        if (orphanPid === undefined) throw new Error("spawn did not return a pid");
         orphan.unref();
         cleanup.push(() => {
             try {

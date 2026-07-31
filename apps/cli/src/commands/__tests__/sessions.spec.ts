@@ -45,9 +45,7 @@ describe("sessionsCommand", () => {
     });
 
     it("lists saved sessions newest first with counts and previews", async () => {
-        saveSession(projectPath, "login flow", [
-            { role: "user", content: "test the login page" },
-        ]);
+        saveSession(projectPath, "login flow", [{ role: "user", content: "test the login page" }]);
         // Force an older timestamp on the first snapshot.
         const older = path.join(projectPath, ".raiken", "sessions", "login-flow.json");
         const raw = JSON.parse(fs.readFileSync(older, "utf-8")) as { updatedAt: number };
@@ -65,9 +63,7 @@ describe("sessionsCommand", () => {
     });
 
     it("emits machine-readable JSON", async () => {
-        saveSession(projectPath, "login flow", [
-            { role: "user", content: "test the login page" },
-        ]);
+        saveSession(projectPath, "login flow", [{ role: "user", content: "test the login page" }]);
         const code = await withThrowExit(() => sessionsCommand({ json: true }));
         expect(code).toBe(0);
         const parsed = JSON.parse(stdoutText()) as {

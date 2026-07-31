@@ -21,9 +21,9 @@ import {
     discoveryConfigSchema,
     type IndexingConfig,
     type IntegrationsConfig,
-    type QuarantineConfig,
     indexingConfigSchema,
     integrationsConfigSchema,
+    type QuarantineConfig,
     quarantineConfigSchema,
 } from "./schema";
 import { readRawConfigSync } from "./store";

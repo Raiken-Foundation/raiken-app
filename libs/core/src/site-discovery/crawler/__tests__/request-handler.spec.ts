@@ -234,6 +234,61 @@ describe("per-run counter parity with persisted rows", () => {
     });
 });
 
+describe("save-time link verification", () => {
+    it("verifies a new link on the spot when its target already committed this run", async () => {
+        const { deps, siteDb } = makeDeps();
+        const handle = createCrawlPageProcessor(deps);
+
+        // /a commits first with no links; visitedUrls now contains it.
+        mockedExtractLinks.mockResolvedValueOnce([] as never);
+        await handle(contextFor(`${START_URL}/a`, makePage()));
+
+        // /b then links back to /a (nav-style backlink) — commit-time
+        // verification for /a already ran and cannot reach this link.
+        mockedExtractLinks.mockResolvedValueOnce([
+            { href: "/a", text: "A", dataTestId: null, tagName: "a", role: "link" },
+        ] as never);
+        await handle(contextFor(`${START_URL}/b`, makePage()));
+
+        expect(siteDb.updateLinkStatus).toHaveBeenCalledWith(
+            `${START_URL}/b`,
+            `${START_URL}/a`,
+            "verified",
+        );
+    });
+
+    it("verifies a new link when its target exists from a previous run", async () => {
+        mockedExtractLinks.mockResolvedValue([
+            { href: "/old", text: "Old", dataTestId: null, tagName: "a", role: "link" },
+        ] as never);
+        const { deps, siteDb } = makeDeps();
+        siteDb.getPage
+            .mockReturnValueOnce(null) // current page is fresh
+            .mockReturnValue({ id: 9, url: `${START_URL}/old` } as never); // target: prior run
+        const handle = createCrawlPageProcessor(deps);
+
+        await handle(contextFor(`${START_URL}/`, makePage()));
+
+        expect(siteDb.updateLinkStatus).toHaveBeenCalledWith(
+            `${START_URL}/`,
+            `${START_URL}/old`,
+            "verified",
+        );
+    });
+
+    it("leaves a link pending when its target is neither visited nor stored", async () => {
+        mockedExtractLinks.mockResolvedValue([
+            { href: "/future", text: "Future", dataTestId: null, tagName: "a", role: "link" },
+        ] as never);
+        const { deps, siteDb } = makeDeps();
+        const handle = createCrawlPageProcessor(deps);
+
+        await handle(contextFor(`${START_URL}/`, makePage()));
+
+        expect(siteDb.updateLinkStatus).not.toHaveBeenCalled();
+    });
+});
+
 describe("public login page under a loaded session", () => {
     it("downgrades the auth blocker to log and keeps crawling", async () => {
         const blocker = authBlocker(`${START_URL}/login`, "auth:url_pattern");

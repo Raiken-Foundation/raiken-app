@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { CodeGraphDB } from "../../../database/db";
 import { SiteKnowledgeDB } from "../../db";
-import { markBrokenLinks, verifyPendingLinks } from "../link-verification";
+import {
+    markBrokenLinks,
+    verifyLinksToCrawledPages,
+    verifyPendingLinks,
+} from "../link-verification";
 
 describe("link verification contract", () => {
     const dirs: string[] = [];
@@ -119,5 +123,73 @@ describe("link verification contract", () => {
 
         const links = siteDb.getLinksFrom("http://example.com/a");
         expect(links[0]?.status).toBe("verified");
+    });
+
+    function seedPage(siteDb: SiteKnowledgeDB, projectPath: string, url: string): void {
+        siteDb.savePage({
+            projectPath,
+            url,
+            normalizedUrl: url,
+            title: url,
+            snapshotJson: null,
+            formsJson: null,
+            parentUrl: null,
+            navigationAction: null,
+            depth: 0,
+            discoveredAt: Date.now(),
+            lastVisitedAt: Date.now(),
+            visitCount: 1,
+        });
+    }
+
+    function seedPendingLink(
+        siteDb: SiteKnowledgeDB,
+        projectPath: string,
+        fromUrl: string,
+        toUrl: string,
+    ): void {
+        siteDb.saveLink({
+            projectPath,
+            fromUrl,
+            toUrl,
+            selector: "a",
+            linkText: null,
+            elementRole: null,
+            status: "pending",
+            errorMessage: null,
+            discoveredAt: Date.now(),
+            verifiedAt: null,
+        });
+    }
+
+    it("end-of-run sweep verifies links saved after their target page committed", () => {
+        const { siteDb, projectPath } = makeSiteDb();
+        seedPage(siteDb, projectPath, "http://example.com/");
+        seedPage(siteDb, projectPath, "http://example.com/about");
+
+        // Both links point at committed pages but were extracted afterwards —
+        // the case commit-time verification structurally cannot reach.
+        seedPendingLink(siteDb, projectPath, "http://example.com/about", "http://example.com/");
+        seedPendingLink(siteDb, projectPath, "http://example.com/", "http://example.com/about");
+        seedPendingLink(siteDb, projectPath, "http://example.com/", "http://example.com/missing");
+
+        const verified = verifyLinksToCrawledPages(siteDb);
+
+        expect(verified).toBe(2);
+        expect(siteDb.getLinksFrom("http://example.com/about")[0]?.status).toBe("verified");
+        expect(
+            siteDb.getLinksFrom("http://example.com/").find((l) => l.toUrl.endsWith("/about"))
+                ?.status,
+        ).toBe("verified");
+        // Links whose target never committed stay pending.
+        expect(
+            siteDb.getLinksFrom("http://example.com/").find((l) => l.toUrl.endsWith("/missing"))
+                ?.status,
+        ).toBe("pending");
+    });
+
+    it("end-of-run sweep is a no-op on an empty knowledge base", () => {
+        const { siteDb } = makeSiteDb();
+        expect(verifyLinksToCrawledPages(siteDb)).toBe(0);
     });
 });

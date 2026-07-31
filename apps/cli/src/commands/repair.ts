@@ -69,9 +69,8 @@ export function missingAiKeyMessage(projectPath: string): string | null {
 
 function composeRawOutput(run: RepairRunResult): string {
     const failures = (run.parsedRun?.tests ?? []).filter((t) => t.status === "failed");
-    const parts = failures.map(
-        (t) =>
-            `${t.name ?? "unknown"}\n${t.error?.message ?? ""}\n${t.error?.snippet ?? ""}`.trim(),
+    const parts = failures.map((t) =>
+        `${t.name ?? "unknown"}\n${t.error?.message ?? ""}\n${t.error?.snippet ?? ""}`.trim(),
     );
     if (run.stderr?.trim()) parts.push(run.stderr.trim());
     const joined = parts.join("\n\n");
@@ -143,9 +142,7 @@ export async function repairFailedRun(input: {
     const rawOutput = composeRawOutput(run);
 
     if (!options.json) {
-        process.stderr.write(
-            dim(`\n  Repairing ${file} (${failures.length} failing test(s))…\n`),
-        );
+        process.stderr.write(dim(`\n  Repairing ${file} (${failures.length} failing test(s))…\n`));
     }
 
     let interpretation: string | undefined;
@@ -279,8 +276,7 @@ export async function repairCommand(
             if (options.json) {
                 emitJson({
                     repaired: false,
-                    error:
-                        "No failing spec on record. Pass a file: raiken repair <file>.",
+                    error: "No failing spec on record. Pass a file: raiken repair <file>.",
                 });
             } else {
                 console.log(
@@ -296,7 +292,11 @@ export async function repairCommand(
             const list = broken.map((f) => f.path).join(", ");
             exitUsage(`Multiple failing specs — pass one explicitly: ${list}`);
         }
-        target = broken[0]!.path;
+        const firstBroken = broken[0];
+        if (!firstBroken) {
+            cliExit(1);
+        }
+        target = firstBroken.path;
     }
 
     // AI work is unavoidable once we commit to running the spec — fail fast
@@ -316,7 +316,12 @@ export async function repairCommand(
     const run = (await app.testing.runTests({ testFile: target })) as RepairRunResult;
     if (run.success) {
         if (options.json) {
-            emitJson({ repaired: false, applied: false, filePath: target, message: "Spec passes — nothing to repair." });
+            emitJson({
+                repaired: false,
+                applied: false,
+                filePath: target,
+                message: "Spec passes — nothing to repair.",
+            });
         } else {
             console.log(chalk.green(`  ✓ ${target} passes — nothing to repair.`));
         }

@@ -44,9 +44,7 @@ describe("normalizeUrl", () => {
         expect(normalizeUrl("https://example.com/docs/index.html")).toBe(
             "https://example.com/docs",
         );
-        expect(normalizeUrl("https://example.com/docs/index.htm")).toBe(
-            "https://example.com/docs",
-        );
+        expect(normalizeUrl("https://example.com/docs/index.htm")).toBe("https://example.com/docs");
     });
 
     it("keeps distinct pages distinct (suffix match only)", () => {

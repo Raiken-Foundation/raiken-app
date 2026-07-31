@@ -204,9 +204,7 @@ function defaultProbeUrl(url: string): Promise<boolean> {
     });
 }
 
-export async function scanEnvironment(
-    options: EnvironmentScanOptions,
-): Promise<DoctorFinding[]> {
+export async function scanEnvironment(options: EnvironmentScanOptions): Promise<DoctorFinding[]> {
     const projectPath = path.resolve(options.projectPath);
     const env = options.env ?? process.env;
     const homeDir = options.homeDir ?? os.homedir();

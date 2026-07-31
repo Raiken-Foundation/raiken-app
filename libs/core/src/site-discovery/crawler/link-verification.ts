@@ -34,13 +34,30 @@ export function verifyPendingLinks(
     siteDb: SiteKnowledgeDB,
     url: string,
     normalizedUrl: string,
-): void {
+): number {
+    let verified = 0;
     for (const candidate of candidateUrls(url, normalizedUrl)) {
         const pendingLinks = siteDb.getPendingLinksTo(candidate);
         for (const link of pendingLinks) {
             siteDb.updateLinkStatus(link.fromUrl, link.toUrl, "verified");
+            verified++;
         }
     }
+    return verified;
+}
+
+/**
+ * End-of-run backstop: commit-time verification only reaches links saved
+ * before their target page committed, so links discovered later that point
+ * back at earlier pages stay "pending" without this sweep. Also heals
+ * knowledge bases written before save-time verification existed.
+ */
+export function verifyLinksToCrawledPages(siteDb: SiteKnowledgeDB): number {
+    let total = 0;
+    for (const url of siteDb.getAllNormalizedUrls()) {
+        total += verifyPendingLinks(siteDb, url, url);
+    }
+    return total;
 }
 
 export function markBrokenLinks(

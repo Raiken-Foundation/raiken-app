@@ -14,6 +14,7 @@ import {
     waitForCrawlerConcurrencyBelow,
 } from "./crawler/checkpoint-scheduler";
 import { compileExcludeMatcher } from "./crawler/exclude-patterns";
+import { verifyLinksToCrawledPages } from "./crawler/link-verification";
 import { releaseProcessWideCrawl, tryAcquireProcessWideCrawl } from "./crawler/process-wide-lock";
 import { createCrawlPageProcessor } from "./crawler/request-handler";
 import {
@@ -236,6 +237,7 @@ export class SiteDiscovery extends EventEmitter {
                     this.siteDb.updateSession(this.sessionId, {
                         status: "failed",
                         completedAt: Date.now(),
+                        blockedAtUrl: null,
                     });
                 }
                 throw new Error(message);
@@ -253,6 +255,7 @@ export class SiteDiscovery extends EventEmitter {
                     this.siteDb.updateSession(this.sessionId, {
                         status: "failed",
                         completedAt: Date.now(),
+                        blockedAtUrl: null,
                     });
                 } catch {
                     // The DB may be the cause of the failure — nothing more to do.
@@ -287,12 +290,14 @@ export class SiteDiscovery extends EventEmitter {
         this.aborted = true;
         this.stats.status = "completed";
         this.checkpointScheduler.disarmAll();
+        verifyLinksToCrawledPages(this.siteDb);
         if (this.sessionId) {
             this.siteDb.updateSession(this.sessionId, {
                 status: "completed",
                 completedAt: Date.now(),
                 pagesDiscovered: this.stats.pagesDiscovered,
                 linksFound: this.stats.linksFound,
+                blockedAtUrl: null,
             });
         }
         if (this.crawler) {
@@ -506,12 +511,14 @@ export class SiteDiscovery extends EventEmitter {
         });
         this.stats.status = "completed";
         this.stats.elapsedMs = Date.now() - this.stats.startedAt;
+        verifyLinksToCrawledPages(this.siteDb);
         if (this.sessionId) {
             this.siteDb.updateSession(this.sessionId, {
                 status: "completed",
                 completedAt: Date.now(),
                 pagesDiscovered: this.stats.pagesDiscovered,
                 linksFound: this.stats.linksFound,
+                blockedAtUrl: null,
             });
         }
         this.emit("session_completed", {
@@ -525,12 +532,14 @@ export class SiteDiscovery extends EventEmitter {
     private async finalizeSession(status: "completed", extra?: { reason: string }): Promise<void> {
         this.stats.status = status;
         this.stats.elapsedMs = Date.now() - this.stats.startedAt;
+        verifyLinksToCrawledPages(this.siteDb);
         if (this.sessionId) {
             this.siteDb.updateSession(this.sessionId, {
                 status,
                 completedAt: Date.now(),
                 pagesDiscovered: this.stats.pagesDiscovered,
                 linksFound: this.stats.linksFound,
+                blockedAtUrl: null,
             });
         }
         this.emit("session_completed", {
@@ -641,7 +650,7 @@ export class SiteDiscovery extends EventEmitter {
             throw new Error("Active session is missing an ID");
         }
 
-        this.siteDb.updateSession(activeSession.id, { status: "running" });
+        this.siteDb.updateSession(activeSession.id, { status: "running", blockedAtUrl: null });
         this.emit("session_resumed", {
             type: "session_resumed",
             data: { stats: this.stats },
@@ -708,4 +717,8 @@ export class SiteDiscovery extends EventEmitter {
 export { compileExcludeMatcher } from "./crawler/exclude-patterns";
 export { summariseNavigationFailure } from "./crawler/failure-summary";
 export { extractPageForms } from "./crawler/form-extractor";
-export { markBrokenLinks, verifyPendingLinks } from "./crawler/link-verification";
+export {
+    markBrokenLinks,
+    verifyLinksToCrawledPages,
+    verifyPendingLinks,
+} from "./crawler/link-verification";

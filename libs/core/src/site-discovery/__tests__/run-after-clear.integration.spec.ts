@@ -34,6 +34,7 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { CodeGraphDB } from "../../database/db";
+import { validateKnowledgeConsistency } from "../consistency";
 import { SiteDiscovery } from "../crawler";
 import { SiteKnowledgeDB } from "../db";
 
@@ -189,5 +190,22 @@ describeIfBrowser("run-after-clear regression (Issue 6)", () => {
             "run #3 should count successfully refreshed pages",
         ).toBeGreaterThanOrEqual(1);
         expect(thirdStats.status, "run #3 status").toBe("completed");
+
+        // ── Knowledge-consistency invariants ──────────────────────────
+        // After three runs the derived views must agree: no link stays
+        // "pending" when its target page is stored, no terminal session
+        // carries a blocked_at_url, and session counters never exceed the
+        // persisted row counts.
+        const checkDb = new CodeGraphDB(testDir);
+        try {
+            const checkSiteDb = new SiteKnowledgeDB(checkDb.getRawDatabase(), testDir);
+            const report = validateKnowledgeConsistency(checkSiteDb);
+            expect(
+                report.violations,
+                "knowledge base must be internally consistent after the runs",
+            ).toEqual([]);
+        } finally {
+            checkDb.close();
+        }
     }, 60_000);
 });

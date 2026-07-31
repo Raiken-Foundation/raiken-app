@@ -57,7 +57,11 @@ export async function searchCommand(query: string, options: SearchOptions): Prom
     // pollute --json stdout, so scripts get the explicit "run index" message).
     // Embeddings come from a local model, so this needs no API key — but the
     // first run downloads model weights, hence the spinner copy.
-    if (!options.json && res.results.length === 0 && /no (search index|embeddings)/i.test(res.message ?? "")) {
+    if (
+        !options.json &&
+        res.results.length === 0 &&
+        /no (search index|embeddings)/i.test(res.message ?? "")
+    ) {
         if (spinner) spinner.text = "Building search index (first run only)…";
         const genRestore = routeDiagnosticsToStderr();
         try {

@@ -83,3 +83,12 @@ jobs:
             - run: pnpm run cli:install
             - run: raiken --version
             - run: pnpm smoke:cli
+
+    secret-scan:
+        name: Secret scan (gitleaks)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: gitleaks/gitleaks-action@v2

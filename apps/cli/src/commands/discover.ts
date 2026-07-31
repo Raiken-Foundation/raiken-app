@@ -42,7 +42,7 @@ export function resolveUsableDiscoveryAuthState(projectPath: string): string | n
     return null;
 }
 
-function buildForegroundUx(params: {
+export function buildForegroundUx(params: {
     projectPath: string;
     spinner: ReturnType<typeof ora>;
     maxPages: number;
@@ -52,6 +52,8 @@ function buildForegroundUx(params: {
     showAuthOptions: boolean;
     authHeader: string;
     authHint: string;
+    /** True when a saved auth storage state was loaded for this run. */
+    hadAuthState: boolean;
 }): { ux: DiscoveryUxCallbacks; progressInterval: ReturnType<typeof setInterval> } {
     const {
         projectPath,
@@ -62,6 +64,7 @@ function buildForegroundUx(params: {
         showAuthOptions,
         authHeader,
         authHint,
+        hadAuthState,
     } = params;
     let lastSummary: {
         pagesDiscovered: number;
@@ -111,6 +114,13 @@ function buildForegroundUx(params: {
             console.log(chalk.yellow(`\n${authHeader}`));
             console.log(chalk.dim(`   URL: ${blocker.url}`));
             console.log(chalk.dim(`   Type: ${label.replace(/_/g, " ")}`));
+            if (hadAuthState) {
+                console.log(
+                    chalk.dim(
+                        "   A saved session was loaded but the site still asked to log in — it may have expired. Run `raiken auth` to refresh it.",
+                    ),
+                );
+            }
             console.log();
             if (showAuthOptions) {
                 console.log(chalk.cyan("Options:"));
@@ -322,6 +332,7 @@ async function startDiscovery(
         showAuthOptions: true,
         authHeader: "Authentication required",
         authHint: "Discovery paused. Resume with 'raiken discover --continue'.",
+        hadAuthState: Boolean(storageStatePath),
     });
 
     const app = getProjectApplication(projectPath);
@@ -390,6 +401,7 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
         showAuthOptions: false,
         authHeader: "Authentication required again",
         authHint: "Run 'raiken auth' to update authentication state.",
+        hadAuthState: Boolean(storageStatePath),
     });
 
     const app = getProjectApplication(projectPath);
@@ -420,7 +432,7 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
     }
 }
 
-async function showDiscoveryStatus(projectPath: string): Promise<void> {
+export async function showDiscoveryStatus(projectPath: string): Promise<void> {
     const app = getProjectApplication(projectPath);
     const session = app.discovery.getSessionView();
     const stats = app.discovery.getStats();
@@ -442,7 +454,7 @@ async function showDiscoveryStatus(projectPath: string): Promise<void> {
     if (session.completedAt) {
         console.log(chalk.dim(`  Completed: ${new Date(session.completedAt).toLocaleString()}`));
     }
-    if (session.blockedAtUrl) {
+    if (session.blockedAtUrl && session.status === "paused") {
         console.log(chalk.dim(`  Blocked:  ${session.blockedAtUrl}`));
     }
     console.log();

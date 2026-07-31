@@ -21,7 +21,9 @@ export interface QuarantinePartition {
  * Partition the on-disk suite by the quarantine list. Returns null when no
  * quarantine is configured — callers then run the suite unfiltered.
  */
-export async function partitionSuiteSpecs(projectPath: string): Promise<QuarantinePartition | null> {
+export async function partitionSuiteSpecs(
+    projectPath: string,
+): Promise<QuarantinePartition | null> {
     const quarantine = loadQuarantineConfig(projectPath).testFiles;
     if (quarantine.length === 0) return null;
     const app = createProjectApplication(projectPath);

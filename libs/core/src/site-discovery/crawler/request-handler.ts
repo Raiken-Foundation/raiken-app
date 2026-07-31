@@ -399,6 +399,16 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                 // run summary and `discover --status` read the same number.
                 if (inserted > 0) {
                     deps.stats.linksFound++;
+                    // A link whose target already committed is verified on the
+                    // spot — commit-time verification only reaches links saved
+                    // *before* their target, so nav-style links back to earlier
+                    // pages would otherwise stay "pending" forever.
+                    if (
+                        deps.visitedUrls.has(deps.normalizeUrl(absoluteUrl)) ||
+                        deps.siteDb.getPage(absoluteUrl)
+                    ) {
+                        deps.siteDb.updateLinkStatus(saveUrl, absoluteUrl, "verified");
+                    }
                 }
             }
 

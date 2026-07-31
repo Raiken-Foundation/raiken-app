@@ -8,7 +8,7 @@
  * not just spec edits.
  */
 
-import { watch, type FSWatcher } from "chokidar";
+import { type FSWatcher, watch } from "chokidar";
 
 export interface TestWatchTrigger {
     /** Which change fired this trigger (project-relative, posix slashes). */

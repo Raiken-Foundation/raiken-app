@@ -35,7 +35,10 @@ function scan(extra: Parameters<typeof scanEnvironment>[0] = {}) {
 function installPlaywrightPackage(): void {
     const pkgDir = path.join(projectPath, "node_modules", "@playwright", "test");
     fs.mkdirSync(pkgDir, { recursive: true });
-    fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "@playwright/test" }));
+    fs.writeFileSync(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({ name: "@playwright/test" }),
+    );
 }
 
 function installChromium(): void {
@@ -92,9 +95,9 @@ describe("findWebServerRunScripts", () => {
 
 describe("resolvePlaywrightBrowsersPath / hasChromiumBrowser", () => {
     it("honors PLAYWRIGHT_BROWSERS_PATH and detects chromium builds", () => {
-        expect(resolvePlaywrightBrowsersPath({ PLAYWRIGHT_BROWSERS_PATH: "/x" }, "linux", "/h")).toBe(
-            "/x",
-        );
+        expect(
+            resolvePlaywrightBrowsersPath({ PLAYWRIGHT_BROWSERS_PATH: "/x" }, "linux", "/h"),
+        ).toBe("/x");
         expect(hasChromiumBrowser(browsersPath)).toBe(false);
         installChromium();
         expect(hasChromiumBrowser(browsersPath)).toBe(true);

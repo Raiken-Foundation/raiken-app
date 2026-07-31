@@ -1,6 +1,6 @@
 import { isRaikenError, normalizeToRaikenError } from "./normalize";
 import type { RaikenError } from "./raiken-error";
-import { SECRET_KEY_PATTERN, redactSecrets } from "./redact";
+import { redactSecrets, SECRET_KEY_PATTERN } from "./redact";
 import type { RaikenErrorDetails, RaikenErrorDetailValue, SafeRaikenErrorPayload } from "./types";
 
 // Lives in ./redact (shared with normalize.ts); re-exported here so the

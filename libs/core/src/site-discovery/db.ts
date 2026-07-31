@@ -808,6 +808,26 @@ export class SiteKnowledgeDB {
     /**
      * Get the most recent session (any status).
      */
+    /**
+     * Completed/failed sessions that still carry a blocked_at_url — residue
+     * from a pause that was never cleared when the session reached a terminal
+     * state. Surfaced by the knowledge-consistency invariant checks.
+     */
+    getTerminalSessionsWithBlockedUrl(): DiscoverySession[] {
+        const rows = this.db
+            .prepare(
+                `
+            SELECT * FROM discovery_sessions
+            WHERE project_path = ?
+              AND status IN ('completed', 'failed')
+              AND blocked_at_url IS NOT NULL
+            ORDER BY started_at DESC
+        `,
+            )
+            .all(this.projectPath) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.mapSessionRow(row));
+    }
+
     getLatestSession(): DiscoverySession | null {
         const result = this.db
             .prepare(

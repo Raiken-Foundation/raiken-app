@@ -22,6 +22,19 @@ import type { LanguageModel } from "ai";
 import { defaultConfig, loadAIConfigSection } from "../config";
 import { AI_PROVIDER_IDS, type AIProviderId } from "../config/schema";
 
+/**
+ * What a model is known to accept. `undefined` means unknown — callers keep
+ * today's try-and-fall-back behavior. Only `false` changes anything: it lets a
+ * call site skip a request the provider is known to reject, instead of paying
+ * for the round-trip and leaking the raw provider error into the CLI.
+ */
+export interface ModelCapabilities {
+    /** Accepts image parts in messages. */
+    vision?: boolean;
+    /** Accepts `response_format` / structured-output (json_schema) requests. */
+    structuredOutput?: boolean;
+}
+
 export interface ProviderDefinition {
     id: AIProviderId;
     label: string;
@@ -41,6 +54,8 @@ export interface ProviderDefinition {
     apiKeyPlaceholder?: string;
     /** Curated models shown before/when live provider discovery is unavailable. */
     recommendedModels: ModelInfo[];
+    /** Capabilities assumed for any model of this provider not listed above. */
+    defaultCapabilities?: ModelCapabilities;
 }
 
 export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
@@ -61,6 +76,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 description: "Default balanced coding model",
                 context: 200_000,
                 source: "recommended",
+                capabilities: { vision: true, structuredOutput: true },
             },
             {
                 id: "openai/gpt-4o",
@@ -68,17 +84,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 description: "Fast general-purpose model",
                 context: 128_000,
                 source: "recommended",
+                capabilities: { vision: true, structuredOutput: true },
             },
             {
                 id: "deepseek/deepseek-chat",
                 name: "DeepSeek Chat",
                 description: "Cost-efficient OpenAI-compatible chat model",
                 source: "recommended",
+                capabilities: { vision: false, structuredOutput: false },
             },
         ],
     },
     openai: {
         id: "openai",
+        defaultCapabilities: { structuredOutput: true },
         label: "OpenAI",
         description: "Direct access to GPT-4o, o1, o3-mini, etc.",
         defaultBaseURL: "https://api.openai.com/v1",
@@ -94,6 +113,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 description: "Fast multimodal general-purpose model",
                 context: 128_000,
                 source: "recommended",
+                capabilities: { vision: true, structuredOutput: true },
             },
             {
                 id: "gpt-4o-mini",
@@ -101,17 +121,20 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 description: "Lower-cost everyday model",
                 context: 128_000,
                 source: "recommended",
+                capabilities: { vision: true, structuredOutput: true },
             },
             {
                 id: "o3-mini",
                 name: "o3 mini",
                 description: "Reasoning-oriented model",
                 source: "recommended",
+                capabilities: { vision: false, structuredOutput: true },
             },
         ],
     },
     anthropic: {
         id: "anthropic",
+        defaultCapabilities: { vision: true, structuredOutput: true },
         label: "Anthropic",
         description: "Direct access to Claude (Sonnet, Opus, Haiku).",
         defaultBaseURL: "https://api.anthropic.com/v1",
@@ -146,6 +169,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
     },
     google: {
         id: "google",
+        defaultCapabilities: { vision: true, structuredOutput: true },
         label: "Google AI Studio",
         description: "Gemini 2.5 / 2.0 family via Google's Generative AI API.",
         defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta",
@@ -227,6 +251,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
     },
     deepseek: {
         id: "deepseek",
+        defaultCapabilities: { vision: false, structuredOutput: false },
         label: "DeepSeek",
         description: "DeepSeek chat and reasoning models.",
         defaultBaseURL: "https://api.deepseek.com/v1",
@@ -241,12 +266,14 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 name: "DeepSeek Chat",
                 description: "Default DeepSeek chat model",
                 source: "recommended",
+                capabilities: { vision: false, structuredOutput: false },
             },
             {
                 id: "deepseek-reasoner",
                 name: "DeepSeek Reasoner",
                 description: "Reasoning model for harder planning/debugging",
                 source: "recommended",
+                capabilities: { vision: false, structuredOutput: false },
             },
         ],
     },
@@ -355,6 +382,73 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         recommendedModels: [],
     },
 };
+
+/**
+ * Known capabilities for a provider/model pair: the model's own catalog entry
+ * merged over the provider's defaults. Unknown models of a known provider get
+ * the provider defaults; unknown providers get `{}` (= try and fall back).
+ */
+export function getModelCapabilities(provider: AIProviderId, model: string): ModelCapabilities {
+    const definition = AI_PROVIDERS[provider] as ProviderDefinition | undefined;
+    if (!definition) return {};
+    const entry = definition.recommendedModels.find((m) => m.id === model);
+    return { ...definition.defaultCapabilities, ...entry?.capabilities };
+}
+
+/** Convenience wrappers: `undefined` (unknown) is treated as "worth trying". */
+export function modelSupportsVision(provider: AIProviderId, model: string): boolean {
+    return getModelCapabilities(provider, model).vision !== false;
+}
+
+export function modelSupportsStructuredOutput(provider: AIProviderId, model: string): boolean {
+    return getModelCapabilities(provider, model).structuredOutput !== false;
+}
+
+/**
+ * Every OpenAI-compatible provider is spoken to through the OpenRouter wire
+ * adapter (see `buildAISdkModel`), so AI SDK warnings would name "openrouter"
+ * even when the configured provider is DeepSeek or Groq. Remember which
+ * configured provider each model id belongs to so the warning logger below can
+ * print the name the user actually chose.
+ */
+const configuredProviderByModel = new Map<string, AIProviderId>();
+
+interface AISdkWarning {
+    type?: string;
+    feature?: string;
+    message?: string;
+    details?: string;
+}
+
+/**
+ * Replace the AI SDK's default warning logger once per process. Two fixes over
+ * the default: warnings name the configured provider instead of the wire
+ * adapter, and "compatibility" notices (SDK-internal, e.g. specificationVersion
+ * shims) are dropped — they read like errors but describe normal operation.
+ * A user-supplied `AI_SDK_LOG_WARNINGS` global is left untouched.
+ */
+function installWarningLogger(): void {
+    const scope = globalThis as { AI_SDK_LOG_WARNINGS?: unknown; __raikenWarningLogger?: boolean };
+    if (scope.__raikenWarningLogger || scope.AI_SDK_LOG_WARNINGS !== undefined) return;
+    scope.__raikenWarningLogger = true;
+    scope.AI_SDK_LOG_WARNINGS = (options: {
+        warnings: AISdkWarning[];
+        provider: string;
+        model: string;
+    }) => {
+        const provider = configuredProviderByModel.get(options.model) ?? options.provider;
+        for (const warning of options.warnings) {
+            if (warning.type === "compatibility") continue;
+            const detail =
+                warning.type === "unsupported" && warning.feature
+                    ? `the feature "${warning.feature}" is not supported${
+                          warning.details ? ` (${warning.details})` : ""
+                      }`
+                    : (warning.message ?? warning.details ?? JSON.stringify(warning));
+            console.warn(`AI provider warning (${provider} / ${options.model}): ${detail}`);
+        }
+    };
+}
 
 export function listProviders(): ProviderDefinition[] {
     return AI_PROVIDER_IDS.map((id) => AI_PROVIDERS[id]);
@@ -483,6 +577,8 @@ export interface ModelInfo {
     deprecated?: boolean;
     /** Where this option came from. */
     source?: "live" | "recommended";
+    /** Known capabilities; absent fields mean "unknown, try and fall back". */
+    capabilities?: ModelCapabilities;
 }
 
 interface ListModelsArgs {
@@ -696,6 +792,8 @@ export function buildAISdkModel(input: {
     model: string;
 }): LanguageModel {
     const apiKey = input.apiKey ?? "";
+    installWarningLogger();
+    configuredProviderByModel.set(input.model, input.provider);
     switch (input.provider) {
         case "anthropic": {
             const client = createAnthropic({ apiKey });

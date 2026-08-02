@@ -28,7 +28,7 @@
  */
 
 import { generateText, streamText } from "ai";
-import { buildAISdkModel } from "../agent/ai-providers";
+import { buildAISdkModel, modelSupportsVision } from "../agent/ai-providers";
 import type { DOMContext } from "../browser/dom-capture";
 import type { AIProviderId } from "../config/schema";
 import { cleanGeneratedTestCode } from "../utils";
@@ -677,12 +677,20 @@ export async function getTestRepair(
         model: config.model || "anthropic/claude-sonnet-4.5",
     });
 
-    const hasImages = !!context.images && context.images.length > 0;
-
     // When failure screenshots are available AND the model is vision-capable,
     // send them as image parts so the fix is grounded in what the page actually
-    // rendered. Not every configured provider/model accepts images, so this is
-    // best-effort: on any error we transparently retry the same call text-only.
+    // rendered. A model the catalog knows to be text-only (e.g. deepseek-chat)
+    // is never sent images — the request would be rejected and the provider's
+    // raw deserialize error would leak into the CLI before the text-only retry.
+    // For models with unknown capabilities this stays best-effort: on any
+    // error we transparently retry the same call text-only.
+    const hasImages =
+        !!context.images &&
+        context.images.length > 0 &&
+        modelSupportsVision(
+            config.provider ?? "openrouter",
+            config.model || "anthropic/claude-sonnet-4.5",
+        );
     const generate = async (mode: "edits" | "full") => {
         const prompt = buildRepairPrompt(context, mode);
         if (hasImages) {

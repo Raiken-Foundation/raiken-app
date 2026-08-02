@@ -6,7 +6,11 @@ import { authCredentialEnvGuidance } from "../../../config/auth-credentials";
 import { resolveAuthStorageStateRelativePath } from "../../../config/auth-state";
 import { validateTestCode } from "../../../testing/test-code-validation";
 import { cleanGeneratedTestCode } from "../../../utils";
-import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
+import {
+    LLM_REQUEST_TIMEOUT_MS,
+    modelSupportsStructuredOutput,
+    resolveAIConfig,
+} from "../../ai-providers";
 import type { GroundingReport } from "../../grounding";
 import {
     collectSourceSelectors,
@@ -318,6 +322,20 @@ async function planTestContext(deps: AgentNodeDeps, state: GraphStateType): Prom
         domAspects: [],
         rationale: "Default single-query gather (planner unavailable).",
     };
+    // Models known to reject response_format (e.g. deepseek-chat) get the
+    // fallback directly — the structured-output request would 400 and the
+    // provider's raw error would be logged as if something went wrong.
+    try {
+        const resolved = resolveAIConfig(deps.projectPath);
+        if (!modelSupportsStructuredOutput(resolved.provider, resolved.model)) {
+            return {
+                ...fallback,
+                rationale: `Single-query gather (${resolved.model} does not support structured output).`,
+            };
+        }
+    } catch {
+        // Config unavailable — attempt the structured call as before.
+    }
     try {
         const pagesSeen = (state.pageSummaries || [])
             .map((s, i) => `  ${i + 1}. ${extractPageTitleSafe(s)}`)

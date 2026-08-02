@@ -262,3 +262,78 @@ describe("formatGroundingCorrection", () => {
         expect(correction).toContain("getByTestId('login-error')");
     });
 });
+
+describe("validateSelectorGrounding — source markup as second evidence", () => {
+    const SOURCE_SELECTORS = [
+        { kind: "testId" as const, value: "coupon-input", attribute: "data-testid", line: 12 },
+        { kind: "testId" as const, value: "apply-coupon", attribute: "data-testid", line: 14 },
+        { kind: "label" as const, value: "Filter by category", line: 3 },
+        { kind: "placeholder" as const, value: "Coupon code", line: 12 },
+        { kind: "role" as const, value: "status", line: 20 },
+    ];
+
+    it("moves a test id proven by source markup out of unverified", () => {
+        const report = validateSelectorGrounding(
+            testWith("    await page.getByTestId('coupon-input').fill('SAVE10');"),
+            [DELETE_DIALOG_SUMMARY],
+            SOURCE_SELECTORS,
+        );
+
+        expect(report.unverified).toEqual([]);
+        expect(report.sourceGrounded.map((v) => v.locator)).toEqual([
+            "getByTestId('coupon-input')",
+        ]);
+        expect(report.sourceGrounded[0].reason).toContain("source markup");
+    });
+
+    it("grounds labels, placeholders and nameless roles from source", () => {
+        const report = validateSelectorGrounding(
+            testWith(
+                "    await page.getByLabel('Filter by category').selectOption('electronics');\n" +
+                    "    await page.getByPlaceholder('Coupon code').fill('SAVE10');\n",
+            ),
+            [DELETE_DIALOG_SUMMARY],
+            SOURCE_SELECTORS,
+        );
+
+        expect(report.unverified).toEqual([]);
+        expect(report.sourceGrounded).toHaveLength(2);
+    });
+
+    it("grounds an accessible name that matches a source aria-label", () => {
+        const report = validateSelectorGrounding(
+            testWith(
+                "    await page.getByRole('combobox', { name: 'Filter by category' }).click();",
+            ),
+            [DELETE_DIALOG_SUMMARY],
+            SOURCE_SELECTORS,
+        );
+
+        expect(report.unverified).toEqual([]);
+        expect(report.sourceGrounded).toHaveLength(1);
+    });
+
+    it("still reports literals absent from both capture and source", () => {
+        const report = validateSelectorGrounding(
+            testWith("    await page.getByTestId('totally-invented').click();"),
+            [DELETE_DIALOG_SUMMARY],
+            SOURCE_SELECTORS,
+        );
+
+        expect(report.unverified.map((v) => v.kind)).toEqual(["unknown_test_id"]);
+        expect(report.sourceGrounded).toEqual([]);
+    });
+
+    it("never lets source evidence override a DOM-proven role contradiction", () => {
+        const report = validateSelectorGrounding(
+            testWith(
+                "    await expect(page.getByRole('dialog', { name: 'Delete project' })).toBeVisible();",
+            ),
+            [DELETE_DIALOG_SUMMARY],
+            SOURCE_SELECTORS,
+        );
+
+        expect(report.contradictions).toHaveLength(1);
+        expect(report.contradictions[0].kind).toBe("role_mismatch");
+    });
+});

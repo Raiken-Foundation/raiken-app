@@ -24,8 +24,17 @@
  *
  * A locator for a role outside capture coverage (headings, rows, alerts…) is
  * skipped entirely: absence proves nothing about elements we never enumerate.
+ *
+ * Capture is not the only admissible evidence. A test id that sits verbatim in
+ * an indexed component template is real even when no captured page shows it —
+ * state-gated UI (a filled cart, a validation error, a modal) never appears in
+ * a crawl of resting pages. Callers may pass the project's `TemplateSelector`s
+ * as a second evidence source; literals proven by source move to
+ * `sourceGrounded` instead of `unverified`, so a correct draft is no longer
+ * pushed through a regeneration pass that can only make it guessier.
  */
 
+import type { TemplateSelector } from "../types";
 import { normalizeSelector, parseSummaryElements } from "./graph/utils";
 
 export type SelectorViolationKind =
@@ -57,6 +66,13 @@ export interface GroundingReport {
     unverified: SelectorViolation[];
     /** Looser misses (text/CSS literals) kept advisory to avoid false positives. */
     warnings: SelectorViolation[];
+    /**
+     * Locators absent from every captured page but proven by source markup
+     * (a literal `data-testid`, `aria-label`, `placeholder` or `role` in an
+     * indexed template). Valid targets for state the crawl never reached;
+     * informational only.
+     */
+    sourceGrounded: SelectorViolation[];
     /**
      * False when the summaries carried no structured elements to compare
      * against (no capture happened, or a caller passed prose). Callers must not
@@ -109,6 +125,14 @@ interface CapturedIndex {
     roles: Set<string>;
     /** Lowercased, whitespace-collapsed text of everything captured. */
     text: string;
+}
+
+/** Literal selector facts read out of indexed source markup, bucketed by kind. */
+interface SourceIndex {
+    testIds: Set<string>;
+    labels: Set<string>;
+    placeholders: Set<string>;
+    roles: Set<string>;
 }
 
 function normalizeText(value: string): string {
@@ -280,6 +304,56 @@ function buildCapturedIndex(summaries: string[]): CapturedIndex {
     };
 }
 
+function buildSourceIndex(selectors: readonly TemplateSelector[]): SourceIndex {
+    const index: SourceIndex = {
+        testIds: new Set(),
+        labels: new Set(),
+        placeholders: new Set(),
+        roles: new Set(),
+    };
+    for (const selector of selectors) {
+        const value = normalizeText(selector.value);
+        if (!value) continue;
+        switch (selector.kind) {
+            case "testId":
+                index.testIds.add(value);
+                break;
+            case "label":
+                index.labels.add(value);
+                break;
+            case "placeholder":
+                index.placeholders.add(value);
+                break;
+            case "role":
+                index.roles.add(value);
+                break;
+        }
+    }
+    return index;
+}
+
+/** Does source markup contain this literal, for the bucket a locator kind implies? */
+function sourceHasLiteral(
+    source: SourceIndex,
+    bucket: keyof SourceIndex,
+    literal: LiteralArg,
+): boolean {
+    if (literal.kind === "regex") {
+        for (const value of source[bucket]) {
+            if (literal.value.test(value)) return true;
+        }
+        return false;
+    }
+    return source[bucket].has(normalizeText(literal.value));
+}
+
+const EMPTY_SOURCE_INDEX: SourceIndex = {
+    testIds: new Set(),
+    labels: new Set(),
+    placeholders: new Set(),
+    roles: new Set(),
+};
+
 function quote(value: string): string {
     return `'${value.replace(/'/g, "\\'")}'`;
 }
@@ -291,8 +365,10 @@ function describeLiteral(literal: LiteralArg): string {
 function checkRoleLocator(
     call: LocatorCall,
     index: CapturedIndex,
+    source: SourceIndex,
     contradictions: SelectorViolation[],
     unverified: SelectorViolation[],
+    sourceGrounded: SelectorViolation[],
 ): void {
     const roleArg = readLiteral(call.args, 0);
     if (!roleArg || roleArg.kind !== "string") return;
@@ -304,6 +380,14 @@ function checkRoleLocator(
         // Nameless role locator (often a scope, e.g. `.getByRole('dialog')`).
         // Only the role itself can be judged.
         if (!index.roles.has(role)) {
+            if (source.roles.has(role)) {
+                sourceGrounded.push({
+                    locator: call.raw,
+                    kind: "unknown_role",
+                    reason: `role "${role}" was not captured on any visited page but is declared in source markup`,
+                });
+                return;
+            }
             unverified.push({
                 locator: call.raw,
                 kind: "unknown_role",
@@ -347,6 +431,17 @@ function checkRoleLocator(
     }
 
     if (!appearsInCapture(index, name)) {
+        // An `aria-label` in source markup supplies exactly this accessible
+        // name, so a literal match there proves the element exists in some
+        // renderable state even though no captured page showed it.
+        if (sourceHasLiteral(source, "labels", name)) {
+            sourceGrounded.push({
+                locator: call.raw,
+                kind: "unknown_name",
+                reason: `accessible name ${describeLiteral(name)} was not captured but matches an aria-label in source markup`,
+            });
+            return;
+        }
         unverified.push({
             locator: call.raw,
             kind: "unknown_name",
@@ -358,9 +453,12 @@ function checkRoleLocator(
 function checkLiteralLocator(
     call: LocatorCall,
     index: CapturedIndex,
+    source: SourceIndex,
+    bucket: keyof SourceIndex,
     kind: SelectorViolationKind,
     label: string,
     unverified: SelectorViolation[],
+    sourceGrounded: SelectorViolation[],
 ): void {
     const literal = readLiteral(call.args, 0);
     // A pattern argument can't be searched for in captured text, and the
@@ -368,6 +466,14 @@ function checkLiteralLocator(
     // element, so there is nothing to compare.
     if (!literal || literal.kind !== "string") return;
     if (appearsInCapture(index, literal)) return;
+    if (sourceHasLiteral(source, bucket, literal)) {
+        sourceGrounded.push({
+            locator: call.raw,
+            kind,
+            reason: `${label} ${describeLiteral(literal)} was not captured on any visited page but exists in source markup`,
+        });
+        return;
+    }
     unverified.push({
         locator: call.raw,
         kind,
@@ -396,34 +502,70 @@ function checkAdvisoryLocator(
 
 /**
  * Compare every locator in `testCode` against the captured page context
- * (live DOM summary plus every visited page summary).
+ * (live DOM summary plus every visited page summary). `sourceSelectors` —
+ * literal selector facts from indexed markup (see `extractTemplateSelectors`)
+ * — act as a second evidence source: a literal absent from capture but present
+ * in source is reported under `sourceGrounded` instead of `unverified`.
  */
-export function validateSelectorGrounding(testCode: string, summaries: string[]): GroundingReport {
+export function validateSelectorGrounding(
+    testCode: string,
+    summaries: string[],
+    sourceSelectors?: readonly TemplateSelector[],
+): GroundingReport {
     const index = buildCapturedIndex(
         summaries.filter((s) => typeof s === "string" && s.length > 0),
     );
+    const source = sourceSelectors?.length ? buildSourceIndex(sourceSelectors) : EMPTY_SOURCE_INDEX;
     const contradictions: SelectorViolation[] = [];
     const unverified: SelectorViolation[] = [];
     const warnings: SelectorViolation[] = [];
+    const sourceGrounded: SelectorViolation[] = [];
     const enforceable = index.elements.length > 0;
 
     if (!testCode.trim()) {
-        return { ok: true, contradictions, unverified, warnings, enforceable };
+        return { ok: true, contradictions, unverified, warnings, sourceGrounded, enforceable };
     }
 
     for (const call of extractLocatorCalls(testCode)) {
         switch (call.method) {
             case "getByRole":
-                if (enforceable) checkRoleLocator(call, index, contradictions, unverified);
+                if (enforceable) {
+                    checkRoleLocator(
+                        call,
+                        index,
+                        source,
+                        contradictions,
+                        unverified,
+                        sourceGrounded,
+                    );
+                }
                 break;
             case "getByTestId":
                 if (enforceable) {
-                    checkLiteralLocator(call, index, "unknown_test_id", "test id", unverified);
+                    checkLiteralLocator(
+                        call,
+                        index,
+                        source,
+                        "testIds",
+                        "unknown_test_id",
+                        "test id",
+                        unverified,
+                        sourceGrounded,
+                    );
                 }
                 break;
             case "getByLabel":
                 if (enforceable) {
-                    checkLiteralLocator(call, index, "unknown_label", "label", unverified);
+                    checkLiteralLocator(
+                        call,
+                        index,
+                        source,
+                        "labels",
+                        "unknown_label",
+                        "label",
+                        unverified,
+                        sourceGrounded,
+                    );
                 }
                 break;
             case "getByPlaceholder":
@@ -431,9 +573,12 @@ export function validateSelectorGrounding(testCode: string, summaries: string[])
                     checkLiteralLocator(
                         call,
                         index,
+                        source,
+                        "placeholders",
                         "unknown_placeholder",
                         "placeholder",
                         unverified,
+                        sourceGrounded,
                     );
                 }
                 break;
@@ -453,8 +598,25 @@ export function validateSelectorGrounding(testCode: string, summaries: string[])
         contradictions,
         unverified,
         warnings,
+        sourceGrounded,
         enforceable,
     };
+}
+
+/**
+ * Flatten the template selectors of gathered context files into one evidence
+ * list — the shape `validateSelectorGrounding` expects. Accepts anything with
+ * an optional `templateSelectors` field so `ContextData.files` works directly.
+ */
+export function collectSourceSelectors(
+    files: ReadonlyArray<{ templateSelectors?: TemplateSelector[] }> | undefined | null,
+): TemplateSelector[] {
+    if (!files?.length) return [];
+    const selectors: TemplateSelector[] = [];
+    for (const file of files) {
+        if (file.templateSelectors?.length) selectors.push(...file.templateSelectors);
+    }
+    return selectors;
 }
 
 /** One line per violation, used in prompts, summaries, and CLI output. */

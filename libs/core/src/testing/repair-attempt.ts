@@ -3,7 +3,11 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { LLM_REQUEST_TIMEOUT_MS } from "../agent/ai-providers";
 import type { SelectorViolation } from "../agent/grounding";
-import { describeGroundingViolations, validateSelectorGrounding } from "../agent/grounding";
+import {
+    collectSourceSelectors,
+    describeGroundingViolations,
+    validateSelectorGrounding,
+} from "../agent/grounding";
 import type { ContextData } from "../agent/prompts";
 import { resolvePathWithinProject } from "../config";
 import type { TestRunResult } from "./runner";
@@ -134,7 +138,11 @@ export async function executeRepairAttempt(
     const groundingSummaries = [input.domSummary, ...(input.pageSummaries ?? [])].filter(
         (summary): summary is string => typeof summary === "string" && summary.length > 0,
     );
-    const grounding = validateSelectorGrounding(testCode, groundingSummaries);
+    // Test ids and labels literal in indexed markup are evidence too: a locator
+    // targeting state-gated UI the capture never reached must not be reported
+    // to the model as "invented", or the model will replace it with a guess.
+    const sourceSelectors = collectSourceSelectors(context?.files);
+    const grounding = validateSelectorGrounding(testCode, groundingSummaries, sourceSelectors);
     const groundingFindings = [...grounding.contradictions, ...grounding.unverified];
     const groundingBlock =
         groundingFindings.length > 0
@@ -212,6 +220,7 @@ Rules:
         const introduced = validateSelectorGrounding(
             fixedCode,
             groundingSummaries,
+            sourceSelectors,
         ).contradictions.filter(
             (violation) =>
                 !grounding.contradictions.some(

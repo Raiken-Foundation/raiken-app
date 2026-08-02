@@ -9,6 +9,7 @@ import { cleanGeneratedTestCode } from "../../../utils";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
 import type { GroundingReport } from "../../grounding";
 import {
+    collectSourceSelectors,
     describeGroundingViolations,
     formatGroundingCorrection,
     formatGroundingRejection,
@@ -629,6 +630,18 @@ export const createGenerateTestsNode =
             // with the specific locators named.
             const MAX_GROUNDING_PASSES = 2;
             let previous: GroundingReport | null = null;
+            // Selector facts from indexed markup. State-gated UI (a filled
+            // cart, a validation error) never shows up in a crawl of resting
+            // pages, so a draft that targets it correctly must not be pushed
+            // through a corrective pass that can only make it guessier.
+            const sourceSelectors = collectSourceSelectors(context.files);
+            // A regeneration pass is not guaranteed to improve the draft — the
+            // model can replace flagged-but-correct locators with different
+            // guesses. Keep every pass and ship the one with the fewest
+            // violations, not the most recent one.
+            const violationScore = (report: GroundingReport): number =>
+                report.contradictions.length * 10 + report.unverified.length;
+            let best: { draft: string; grounding: GroundingReport } | null = null;
 
             for (let pass = 1; pass <= MAX_GROUNDING_PASSES; pass++) {
                 const cleaned = await generateDraft(
@@ -647,37 +660,59 @@ export const createGenerateTestsNode =
                     };
                 }
 
-                const grounding = validateSelectorGrounding(cleaned, groundingSummaries);
+                const grounding = validateSelectorGrounding(
+                    cleaned,
+                    groundingSummaries,
+                    sourceSelectors,
+                );
+                if (!best || violationScore(grounding) < violationScore(best.grounding)) {
+                    best = { draft: cleaned, grounding };
+                }
                 const lastPass = pass === MAX_GROUNDING_PASSES;
                 const clean =
                     !grounding.enforceable ||
                     (grounding.contradictions.length === 0 && grounding.unverified.length === 0);
 
-                if (grounding.enforceable && grounding.contradictions.length > 0 && lastPass) {
-                    for (const line of describeGroundingViolations(grounding.contradictions)) {
-                        console.warn(`Ungrounded selector: ${line}`);
-                    }
-                    return {
-                        testDraft: "",
-                        groundingViolations: grounding.contradictions,
-                        summary: formatGroundingRejection(grounding.contradictions),
-                        context,
-                        testDirectory: context.testDirectory,
-                    };
-                }
-
                 if (clean || lastPass) {
+                    // On the last pass, fall back to the best draft seen — the
+                    // final regeneration may have scored worse than an earlier
+                    // attempt it was supposed to improve on.
+                    const chosen = clean ? { draft: cleaned, grounding } : best;
+
+                    if (
+                        chosen.grounding.enforceable &&
+                        chosen.grounding.contradictions.length > 0
+                    ) {
+                        for (const line of describeGroundingViolations(
+                            chosen.grounding.contradictions,
+                        )) {
+                            console.warn(`Ungrounded selector: ${line}`);
+                        }
+                        return {
+                            testDraft: "",
+                            groundingViolations: chosen.grounding.contradictions,
+                            summary: formatGroundingRejection(chosen.grounding.contradictions),
+                            context,
+                            testDirectory: context.testDirectory,
+                        };
+                    }
+
                     for (const line of describeGroundingViolations([
-                        ...grounding.unverified,
-                        ...grounding.warnings,
+                        ...chosen.grounding.unverified,
+                        ...chosen.grounding.warnings,
                     ])) {
                         console.warn(`Selector not seen in any captured page: ${line}`);
                     }
+                    if (chosen.grounding.sourceGrounded.length > 0) {
+                        onProgress?.(
+                            `${chosen.grounding.sourceGrounded.length} selector(s) grounded in source markup (state not yet captured live)`,
+                        );
+                    }
                     return {
-                        testDraft: cleaned,
+                        testDraft: chosen.draft,
                         // Surfaced in the run summary so an unverifiable locator
                         // is visible to the user, not just to the log.
-                        groundingViolations: grounding.unverified,
+                        groundingViolations: chosen.grounding.unverified,
                         context,
                         testDirectory: context.testDirectory,
                     };

@@ -23,6 +23,7 @@ import {
     runCustomLoginScript,
     runInteractiveAuthHandoff,
     writeValidatedAuthState,
+    clearAuthLivenessCache,
 } from "@raiken/core";
 import { loadAuthConfig, resolveAuthStorageStateDestination } from "@raiken/shared/server";
 import chalk from "chalk";
@@ -45,6 +46,8 @@ export interface AuthOptions {
     script?: string;
     timeout?: string | number;
     headed?: boolean;
+    /** Write .raiken/login.ts from the last observed login form. */
+    writeLoginScript?: boolean;
     /**
      * REPL integration hook. Standalone auth creates its own readline watcher;
      * the interactive shell supplies one backed by its existing interface so
@@ -79,6 +82,36 @@ export function shouldRunCustomLogin(
 
 export async function authCommand(options: AuthOptions): Promise<void> {
     const projectPath = process.cwd();
+
+    if (options.writeLoginScript) {
+        const { writeLoginScriptFromEvidence, recordLoginFlowFromEvidence } = await import(
+            "@raiken/core"
+        );
+        recordLoginFlowFromEvidence(projectPath);
+        const written = writeLoginScriptFromEvidence(projectPath);
+        if (!written) {
+            console.error(
+                chalk.red(
+                    "\n✗ No observed login form on disk. Run the agent against a login page first, " +
+                        "or complete an interactive auth once so fields are recorded.\n",
+                ),
+            );
+            cliExit(CLI_EXIT.USAGE);
+        }
+        console.log(chalk.green(`\n✓ Wrote login script ${path.relative(projectPath, written.path)}`));
+        if (written.patchedConfig) {
+            console.log(chalk.dim("   Set auth.customLoginScript to .raiken/login.ts in raiken.config.json"));
+        } else {
+            console.log(
+                chalk.dim(
+                    '   Add to raiken.config.json: "auth": { "customLoginScript": ".raiken/login.ts" }',
+                ),
+            );
+        }
+        console.log(chalk.dim("   Re-run: raiken auth\n"));
+        return;
+    }
+
     // Honour `auth.storageStatePath` from raiken.config.json — pre-fix this
     // hardcoded `.raiken/auth-state.json` and silently ignored the configured
     // path, which meant `raiken discover` would load auth state from the
@@ -366,6 +399,7 @@ async function importFromStateFile(src: string, dest: string, projectPath: strin
     }
 
     writeValidatedAuthState(dest, parsed);
+    clearAuthLivenessCache(projectPath);
     await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✓ Imported storage state"));
@@ -467,6 +501,7 @@ async function importFromFlags(
     };
 
     writeValidatedAuthState(dest, state);
+    clearAuthLivenessCache(projectPath);
     await markAuthBlockersResolved(projectPath, dest);
 
     console.log(chalk.green("\n✓ Imported auth state"));
@@ -477,6 +512,7 @@ async function importFromFlags(
 }
 
 async function markAuthBlockersResolved(projectPath: string, statePath: string): Promise<number> {
+    clearAuthLivenessCache(projectPath);
     try {
         return resolveHandoffBlockers(projectPath, {
             storageStatePath: statePath,

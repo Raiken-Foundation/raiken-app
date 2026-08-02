@@ -5,6 +5,7 @@
 
 import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import type { SiteKnowledge } from "../site-discovery";
+import { baseUrlPathPrefix } from "../testing/spec-normalize";
 import type { ParsedClass, ParsedFunction, ParsedImport, TemplateSelector } from "../types";
 import type { AgentIntent, DiscoveryManagementAction } from "./graph/utils";
 
@@ -119,10 +120,20 @@ export const goldenFrameworkTemplate: PromptTemplate = {
         // test run against local / staging / prod just by changing the
         // config. Without one, Playwright treats `'/login'` as a navigation
         // failure, so the test must hardcode the full URL.
+        // An app mounted under a sub-path (Vite `base`, Next `basePath`, a docs
+        // site under /docs) needs that prefix in every path: Playwright resolves
+        // "/x" against the baseURL's ORIGIN, so a bare "/" silently leaves the
+        // app and every later locator times out on the wrong page.
+        const basePathPrefix = baseUrlPathPrefix(context.baseURL ?? null);
         const urlRule = context.baseURL
             ? `- A Playwright \`use.baseURL\` is configured: \`${context.baseURL}\`.
   URLs MUST be relative paths starting with "/". Use the exact path observed in [LIVE DOM CONTEXT] / [SITE DISCOVERY KNOWLEDGE] or given by the user — never guess or assume a route.
-  Do NOT emit \`http://\` / \`https://\` URLs unless navigating to an external origin.`
+  Do NOT emit \`http://\` / \`https://\` URLs unless navigating to an external origin.${
+      basePathPrefix
+          ? `
+  This baseURL is served from the sub-path \`${basePathPrefix}\`. Playwright resolves a leading "/" against the ORIGIN, so every path you emit MUST start with \`${basePathPrefix}\` (the app entry point is \`page.goto("${basePathPrefix}")\`, never \`page.goto("/")\`).`
+          : ""
+  }`
             : `- URLs MUST be absolute (no baseURL is configured). Source from user prompt, [SITE DISCOVERY KNOWLEDGE], or DOM context. Never invent a route. If none is available, ask.`;
 
         // Only spend tokens on the caveat when a template actually contributed
@@ -156,10 +167,12 @@ Structure: imports → describe → optional beforeEach → test cases (Arrange/
 - Drive the test from [LIVE DOM CONTEXT]: the flow, steps, and assertions all come from what is actually on the page (roles, labels, text, fields, links). Do not invent pages, routes, fields, or copy.
 - Fill each relevant field with a realistic value; assert the outcome the page exposes (validation, success, navigation, new content).
 - Assert concrete observable results (visible text, URL, element state, a response) — never restate the test's intent.
+- Never invert an assertion to fit the evidence (toBeVisible → .not.toBeVisible / toHaveCount(0) / toBeHidden). Keep the polarity asked for and mark it \`// TODO:\` — a flipped assertion is a false green.
 
 [BEHAVIOR & TIMING]
 - If a [PAGE BEHAVIOR] block is present, use its HINT/numbers to size timeouts to the observed settle time, not Playwright defaults.
-- Navigate with page.goto(url, { waitUntil: "domcontentloaded" }). Do NOT rely on the default "load" event: real apps hold resources open and it times out.
+- Use page.goto ONLY for the initial entry URL (and when the scenario intentionally tests a full reload). Mid-flow, prefer in-app navigation — click the real link/button from the live DOM — because page.goto remounts SPAs and wipes in-memory client state (cart, wizard steps, session UI).
+- When you do use page.goto, pass { waitUntil: "domcontentloaded" }. Do NOT rely on the default "load" event: real apps hold resources open and it times out.
 - NEVER wait for "networkidle" — apps with websockets/SSE/polling never go idle, so it always times out. Wait on a concrete signal instead: waitForURL, waitForResponse, or expect(locator).toBeVisible({ timeout }).
 - After actions that navigate or load data, assert a specific element/URL/response is present rather than a global load state.
 - If the page was slow, add explicit generous timeouts on the elements/URLs you assert; prefer waitForResponse on any listed slow endpoints in the flow.

@@ -180,6 +180,14 @@ export const createDetectInterruptionNode =
                             at: Date.now(),
                         }),
                     );
+                    try {
+                        const { recordLoginFlowFromEvidence } = await import(
+                            "../../../cover/flow-store"
+                        );
+                        recordLoginFlowFromEvidence(projectPath);
+                    } catch {
+                        /* flow table may not be migrated yet */
+                    }
                 } catch {
                     /* memory not available — non-critical */
                 }

@@ -962,7 +962,11 @@ export async function* runToolAgent(
 
             yield `\n\n${userMessage}`;
             fullText += `\n\n${userMessage}`;
-            console.log("⏸️ Agent awaiting user input");
+            // One-shot (-p) resolves this pause itself via auto-approval, so
+            // the "awaiting user input" line would misreport a stuck agent.
+            if (process.env["RAIKEN_ONESHOT"] !== "1") {
+                console.log("⏸️ Agent awaiting user input");
+            }
 
             try {
                 const memory = AgentMemory.getInstance(projectPath);

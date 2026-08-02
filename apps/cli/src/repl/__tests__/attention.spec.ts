@@ -23,6 +23,12 @@ const AI_ENV_VARS = [
     "ANTHROPIC_API_KEY",
     "GOOGLE_API_KEY",
     "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "PERPLEXITY_API_KEY",
     "AI_API_KEY",
 ];
 

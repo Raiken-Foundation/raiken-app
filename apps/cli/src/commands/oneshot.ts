@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
     BrowserSession,
@@ -30,10 +31,20 @@ export interface OneShotOptions {
     save: boolean;
     /** Run the saved test after generation and reflect pass/fail in the exit code. */
     run: boolean;
+    /**
+     * When a `--run` fails, ask the AI to diagnose the failure (app bug vs
+     * test bug) and include the verdict in the output (default true).
+     */
+    diagnose?: boolean;
     /** Show the browser (default headless for scriptability). */
     headed: boolean;
     /** Abort the run after this many milliseconds. */
     timeoutMs?: number;
+    /**
+     * Skip the discovery gate so `-p` can draft without site knowledge
+     * (intentional scaffolds / offline use).
+     */
+    allowUngrounded?: boolean;
 }
 
 interface RunSummary {
@@ -82,6 +93,27 @@ export interface OneShotOutcomeInput {
     /** True when `--run` was passed. */
     runRequested: boolean;
     runSummary: RunSummary | null;
+    /**
+     * Set when the saved spec sits outside what the project's Playwright
+     * `testMatch` collects — the run then reports "No tests found" and the
+     * spec looks empty, when the real problem is the config.
+     */
+    uncollectedSpecReason?: string | null;
+    /**
+     * True when the agent ended the run by asking the user a question
+     * (`awaitUser`). One-shot has no one to ask, so the request was abandoned
+     * mid-flight no matter how clean the stream looked.
+     */
+    awaitedUserInput?: boolean;
+    /** The question the agent paused on, when it paused. */
+    awaitUserMessage?: string | null;
+    /**
+     * Cover-equivalent honesty gates on the saved draft. When set, oneshot
+     * refuses to report success the same way `raiken cover` does.
+     */
+    needsReview?: boolean;
+    blocked?: boolean;
+    reviewReasons?: string[];
 }
 
 export interface OneShotOutcome {
@@ -118,6 +150,21 @@ export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcom
     });
 
     if (input.saveError) return notOk(input.saveError);
+    // A pause is a dead end here: nothing can answer it, so the run stops
+    // wherever it stood. Reporting success would tell a CI pipeline the flow
+    // was covered when the agent never got past the question.
+    if (input.awaitedUserInput) {
+        const question = input.awaitUserMessage?.trim();
+        return {
+            ok: false,
+            exitCode: CLI_EXIT.CONFIG_AUTH,
+            reason:
+                "The agent paused to ask for input, which one-shot mode cannot answer" +
+                `${question ? `: "${question}"` : "."}` +
+                " Put the value in the prompt, configure it under `auth.credentials` in " +
+                "raiken.config.json, or run `raiken auth` to save a session.",
+        };
+    }
     if (input.producedTest && input.saveRequested && !input.savedTest) {
         return notOk(
             "A test was generated but no file exists on disk for it. Nothing was saved, so nothing was verified.",
@@ -127,9 +174,19 @@ export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcom
         return notOk("--run was requested but the generated test was never executed.");
     }
     if (input.runSummary && !input.runSummary.success) {
+        // A run that collected nothing is a config problem, not a test result.
+        // Leading with the counts sends people debugging a spec that never ran.
+        if (input.uncollectedSpecReason) return notOk(input.uncollectedSpecReason);
         return notOk(
             `The test run failed (${input.runSummary.passed} passed, ${input.runSummary.failed} failed).`,
         );
+    }
+    if (input.producedTest && (input.blocked || input.needsReview)) {
+        const reasons = (input.reviewReasons ?? []).filter(Boolean);
+        const head = input.blocked
+            ? "Generated draft is blocked and cannot run as written"
+            : "Generated draft needs review before it can be trusted";
+        return notOk(reasons.length > 0 ? `${head}: ${reasons.join("; ")}` : head);
     }
     return { ok: true, exitCode: CLI_EXIT.SUCCESS };
 }
@@ -163,6 +220,8 @@ async function readStdin(): Promise<string> {
 export async function runOneShotCommand(options: OneShotOptions): Promise<void> {
     const projectPath = process.cwd();
     process.env.RAIKEN_HEADLESS = options.headed ? "0" : "1";
+    // Lets core skip interactive-only chatter (the pause log) in this mode.
+    process.env.RAIKEN_ONESHOT = "1";
 
     const streamJson = options.streamJson === true;
     const json = options.json === true && !streamJson;
@@ -228,6 +287,50 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
 
     const app = createProjectApplication(projectPath);
 
+    // Same cold-start gate as cover: refuse to invent without site knowledge,
+    // or auto-discover when baseURL/webServer.url is known.
+    try {
+        const { ensureSiteKnowledge } = await import("@raiken/core");
+        const knowledge = await ensureSiteKnowledge({
+            projectPath,
+            allowUngrounded: options.allowUngrounded === true,
+            onProgress: (message) => {
+                if (streamJson) {
+                    events.emit({
+                        type: "progress",
+                        label: "site knowledge",
+                        detail: message,
+                        ts: nowTs(),
+                    });
+                } else if (!json) {
+                    process.stderr.write(dim(`  ${message}\n`));
+                }
+            },
+        });
+        if (knowledge.status === "ready" && knowledge.discovered && !json && !streamJson) {
+            process.stderr.write(
+                dim(`  Site knowledge ready from ${knowledge.seedUrl ?? "seed URL"}.\n`),
+            );
+        }
+        if (!options.allowUngrounded) {
+            const { authLivenessBlocks, probeAuthState } = await import("@raiken/core");
+            const liveness = await probeAuthState({ projectPath, headed: options.headed });
+            if (authLivenessBlocks(liveness)) {
+                return void fail(liveness.message, CLI_EXIT.CONFIG_AUTH);
+            }
+            if (
+                (liveness.status === "live" || liveness.status === "stale") &&
+                !json &&
+                !streamJson &&
+                !liveness.fromCache
+            ) {
+                process.stderr.write(dim(`  ${liveness.message}\n`));
+            }
+        }
+    } catch (err) {
+        return void fail(err, CLI_EXIT.USAGE);
+    }
+
     const abort = new AbortController();
     const timer = options.timeoutMs ? setTimeout(() => abort.abort(), options.timeoutMs) : null;
     const onSigint = () => abort.abort();
@@ -236,6 +339,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     let assistant = "";
     let pendingHITL: Record<string, unknown> | null = null;
     let agentSavedPath: string | null = null;
+    let awaitUserMessage: string | null = null;
     const toolCalls: string[] = [];
 
     events.emit({ type: "start", prompt, ts: nowTs() });
@@ -246,8 +350,17 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             projectPath,
             conversationHistory: [],
             signal: abort.signal,
+            // `--no-save` is a promise about the filesystem, so it has to reach
+            // the tool layer. Without this, a project with `autoSaveTests: true`
+            // auto-approves the agent's own `saveFile` call and writes anyway —
+            // the CLI flag only ever governed the approval-gated path.
+            ...(options.save ? {} : { autonomyOverride: { autoSaveTests: false } }),
             onToolCall: (name, args) => {
                 toolCalls.push(name);
+                if (name === "awaitUser") {
+                    const a = (args ?? {}) as { message?: unknown };
+                    awaitUserMessage = typeof a.message === "string" ? a.message : "";
+                }
                 if (name === "saveFile") {
                     const a = (args ?? {}) as { filePath?: unknown; path?: unknown };
                     const p = typeof a.filePath === "string" ? a.filePath : a.path;
@@ -293,7 +406,15 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                 if (streamJson) {
                     events.emit({ type: "text", text, ts: nowTs() });
                 } else if (!json) {
-                    process.stdout.write(text);
+                    // The engine's "Waiting for approval to save/run X." pause
+                    // line describes a pause this command immediately resolves
+                    // itself (auto-approval below) — printing it reads as the
+                    // agent being stuck when it isn't.
+                    const willAutoApprove = options.save || options.run;
+                    const printable = willAutoApprove
+                        ? text.replace(/^\s*Waiting for approval to (save|run) [^\n]*$/gm, "")
+                        : text;
+                    if (printable) process.stdout.write(printable);
                 }
             }
         }
@@ -339,6 +460,22 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     // "a saved file must exist" a fair expectation. Asking a question, or
     // exploring a site, legitimately leaves no artifact behind.
     const producedTest = Boolean(draftFromApproval) || agentSavedPath !== null;
+
+    // Only the FIRST generation pass streams its tokens, so when the engine
+    // regenerates (an ungrounded locator, an inverted assertion) the draft the
+    // user just watched scroll past is not the one that gets saved and run.
+    // Reprint the real one rather than leave them reading a discarded draft.
+    const strip = (code: string): string => code.replace(/```[a-z]*|\s+/gi, "");
+    const streamedSupersededDraft =
+        Boolean(draftFromApproval) && !strip(assistant).includes(strip(draftFromApproval));
+    if (streamedSupersededDraft && !json && !streamJson) {
+        process.stderr.write(
+            chalk.yellow(
+                "\n  The draft above was regenerated before saving — the final test is below.\n",
+            ),
+        );
+        process.stdout.write(`\n${draftFromApproval}\n`);
+    }
 
     let savedTest: string | null = null;
     let workflowStatusAfterSave: string | undefined;
@@ -409,7 +546,19 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         if (testFile) savedTest = testFile;
     }
 
-    if (!savedTest && agentSavedPath) savedTest = agentSavedPath;
+    // Under `--no-save` the agent's own `saveFile` call is gated, so its path
+    // names a file that was deliberately never written. Claiming it here would
+    // send `--run` at a nonexistent spec ("No tests found").
+    if (!savedTest && agentSavedPath && options.save) savedTest = agentSavedPath;
+
+    // `--no-save --run` still has something to execute: the draft itself. Run
+    // it from a scratch spec the runner cleans up, so the request is honoured
+    // (preview + verdict) without leaving an artifact behind.
+    const scratchContent = !options.save && !savedTest ? draftFromApproval : "";
+    const scratchName =
+        (typeof pendingHITL?.suggestedPath === "string" ? pendingHITL.suggestedPath : "") ||
+        agentSavedPath ||
+        "raiken-oneshot";
 
     // A recorded path proves only that a save was ATTEMPTED: a `saveFile`
     // call that hit the HITL gate returns `saved: false` and writes nothing,
@@ -425,9 +574,90 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         }
     }
 
+    // Writing a spec the project's Playwright config will never collect is a
+    // silent dead end: the file is on disk, the run reports "No tests found",
+    // and the diagnosis blames the (perfectly fine) spec.
+    let uncollectedSpecReason: string | null = null;
+    if (savedTest) {
+        try {
+            const { assessPlaywrightFit } = await import("@raiken/core");
+            const fit = await assessPlaywrightFit(
+                projectPath,
+                path.resolve(projectPath, savedTest),
+            );
+            if (!fit.collectedByConfig && fit.reason) {
+                uncollectedSpecReason = `Saved ${savedTest}, but ${fit.reason}`;
+                if (!json && !streamJson) {
+                    process.stderr.write(chalk.yellow(`\n  ⚠ ${uncollectedSpecReason}\n`));
+                }
+            }
+        } catch {
+            // Config introspection is best-effort; never block the run on it.
+        }
+    }
+
+    // Hold the saved (or scratch) draft to cover's honesty gates so `-p` and
+    // `cover` share one contract for "this artifact is trustworthy".
+    let draftNeedsReview = false;
+    let draftBlocked = false;
+    let draftReviewReasons: string[] = [];
+    const draftBodyForAssess =
+        savedTest && options.save
+            ? await readFile(path.resolve(projectPath, savedTest), "utf-8").catch(() => "")
+            : scratchContent || draftFromApproval || "";
+    const draftPathForAssess = savedTest
+        ? path.resolve(projectPath, savedTest)
+        : path.resolve(projectPath, "e2e", "raiken-oneshot.spec.ts");
+    if (producedTest && draftBodyForAssess.trim()) {
+        try {
+            const { assessGeneratedDraft, gatherCoverEvidence } = await import("@raiken/core");
+            const evidence = await gatherCoverEvidence(projectPath, prompt);
+            const assessed = await assessGeneratedDraft({
+                body: draftBodyForAssess,
+                projectPath,
+                outputPath: draftPathForAssess,
+                evidence,
+                description: prompt,
+                ...(uncollectedSpecReason ? { extraReviewReasons: [uncollectedSpecReason] } : {}),
+            });
+            draftNeedsReview = assessed.needsReview;
+            draftBlocked = assessed.blocked;
+            draftReviewReasons = assessed.reviewReasons;
+            if ((draftNeedsReview || draftBlocked) && !json && !streamJson) {
+                process.stderr.write(
+                    chalk.yellow(
+                        draftBlocked
+                            ? "\n  ✗ Draft is blocked and cannot run as written\n"
+                            : "\n  ⚠ Draft needs review before it can be trusted\n",
+                    ),
+                );
+                for (const reason of draftReviewReasons) {
+                    process.stderr.write(chalk.yellow(`     - ${reason}\n`));
+                }
+            }
+        } catch {
+            // Assessment is best-effort relative to the run; never mask a save.
+        }
+    }
+
     let runSummary: RunSummary | null = null;
-    if (options.run && savedTest) {
-        if (!json && !streamJson) process.stderr.write(dim(`  Running ${savedTest}...\n`));
+    let failedTestsForDiagnosis: Array<{
+        name?: string;
+        suite?: string;
+        status?: string;
+        duration?: number;
+        error?: {
+            message?: string;
+            snippet?: string;
+            location?: { file: string; line: number; column: number };
+        };
+    }> = [];
+    if (options.run && (savedTest || scratchContent)) {
+        if (!json && !streamJson) {
+            process.stderr.write(
+                dim(`  Running ${savedTest ?? "the draft (scratch run, nothing saved)"}...\n`),
+            );
+        }
         try {
             const shouldContinueWorkflow =
                 workflowId &&
@@ -443,10 +673,29 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                     ? summarizeWorkflowRun(result.run)
                     : { success: false, passed: 0, failed: 0, skipped: 0 };
             } else {
-                const result = (await app.testing.runTests({ testFile: savedTest })) as {
+                const result = (await app.testing.runTests(
+                    savedTest
+                        ? { testFile: savedTest }
+                        : { testFile: `scratch:${scratchName}`, inlineContent: scratchContent },
+                )) as {
                     success: boolean;
-                    parsedRun?: { tests?: Array<{ status?: string }> } | null;
+                    parsedRun?: {
+                        tests?: Array<{
+                            name?: string;
+                            suite?: string;
+                            status?: string;
+                            duration?: number;
+                            error?: {
+                                message?: string;
+                                snippet?: string;
+                                location?: { file: string; line: number; column: number };
+                            };
+                        }>;
+                    } | null;
                 };
+                failedTestsForDiagnosis = (result.parsedRun?.tests ?? []).filter(
+                    (t) => t.status === "failed",
+                );
                 // Count from the parsed run (same vocabulary as `raiken test`
                 // and `raiken report`), not the raw Playwright stats block —
                 // that block misses reporter-level failures like compile or
@@ -501,6 +750,80 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         /* already closed */
     }
 
+    // A failed --run without an explanation leaves the caller staring at a
+    // pass/fail count. The interpreter can usually tell whether the TEST or
+    // the APPLICATION is at fault — that verdict is the difference between
+    // "regenerate the test" and "file a bug", so surface it here.
+    let diagnosis: string | null = null;
+    const diagnosisTarget = savedTest ?? (scratchContent ? scratchName : null);
+    if (
+        options.diagnose !== false &&
+        runSummary &&
+        !runSummary.success &&
+        diagnosisTarget &&
+        failedTestsForDiagnosis.length > 0
+    ) {
+        try {
+            if (!json && !streamJson) process.stderr.write(dim("  Diagnosing the failure…\n"));
+            // A scratch run leaves nothing on disk, so diagnose the draft that
+            // ran rather than reading back a file that was never written —
+            // otherwise the interpreter sees an empty spec and blames that.
+            const specCode = savedTest
+                ? await readFile(path.resolve(projectPath, savedTest), "utf-8").catch(() => "")
+                : scratchContent;
+            const { gatherRepairEvidence, maybeCaptureMissingRepairPage } = await import(
+                "@raiken/core"
+            );
+            const failureText = failedTestsForDiagnosis
+                .map((t) => t.error?.message ?? "")
+                .join("\n");
+            const evidence = await gatherRepairEvidence(
+                projectPath,
+                `${diagnosisTarget}\n${specCode}\n${failureText}`,
+            );
+            const live = await maybeCaptureMissingRepairPage({
+                projectPath,
+                testCode: specCode,
+                failureText,
+                evidence,
+                headed: options.headed,
+            });
+            if (live.message && !json && !streamJson) {
+                process.stderr.write(dim(`  ${live.message}\n`));
+            }
+            const interpreted = await app.testing.interpretTestResults({
+                testResults: failedTestsForDiagnosis.map((t) => ({
+                    name: t.name ?? "unknown",
+                    suite: t.suite ?? diagnosisTarget,
+                    status: "failed" as const,
+                    ...(typeof t.duration === "number" ? { duration: t.duration } : {}),
+                    ...(t.error ? { error: t.error } : {}),
+                })),
+                testCode: specCode,
+                testFilePath: diagnosisTarget,
+                pageSummaries: live.pageSummaries,
+            });
+            if (!interpreted.error && interpreted.interpretation.trim()) {
+                diagnosis = interpreted.interpretation.trim();
+                if (streamJson) {
+                    events.emit({
+                        type: "progress",
+                        label: "diagnosis",
+                        detail: diagnosis,
+                        ts: nowTs(),
+                    });
+                } else if (!json) {
+                    const preview = diagnosis.split("\n").slice(0, 14).join("\n");
+                    process.stderr.write(
+                        dim(`\n  Diagnosis\n  ${preview.split("\n").join("\n  ")}\n`),
+                    );
+                }
+            }
+        } catch {
+            // Diagnosis is best-effort; the run result stands on its own.
+        }
+    }
+
     const { ok, exitCode, reason } = computeOneShotOutcome({
         producedTest,
         saveRequested: options.save,
@@ -508,6 +831,12 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
         saveError,
         runRequested: options.run,
         runSummary,
+        awaitedUserInput: awaitUserMessage !== null,
+        awaitUserMessage,
+        uncollectedSpecReason,
+        needsReview: draftNeedsReview,
+        blocked: draftBlocked,
+        reviewReasons: draftReviewReasons,
     });
 
     if (streamJson) {
@@ -515,10 +844,15 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             type: "done",
             ok,
             response: assistant.trim(),
+            ...(streamedSupersededDraft ? { finalDraft: draftFromApproval } : {}),
             savedTest,
             saveError,
             reason,
+            needsReview: draftNeedsReview,
+            blocked: draftBlocked,
+            reviewReasons: draftReviewReasons,
             run: runSummary,
+            diagnosis,
             ts: nowTs(),
         });
         restoreConsole();
@@ -531,11 +865,19 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                         ok,
                         prompt,
                         response: assistant.trim(),
+                        // The streamed response can be a draft the engine then
+                        // regenerated; this is the code that was actually saved
+                        // and run.
+                        ...(streamedSupersededDraft ? { finalDraft: draftFromApproval } : {}),
                         toolCalls,
                         savedTest,
                         saveError,
                         reason,
+                        needsReview: draftNeedsReview,
+                        blocked: draftBlocked,
+                        reviewReasons: draftReviewReasons,
                         run: runSummary,
+                        diagnosis,
                     },
                     null,
                     2,

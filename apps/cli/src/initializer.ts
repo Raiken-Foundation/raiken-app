@@ -458,12 +458,22 @@ export async function initializeProject(
         console.log(chalk.green("\n✓ Project initialization complete!"));
         console.log(chalk.cyan("\nNext steps:"));
         console.log(
-            chalk.gray('  1. Run "raiken test" — the example spec passes with no app needed'),
+            chalk.gray(
+                '  1. Discover your app (required before cover/-p): "raiken discover http://localhost:3000 --skip-auth"',
+            ),
         );
-        console.log(chalk.gray('  2. Run "raiken" to start the interactive agent'));
-        console.log(chalk.gray('  3. Use "/config" anytime to update this project\'s AI setup'));
         console.log(
-            chalk.gray('  4. Or open "raiken start" — the dashboard uses the same AI setting\n'),
+            chalk.gray(
+                '  2. Draft a flow: raiken cover "sign in and see the dashboard" (auto-discovers when baseURL is set)',
+            ),
+        );
+        console.log(
+            chalk.gray(
+                '  3. Run and fix: "raiken test <file>" then "raiken repair <file>" on failure',
+            ),
+        );
+        console.log(
+            chalk.gray('  4. Or run "raiken" for the interactive agent / "/config" for AI setup\n'),
         );
 
         if (preferences.testFramework === "playwright" && !webServerConfigured) {

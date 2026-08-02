@@ -177,6 +177,11 @@ export class SchemaManager {
             this.migrateToV6();
             this.setUserVersion(6);
         }
+
+        if (currentVersion < 7) {
+            this.migrateToV7();
+            this.setUserVersion(7);
+        }
     }
 
     /**
@@ -391,6 +396,30 @@ export class SchemaManager {
                     `ALTER TABLE discovery_sessions ADD COLUMN ignored_categories_json TEXT`,
                 );
             }
+        })();
+    }
+
+    /**
+     * Migration to v7 — first-class recorded flows (multi-step navigation /
+     * login sequences) persisted for cover and replay.
+     */
+    private migrateToV7(): void {
+        this.adapter.db.transaction(() => {
+            this.adapter.db.exec(`
+      CREATE TABLE IF NOT EXISTS recorded_flows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        name TEXT NOT NULL,
+        label TEXT NOT NULL,
+        steps_json TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'discovery',
+        last_verified_at INTEGER NOT NULL,
+        UNIQUE(project_path, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recorded_flows_project
+        ON recorded_flows(project_path);
+    `);
         })();
     }
 

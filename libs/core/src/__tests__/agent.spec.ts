@@ -160,11 +160,12 @@ export class Calculator {
             const prompt = buildSystemPrompt(minimalContext, "Write a test");
             // Rough char-based proxy guarding against prompt bloat. The scaffold
             // includes the grounding + behavior/timing + rules instruction
-            // blocks that steer the model to derive tests from the live DOM
-            // and observed page timing; current minimal-context prompt is
-            // ~2.76k chars. Budget set with headroom above that so the test
-            // fails only on genuine bloat, not incidental wording changes.
-            expect(prompt.length).toBeLessThan(3200);
+            // blocks that steer the model to derive tests from the live DOM,
+            // observed page timing, and the requested assertion polarity;
+            // current minimal-context prompt is ~3.25k chars. Budget set with
+            // headroom above that so the test fails only on genuine bloat, not
+            // incidental wording changes.
+            expect(prompt.length).toBeLessThan(3400);
         });
     });
 

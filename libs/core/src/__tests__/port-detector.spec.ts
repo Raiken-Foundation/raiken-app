@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectDevServerPort, extractPortFlag, readPlaywrightBaseURL } from "../testing";
+import {
+    detectDevServerPort,
+    extractPortFlag,
+    readPlaywrightBaseURL,
+    readPlaywrightTestMatch,
+} from "../testing";
 
 let tmpDir: string;
 
@@ -212,5 +217,23 @@ describe("readPlaywrightBaseURL", () => {
             `export default { use: { baseURL: 'http://127.0.0.1:5173' } };`,
         );
         expect(await readPlaywrightBaseURL(tmpDir)).toBe("http://127.0.0.1:5173");
+    });
+});
+
+describe("readPlaywrightTestMatch", () => {
+    it("extracts a static string array", async () => {
+        await fs.writeFile(
+            path.join(tmpDir, "playwright.config.ts"),
+            `export default { testMatch: ["workflows.spec.ts", "**/*.spec.ts"] };`,
+        );
+        expect(await readPlaywrightTestMatch(tmpDir)).toEqual([
+            "workflows.spec.ts",
+            "**/*.spec.ts",
+        ]);
+    });
+
+    it("returns null when absent", async () => {
+        await fs.writeFile(path.join(tmpDir, "playwright.config.ts"), `export default {};`);
+        expect(await readPlaywrightTestMatch(tmpDir)).toBeNull();
     });
 });

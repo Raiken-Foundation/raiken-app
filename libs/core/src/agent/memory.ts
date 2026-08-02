@@ -37,6 +37,44 @@ export interface RecentFailure {
 }
 
 /**
+ * Preference keys that are run/session working state — not durable project
+ * knowledge. `raiken memory` hides these by default; `--all` includes them.
+ * Cleared when a task completes (or via `raiken memory clear`).
+ */
+const RUN_SCOPED_PREFERENCE_KEYS = new Set([
+    "active_intent",
+    "active_goal",
+    "next_tool",
+    "paused_reason",
+    "target_feature",
+    "target_url",
+    "missing_context",
+    "auth_login",
+    "last_explore_pages",
+    "last_explore_url",
+    "last_explore_summaries",
+    "last_explore_at",
+]);
+
+/** True when a preference key is ephemeral run/session state. */
+export function isRunScopedPreference(key: string): boolean {
+    return RUN_SCOPED_PREFERENCE_KEYS.has(key);
+}
+
+/** Filter a preference map down to durable project knowledge. */
+export function filterDurablePreferences(
+    prefs: Record<string, string>,
+): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(prefs)) {
+        if (!isRunScopedPreference(key) && value !== "") {
+            out[key] = value;
+        }
+    }
+    return out;
+}
+
+/**
  * AgentMemory - Singleton for persistent agent memory
  *
  * Provides a high-level interface for:
@@ -202,6 +240,14 @@ export class AgentMemory {
         return this.db.getAllPreferences();
     }
 
+    /**
+     * Durable project knowledge only — excludes run/session working state
+     * (`paused_reason`, goal markers, last exploration snapshot, …).
+     */
+    getDurablePreferences(): Record<string, string> {
+        return filterDurablePreferences(this.getAllPreferences());
+    }
+
     // =========================================================================
     // Common Preference Helpers
     // =========================================================================
@@ -355,6 +401,9 @@ export class AgentMemory {
             missingContext: [],
             nextTool: null,
         });
+        // Intent is run-scoped too — leaving it set makes the next unrelated
+        // turn inherit yesterday's classification.
+        this.setPreference("active_intent", "");
     }
 
     /**

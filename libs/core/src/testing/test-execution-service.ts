@@ -7,6 +7,7 @@ import { writeFileAtomic } from "../io/atomic-write";
 import { mergeCorrelationContext, obs, runDetachedOperation } from "../observability";
 import { acquireProjectOperation, type ProjectOperationLease } from "../operations";
 import { RunTraceRecorder } from "../run-traces";
+import { recordRunOutcomes } from "./record-outcomes";
 import { WorkflowStore } from "../workflows/workflow-store";
 import { findPlaywrightConfigPath, writePlaywrightConfig } from "./playwright-config";
 import {
@@ -188,6 +189,26 @@ export class TestExecutionService {
                     configPath,
                     abort.signal,
                 );
+                // Feed the failure memory for real (non-scratch) specs so
+                // `raiken context` and repair prompts see this run.
+                if (!tempFile && result.parsedRun?.tests?.length) {
+                    recordRunOutcomes(
+                        projectPath,
+                        result.parsedRun.tests
+                            .filter((test) => test.status !== "skipped")
+                            .map((test) => ({
+                                testFile: target ?? test.suite ?? "unknown",
+                                testName: test.name,
+                                status: test.status === "passed" ? "passed" : "failed",
+                                ...(typeof test.duration === "number"
+                                    ? { durationMs: test.duration }
+                                    : {}),
+                                ...(test.error?.message
+                                    ? { errorMessage: test.error.message }
+                                    : {}),
+                            })),
+                    );
+                }
                 trace?.end(
                     result.success ? "completed" : "error",
                     result.success ? undefined : result.stderr,

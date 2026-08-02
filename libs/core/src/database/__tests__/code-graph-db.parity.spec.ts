@@ -144,7 +144,7 @@ describe("CodeGraphDB facade parity", () => {
         ) as Array<{ id: number; category: string }>;
         expect(blockers[0]?.id).toBe(1);
         expect(blockers[0]?.category).toBe("auth_required");
-        expect(db1.getRawDatabase().pragma("user_version", { simple: true })).toBe(6);
+        expect(db1.getRawDatabase().pragma("user_version", { simple: true })).toBe(7);
         db1.close();
 
         const db2 = new CodeGraphDB(testDir, dbPath);

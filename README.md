@@ -168,9 +168,10 @@ raiken show-trace [path]       # Open a Playwright trace.zip (newest when omitte
 
 raiken cover <target>          # Draft a Playwright test from an AC, symbol, or free text
   -t, --ticket <id>  -o, --output <path>  --dir <path>  --dry-run  --json
+  --allow-ungrounded  --fix-config
 
 raiken doctor                  # Environment checks + flake anti-pattern lint
-  --dir <path>  --fail-on <error|warning|info>  --json
+  --dir <path>  --fail-on <error|warning|info>  --fix  --json
 
 raiken eval <suite> [target]   # Eval harness: playground | benchmark | flakiness <spec>
   --runs <n>  --expect-tests <n>  --repeat <n>  --out <path>  --json
@@ -218,12 +219,21 @@ raiken discover [url]          # Autonomously discover web application structure
 
 raiken knowledge|kb [section] [arg] [--limit <n>] [--json] [-f]
                                # Inspect discovered site knowledge (pages, links, blockers)
-raiken memory [show|clear] [--json] [-f]  # What the agent has learned about this project
+raiken memory [show|clear] [--all] [--json] [-f]  # What the agent has learned about this project
+                               # (--all includes run/session state; default is durable only)
 
 raiken auth                    # Save browser session state for authenticated tests
   --url <url>  --script <path>  --manual  --headed  --timeout <ms>
   --cookie <pairs> --domain <host>  --storage <k=v>  --from-state-file <path>
+  --write-login-script
 ```
+
+Cold-start habit for grounded drafts: keep the app running at Playwright
+`baseURL`, run `raiken doctor --fix` if `testMatch` is narrow, then
+`raiken discover` / `raiken auth` before expecting post-login cover drafts to
+assert real UI. `raiken cover` auto-discovers when knowledge is empty and a
+seed URL is known; without a saved session it will still flag auth scenarios
+as unverified after sign-in.
 
 Exit codes are scriptable: `0` success, `1` runtime/test failure, `2` usage error, `3` config/auth error, `4` busy conflict, `130` cancelled.
 

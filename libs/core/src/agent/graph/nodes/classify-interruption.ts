@@ -228,6 +228,136 @@ export function buildFieldRequestMessage(requestedFields: RequestedField[]): str
 }
 
 /**
+ * Words that are never a credential value. Without this, "sign in with
+ * username and password" would type the literal word "and" into the username
+ * field and then report a failed login.
+ */
+const VALUE_STOPWORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "box",
+    "credentials",
+    "field",
+    "fields",
+    "for",
+    "form",
+    "from",
+    "in",
+    "input",
+    "into",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "then",
+    "to",
+    "using",
+    "value",
+    "with",
+]);
+
+/** Alternative words a user might use for a field, derived from its label/type. */
+function aliasesForField(field: RequestedField): string[] {
+    const label = field.label.toLowerCase().trim();
+    const aliases = new Set<string>([label]);
+    const add = (...words: string[]) => {
+        for (const word of words) aliases.add(word);
+    };
+    if (field.type === "password" || /pass(word|phrase)?|pwd/.test(label)) {
+        add("password", "passphrase", "pass", "pwd");
+    }
+    if (/user\s*(name|id)?|login|account/.test(label)) {
+        add("username", "user", "user name", "userid", "user id", "login");
+    }
+    if (field.type === "email" || /e-?mail/.test(label)) {
+        add("email", "e-mail", "mail");
+    }
+    if (/code|otp|token|pin|2fa|verification/.test(label)) {
+        add("code", "otp", "one-time code", "verification code", "pin", "token", "2fa");
+    }
+    return [...aliases].filter(Boolean).sort((a, b) => b.length - a.length);
+}
+
+function cleanCandidateValue(raw: string): string | null {
+    const value = raw.trim().replace(/^["'`]|["'`.,;:)\]]+$/g, "");
+    if (!value) return null;
+    if (VALUE_STOPWORDS.has(value.toLowerCase())) return null;
+    return value;
+}
+
+/**
+ * Pull `label: value` / `label value` pairs for the requested fields straight
+ * out of the user's text.
+ *
+ * The LLM mapper below handles this too, but it is the single point where a
+ * fully-specified request ("sign in as admin with password hunter2") turns
+ * into a pause: when the model returns nulls — small/cheap models routinely do
+ * — the agent asks for values the user already gave, which strands every
+ * non-interactive run (`raiken -p … --run`, CI, editor integrations).
+ *
+ * Deliberately conservative: a value is only taken when the user named the
+ * field, so an unrelated goal ("walk through the checkout") extracts nothing.
+ * Driven entirely by the DOM-derived field list, so it works for any login
+ * form on any frontend — labels like "Employee ID" or "PIN" included.
+ */
+export function extractLabeledValues(
+    userPrompt: string,
+    requestedFields: RequestedField[],
+): Record<string, string> {
+    const values: Record<string, string> = {};
+    const text = userPrompt.trim();
+    if (!text) return values;
+
+    for (const field of requestedFields) {
+        for (const alias of aliasesForField(field)) {
+            const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            // "password: hunter2" / "password = hunter2" / "password is hunter2"
+            // / "password hunter2" — the separator is optional because people
+            // write both. `\S+` stops at whitespace, so multi-word prose after
+            // the value is left alone.
+            const pattern = new RegExp(
+                `\\b${escaped}\\b\\s*(?:is\\s+|[:=]\\s*)?["'\`]?(\\S+)`,
+                "i",
+            );
+            const match = text.match(pattern);
+            const candidate = match?.[1] ? cleanCandidateValue(match[1]) : null;
+            if (!candidate) continue;
+            // Guard against "username and password: x" handing "password" to
+            // the username field.
+            const isAnotherFieldName = requestedFields.some((other) =>
+                aliasesForField(other).some(
+                    (otherAlias) => otherAlias.toLowerCase() === candidate.toLowerCase(),
+                ),
+            );
+            if (isAnotherFieldName) continue;
+            values[field.key] = candidate;
+            break;
+        }
+    }
+
+    // "sign in as amelia" / "log in as admin" names the account without ever
+    // saying "username", which is how most people phrase it.
+    const asMatch = text.match(/\b(?:sign|log)(?:ged)?\s*(?:in|on)?\s+as\s+["'`]?(\S+)/i);
+    const identity = asMatch?.[1] ? cleanCandidateValue(asMatch[1]) : null;
+    if (identity) {
+        for (const field of requestedFields) {
+            if (values[field.key]) continue;
+            if (field.type === "password") continue;
+            if (/user|login|account|e-?mail/i.test(field.label)) {
+                values[field.key] = identity;
+                break;
+            }
+        }
+    }
+
+    return values;
+}
+
+/**
  * Use the LLM to map the user's free-text reply onto the specific fields the
  * page is requesting. The schema is built dynamically from the DOM-derived
  * fields, so this recognises arbitrary credentials (a code, a number, an
@@ -285,7 +415,12 @@ ${recentMessages}
 
 Current message: ${userPrompt}`;
 
-    const values: Record<string, string> = { ...options.presetValues };
+    // Values the user spelled out win over configured defaults: naming a
+    // different account in the request is how you test a different role.
+    const values: Record<string, string> = {
+        ...options.presetValues,
+        ...extractLabeledValues(userPrompt, requestedFields),
+    };
     if (
         requestedFields.length > 0 &&
         requestedFields.every((field) => Boolean(values[field.key]))

@@ -29,6 +29,7 @@ interface DiscoverOptions {
     skipAuth?: boolean;
     continue?: boolean;
     status?: boolean;
+    json?: boolean;
 }
 
 export function resolveUsableDiscoveryAuthState(projectPath: string): string | null {
@@ -103,9 +104,9 @@ export function buildForegroundUx(params: {
                 }
             ).blocker;
             if (!pauseOnAuth) {
-                // Skip mode: the crawl deliberately continues past protected
-                // routes — announcing "Authentication required / Discovery
-                // paused" here was a lie (nothing paused). One quiet line.
+                // Skip mode: protected *content* is skipped without pausing.
+                // Login-shaped pages are recorded instead (severity: log) and
+                // surface via onBlockerDetected — this path is non-login walls.
                 console.log(chalk.dim(`  Skipping protected route (auth): ${blocker.url}`));
                 return;
             }
@@ -152,6 +153,14 @@ export function buildForegroundUx(params: {
                     };
                 }
             ).blocker;
+            // Login form pages are downgraded to severity "log" and saved —
+            // tell the operator the knowledge was kept.
+            if (blocker.category === "auth_required" && blocker.severity === "log") {
+                console.log(
+                    chalk.dim(`  Recorded login page (not crawling past auth): ${blocker.url}`),
+                );
+                return;
+            }
             if (blocker.category === "auth_required") return;
             if (blocker.severity && blocker.severity !== "pause") return;
             stopSpinner();
@@ -213,13 +222,43 @@ export function buildForegroundUx(params: {
             stopSpinner();
             spinner.succeed(chalk.green("Discovery completed!"));
             if (lastSummary) {
+                // `linksFound` on the session only counts NEW edges this run
+                // (INSERT OR IGNORE). Re-crawls therefore print "0" even when
+                // knowledge holds a full verified graph — show both.
+                let linksTotal: number | null = null;
+                try {
+                    linksTotal = getProjectApplication(projectPath).discovery.getStats().linksCount;
+                } catch {
+                    linksTotal = null;
+                }
+                const linksLine =
+                    linksTotal !== null && linksTotal !== lastSummary.linksFound
+                        ? `${linksTotal} total (${lastSummary.linksFound} new this run)`
+                        : String(lastSummary.linksFound);
                 console.log();
                 console.log(chalk.cyan("Summary:"));
                 console.log(chalk.dim(`   Pages discovered: ${lastSummary.pagesDiscovered}`));
-                console.log(chalk.dim(`   Links found:      ${lastSummary.linksFound}`));
+                console.log(chalk.dim(`   Links found:      ${linksLine}`));
                 console.log(chalk.dim(`   Auth blockers:    ${lastSummary.authBlockersFound}`));
                 console.log();
                 console.log(chalk.dim("Site knowledge saved to .raiken/raiken.db"));
+                console.log();
+                console.log(chalk.cyan("Next:"));
+                console.log(
+                    chalk.dim("  1."),
+                    chalk.white('raiken cover "sign in and open …"'),
+                    chalk.dim("— draft a test from this knowledge"),
+                );
+                console.log(
+                    chalk.dim("  2."),
+                    chalk.white("raiken test <file>"),
+                    chalk.dim("— run it"),
+                );
+                console.log(
+                    chalk.dim("  3."),
+                    chalk.white("raiken repair <file>"),
+                    chalk.dim("— fix locators if it fails"),
+                );
             }
         },
         onError: () => {
@@ -261,7 +300,7 @@ export async function discoverCommand(
 
     try {
         if (options.status) {
-            await showDiscoveryStatus(projectPath);
+            await showDiscoveryStatus(projectPath, { json: options.json === true });
             return;
         }
         validateNumericOptions(options);
@@ -432,10 +471,34 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
     }
 }
 
-export async function showDiscoveryStatus(projectPath: string): Promise<void> {
+export async function showDiscoveryStatus(
+    projectPath: string,
+    options: { json?: boolean } = {},
+): Promise<void> {
     const app = getProjectApplication(projectPath);
     const session = app.discovery.getSessionView();
     const stats = app.discovery.getStats();
+
+    if (options.json) {
+        process.stdout.write(
+            `${JSON.stringify(
+                {
+                    session,
+                    stats: {
+                        pagesCount: stats.pagesCount,
+                        linksCount: stats.linksCount,
+                        verifiedLinksCount: stats.verifiedLinksCount,
+                        brokenLinksCount: stats.brokenLinksCount,
+                        authBlockersCount: stats.authBlockersCount,
+                        unresolvedBlockersCount: stats.unresolvedBlockersCount,
+                    },
+                },
+                null,
+                2,
+            )}\n`,
+        );
+        return;
+    }
 
     console.log(chalk.cyan("\nDiscovery Status\n"));
 

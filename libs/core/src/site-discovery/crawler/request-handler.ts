@@ -99,6 +99,8 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
         deps.inFlightUrls.add(normalizedUrl);
 
         let committed = false;
+        /** Login form captured without a session — save it, do not descend. */
+        let stopDescendingAfterLoginCapture = false;
 
         try {
             try {
@@ -134,21 +136,24 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
             );
 
             if (blocker) {
-                // A login-SHAPED page under a loaded session is the app's
-                // public login page, not an auth wall: we navigated there on
-                // purpose and the session cookies were sent along. Downgrade
-                // to informational so the crawl does not halt on the very
-                // page the user logged in through. Real walls are unaffected:
-                // auth:http_status means the server rejected the session, and
-                // auth:login_redirect only fires when a non-login URL bounced
-                // to /login (so looksLikeLoginUrl(url) is false for it).
-                const publicLoginPage =
+                // A login-SHAPED URL is the form cover/repair need for cold
+                // starts — always capture it (downgrade to informational) so
+                // `--skip-auth` does not leave knowledge empty. Real walls are
+                // unaffected: auth:http_status means the server rejected the
+                // session, and auth:login_redirect only fires when a non-login
+                // URL bounced to /login (so looksLikeLoginUrl(url) is false).
+                // With a session loaded we also keep crawling past the form;
+                // without one we still save the snapshot then stop descending
+                // via the normal link budget (no protected content enqueue).
+                const loginShapedPage =
                     blocker.category === "auth_required" &&
-                    deps.playwrightStorageState !== null &&
                     blocker.detectorId !== "auth:http_status" &&
                     looksLikeLoginUrl(url);
+                if (loginShapedPage && !deps.playwrightStorageState) {
+                    stopDescendingAfterLoginCapture = true;
+                }
                 const effectiveSeverity =
-                    deps.ignoredCategories.has(blocker.category) || publicLoginPage
+                    deps.ignoredCategories.has(blocker.category) || loginShapedPage
                         ? ("log" as const)
                         : blocker.severity;
                 const persisted: Omit<DiscoveryBlocker, "id"> = {
@@ -167,7 +172,7 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                     data: { blocker: blockerWithId },
                     timestamp: Date.now(),
                 });
-                if (blocker.category === "auth_required" && !publicLoginPage) {
+                if (blocker.category === "auth_required" && !loginShapedPage) {
                     deps.emit({
                         type: "auth_blocked",
                         data: { blocker: blockerWithId },
@@ -188,6 +193,8 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                             : deps.options.pauseOnAuth && !deps.hasSeenAuthenticatedSuccess.current;
 
                     if (!shouldPause) {
+                        // Protected content behind auth with --skip-auth: do
+                        // not save a blank/redirect shell as if it were a page.
                         markBrokenLinks(
                             deps.siteDb,
                             url,
@@ -342,6 +349,13 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
             }
 
             if (!startOrigin) {
+                committed = true;
+                return;
+            }
+
+            // Unauthenticated login capture: keep the form in knowledge, but do
+            // not schedule protected routes the crawl cannot open without auth.
+            if (stopDescendingAfterLoginCapture) {
                 committed = true;
                 return;
             }

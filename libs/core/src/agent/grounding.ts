@@ -724,6 +724,32 @@ export function formatGroundingCorrection(report: GroundingReport): string {
 }
 
 /**
+ * Corrective pass for a draft whose assertions only ever check for absence.
+ *
+ * This is what a model produces when it cannot find the thing it was asked to
+ * verify: asked to assert some text is visible, it quietly writes
+ * `toBeHidden()` / `.not.toBeVisible()` and the run goes green having checked
+ * the opposite of the request. The absence also holds on a blank page or a
+ * failed navigation, so the test proves nothing either way.
+ */
+export function formatAssertionPolarityCorrection(userPrompt: string, reason: string): string {
+    return [
+        "[ASSERTION POLARITY — the previous draft was not accepted]",
+        reason,
+        "",
+        `The request was: ${userPrompt}`,
+        "",
+        "Write the assertion the request actually asks for, in its original polarity.",
+        "If it asks for something to be visible/present, assert toBeVisible() — do NOT",
+        "substitute toBeHidden(), .not.toBeVisible(), or toHaveCount(0) because the page",
+        "evidence doesn't show it. A test that fails against the real app is the correct",
+        "answer there; an inverted assertion reports a false pass. When you cannot confirm",
+        "the element from the evidence, keep the requested assertion and mark the line with",
+        "a `// TODO:` naming what could not be confirmed.",
+    ].join("\n");
+}
+
+/**
  * Human-facing explanation shown when a draft is rejected for good. Only
  * contradictions get here — those are the findings the capture proves.
  */

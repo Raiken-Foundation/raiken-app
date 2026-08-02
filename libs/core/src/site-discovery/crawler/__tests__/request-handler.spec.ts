@@ -35,10 +35,10 @@ function makeStats(): DiscoveryStats {
     };
 }
 
-function makePage(title = "Page") {
+function makePage(title = "Page", snapshot: string | null = "- heading: Sign in") {
     return {
         waitForLoadState: vi.fn(async () => {}),
-        locator: () => ({ ariaSnapshot: vi.fn(async () => null) }),
+        locator: () => ({ ariaSnapshot: vi.fn(async () => snapshot) }),
         title: vi.fn(async () => title),
     };
 }
@@ -346,16 +346,69 @@ describe("public login page under a loaded session", () => {
         expect(pause).toHaveBeenCalled();
     });
 
-    it("pauses on /login as before when no session is loaded", async () => {
+    it("records /login without pausing when no session is loaded", async () => {
         const blocker = authBlocker(`${START_URL}/login`, "auth:url_pattern");
-        const { deps, pause } = makeDeps({
+        const { deps, siteDb, pause, emit, requestQueue } = makeDeps({
             detectors: [authDetectorReturning(blocker)],
             playwrightStorageState: null,
         });
+        mockedExtractLinks.mockResolvedValue([
+            { href: "/dashboard", text: "App", dataTestId: null, tagName: "a", role: "link" },
+        ] as never);
         const handle = createCrawlPageProcessor(deps);
 
-        await handle(contextFor(`${START_URL}/login`, makePage()));
+        await handle(contextFor(`${START_URL}/login`, makePage("Sign in")));
 
-        expect(pause).toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+        expect(siteDb.savePage).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: `${START_URL}/login`,
+                snapshotJson: expect.stringContaining("Sign in"),
+            }),
+        );
+        const emittedTypes = emit.mock.calls.map((c) => c[0].type);
+        expect(emittedTypes).not.toContain("auth_blocked");
+        // Capture-then-stop: do not descend into protected routes without auth.
+        expect(requestQueue.addRequests).not.toHaveBeenCalled();
+    });
+});
+
+describe("login capture under --skip-auth", () => {
+    it("saves a login page snapshot and does not crawl past auth", async () => {
+        const blocker = authBlocker(`${START_URL}/login`, "auth:form");
+        const { deps, siteDb, pause, emit, requestQueue } = makeDeps({
+            detectors: [authDetectorReturning(blocker)],
+            playwrightStorageState: null,
+        });
+        deps.options.pauseOnAuth = false;
+        const handle = createCrawlPageProcessor(deps);
+
+        await handle(contextFor(`${START_URL}/login`, makePage("Sign in")));
+
+        expect(pause).not.toHaveBeenCalled();
+        expect(siteDb.savePage).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: `${START_URL}/login`,
+                snapshotJson: expect.stringContaining("Sign in"),
+            }),
+        );
+        expect(emit.mock.calls.map((c) => c[0].type)).toContain("page_discovered");
+        expect(requestQueue.addRequests).not.toHaveBeenCalled();
+    });
+
+    it("still skips non-login auth walls without saving a page", async () => {
+        const blocker = authBlocker(`${START_URL}/dashboard`, "auth:login_redirect");
+        const { deps, siteDb, pause, emit } = makeDeps({
+            detectors: [authDetectorReturning(blocker)],
+            playwrightStorageState: null,
+        });
+        deps.options.pauseOnAuth = false;
+        const handle = createCrawlPageProcessor(deps);
+
+        await handle(contextFor(`${START_URL}/dashboard`, makePage()));
+
+        expect(pause).not.toHaveBeenCalled();
+        expect(siteDb.savePage).not.toHaveBeenCalled();
+        expect(emit.mock.calls.map((c) => c[0].type)).toContain("auth_blocked");
     });
 });

@@ -24,6 +24,8 @@ interface CoverCommandOptions {
     dir?: string;
     dryRun?: boolean;
     json?: boolean;
+    allowUngrounded?: boolean;
+    fixConfig?: boolean;
 }
 
 export async function coverCommand(target: string, options: CoverCommandOptions): Promise<void> {
@@ -70,6 +72,11 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
             integrations: integrationConfig,
             ai,
             dryRun: options.dryRun === true,
+            allowUngrounded: options.allowUngrounded === true,
+            fixConfig: options.fixConfig === true,
+            onProgress: options.json
+                ? undefined
+                : (message) => console.log(chalk.dim(`  ${message}`)),
             onEvent: options.json ? undefined : (event) => logEvent(event),
         });
     } catch (err) {
@@ -79,13 +86,20 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
 
     if (options.json) {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        if (result.needsReview) cliExit(CLI_EXIT.RUNTIME_FAILURE);
         return;
     }
 
     const relativePath = path.relative(projectPath, result.outputPath);
     console.log();
-    if (result.needsReview) {
-        console.log(chalk.yellow(`⚠ Wrote ${relativePath} — draft needs edits before it can run`));
+    if (result.blocked || result.needsReview) {
+        console.log(
+            chalk.yellow(
+                result.blocked
+                    ? `✗ Wrote ${relativePath} — draft is blocked and cannot run as written`
+                    : `⚠ Wrote ${relativePath} — draft needs edits before it can run`,
+            ),
+        );
         for (const reason of result.reviewReasons) {
             console.log(chalk.yellow(`   - ${reason}`));
         }
@@ -103,6 +117,11 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     if (result.sourceFiles.length > 0) {
         console.log(chalk.dim(`   context: ${result.sourceFiles.length} source file(s)`));
     }
+    if (result.todoNotes > 0) {
+        console.log(
+            chalk.dim(`   ${result.todoNotes} optional TODO note(s) in comments — not blocking`),
+        );
+    }
     if (result.grounding && result.grounding.sourceGrounded.length > 0) {
         console.log(
             chalk.dim(
@@ -111,15 +130,30 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
         );
     }
     console.log();
-    console.log(
-        result.needsReview
-            ? chalk.dim(
-                  `Fix the items above, then run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
-              )
-            : chalk.dim(
-                  `Review the draft and run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
-              ),
-    );
+    // A blocked draft cannot be collected or parsed, so `raiken test` on it
+    // reports something misleading ("No tests found", a compile error) that
+    // reads as a broken spec. Send people at the blocker instead.
+    if (result.blocked) {
+        const configBlocked = result.reviewReasons.some((reason) => /testMatch/i.test(reason));
+        console.log(
+            chalk.dim(
+                configBlocked
+                    ? `Fix the config first: ${chalk.bold("raiken doctor --fix")} (or re-run cover with ${chalk.bold("--fix-config")}). Running it now reports "No tests found".`
+                    : "Fix the blocking items above — this draft cannot run as written.",
+            ),
+        );
+    } else {
+        console.log(
+            result.needsReview
+                ? chalk.dim(
+                      `Fix the items above, then run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
+                  )
+                : chalk.dim(
+                      `Review the draft and run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
+                  ),
+        );
+    }
+    if (result.needsReview) cliExit(CLI_EXIT.RUNTIME_FAILURE);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +171,15 @@ function logEvent(event: CoverEvent): void {
         case "symbols_resolved":
             for (const m of event.matches) {
                 console.log(chalk.dim(`  symbol: ${m.name} — ${m.file}`));
+            }
+            break;
+        case "knowledge_ensured":
+            if (event.status === "ready" && event.discovered) {
+                console.log(
+                    chalk.dim(
+                        `  knowledge: auto-discovered from ${event.seedUrl ?? "seed URL"}`,
+                    ),
+                );
             }
             break;
         case "evidence_gathered": {

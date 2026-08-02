@@ -1,4 +1,5 @@
 import { CodeGraphDB } from "../../../database/db";
+import { verifyPendingLinks } from "../../../site-discovery/crawler/link-verification";
 import { SiteKnowledgeDB } from "../../../site-discovery/db";
 import type { PageSnapshot } from "../types";
 
@@ -72,6 +73,7 @@ export function persistPageDiscovery(
                 snapshotJson: snapshot.summary,
                 formsJson: null,
             });
+            verifyPendingLinks(siteDb, snapshot.url, snapshot.url);
             return;
         }
 
@@ -101,6 +103,10 @@ export function persistPageDiscovery(
             lastVisitedAt: now,
             visitCount: 1,
         });
+        // Same save-time verification the crawler does: links recorded earlier
+        // that point at this page must not stay "pending" forever just because
+        // the agent (not `raiken discover`) was the one that visited it.
+        verifyPendingLinks(siteDb, snapshot.url, snapshot.url);
     } catch {
         // Non-critical: don't break the agent if persistence fails
     }
@@ -135,6 +141,20 @@ export function persistLinksDiscovery(
                 discoveredAt: now,
                 verifiedAt: null,
             });
+        }
+
+        // Links can also point BACKWARDS at pages the agent already visited;
+        // save-time verification on page commit never sees those. Verify each
+        // just-saved target that already has a stored page.
+        const targets = new Set(links.map((link) => link.href));
+        for (const target of targets) {
+            try {
+                if (siteDb.getPage(target)) {
+                    verifyPendingLinks(siteDb, target, target);
+                }
+            } catch {
+                // Ignore malformed targets; the sweep in `raiken discover` heals them.
+            }
         }
     } catch {
         // Non-critical

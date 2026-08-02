@@ -17,7 +17,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { raikenConfigSchema } from "../config/schema";
 import { getConfigPath } from "../config/store";
-import { findPlaywrightConfigPath, readPlaywrightBaseURL } from "../testing/playwright-config";
+import { isRestrictiveTestMatch } from "../cover/draft-quality";
+import {
+    findPlaywrightConfigPath,
+    readPlaywrightBaseURL,
+    readPlaywrightTestMatch,
+} from "../testing/playwright-config";
 import type { DoctorFinding } from "./scan";
 
 export interface EnvironmentScanOptions {
@@ -44,6 +49,7 @@ export const ENVIRONMENT_RULES: ReadonlySet<string> = new Set([
     "baseurl-unreachable",
     "playwright-config-missing",
     "test-directory-missing",
+    "testmatch-restrictive",
 ]);
 
 function finding(
@@ -327,6 +333,24 @@ export async function scanEnvironment(options: EnvironmentScanOptions): Promise<
                     );
                 }
             }
+        }
+
+        const testMatch = await readPlaywrightTestMatch(projectPath).catch(() => null);
+        if (isRestrictiveTestMatch(testMatch)) {
+            findings.push(
+                finding({
+                    rule: "testmatch-restrictive",
+                    severity: "warning",
+                    file: configRel,
+                    line: 1,
+                    column: 1,
+                    snippet: `testMatch: ${JSON.stringify(testMatch)}`,
+                    message:
+                        "playwright.config testMatch is narrow — drafts named *.spec.ts may not run (`No tests found`).",
+                    suggestion:
+                        'Widen to `testMatch: ["**/*.spec.ts"]`, or write new specs under the collected basename.',
+                }),
+            );
         }
 
         // 5. baseURL reachability — only when Playwright will NOT start the

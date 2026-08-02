@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripAnsi, summarizeRunForCli } from "../test";
+import { looksLikeNoTestsCollected, stripAnsi, summarizeRunForCli } from "../test";
 
 const failedCase = {
     name: "increments the cart count",
@@ -77,6 +77,34 @@ describe("summarizeRunForCli", () => {
         const empty = summarizeRunForCli({ tests: [] }, "Error: playwright crashed\nstack");
         expect(empty.error).toContain("playwright crashed");
         expect(empty.failures).toEqual([]);
+    });
+});
+
+describe("looksLikeNoTestsCollected", () => {
+    it("recognizes the config failure Playwright reports as a build error", () => {
+        const summary = summarizeRunForCli(
+            {
+                tests: [
+                    {
+                        name: "Compilation error",
+                        suite: "Build errors",
+                        status: "failed",
+                        error: {
+                            message:
+                                "Error: No tests found.\nMake sure that arguments are regular expressions matching test files.",
+                        },
+                    },
+                ],
+            },
+            "",
+        );
+        expect(looksLikeNoTestsCollected(summary.error)).toBe(true);
+    });
+
+    it("leaves a genuine assertion failure to the repair path", () => {
+        const summary = summarizeRunForCli({ tests: [failedCase] });
+        expect(looksLikeNoTestsCollected(summary.error)).toBe(false);
+        expect(looksLikeNoTestsCollected(undefined)).toBe(false);
     });
 });
 

@@ -19,6 +19,7 @@ import { parseCiRunReport } from "../testing/report-parser";
 import { writeTestRunReport } from "../testing/report-writer";
 import { summarizeTestRunCounts } from "../testing/run-outcome";
 import { TestRunner, type TestRunResult } from "../testing/runner";
+import { recordRunOutcomes } from "../testing/record-outcomes";
 import {
     filterSourceFiles,
     GitError,
@@ -183,6 +184,29 @@ async function runAffectedTests(
         });
         try {
             const results = await runner.runTest(t.testFile, { timeout: opts.timeout });
+            recordRunOutcomes(
+                projectPath,
+                results.flatMap((result) => {
+                    if (result.status === "skipped") return [];
+                    const status =
+                        result.status === "flaky" || result.status === "passed"
+                            ? ("passed" as const)
+                            : result.status;
+                    return [
+                        {
+                            testFile: result.testFile,
+                            testName: result.testName,
+                            status,
+                            ...(typeof result.duration === "number"
+                                ? { durationMs: result.duration }
+                                : {}),
+                            ...(result.error?.message
+                                ? { errorMessage: result.error.message }
+                                : {}),
+                        },
+                    ];
+                }),
+            );
             allResults.push(...results);
             opts.emit({ type: "test_finished", testFile: t.testFile, results });
         } catch (err) {

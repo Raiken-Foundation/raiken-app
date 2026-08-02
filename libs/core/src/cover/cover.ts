@@ -7,9 +7,10 @@
  *   - the GitHub Actions workflow that responds to `/raiken cover ...` PR
  *     comments
  *
- * Unlike the interactive agent, this path is one-shot, single-LLM-call,
- * and never opens a browser. The output is always a `.spec.ts` file that
- * a human reviews before running. The trade-off is intentional: cover is
+ * Unlike the interactive agent, this path is one-shot and single-LLM-call.
+ * It may run a bounded discover when site knowledge is missing, but it does
+ * not explore the app interactively. The output is always a `.spec.ts` file
+ * that a human reviews before running. The trade-off is intentional: cover is
  * for "draft me something I can iterate on", not "validate the running
  * app for me" — that's `raiken ci` / the dashboard's job.
  */
@@ -23,12 +24,30 @@ import {
     type ResolvedAIConfig,
 } from "../agent/ai-providers";
 import type { GroundingReport } from "../agent/grounding";
-import { validateSelectorGrounding } from "../agent/grounding";
 import { loadTestDirectory } from "../config";
+import { resolveAuthStorageStateRelativePath } from "../config/auth-state";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
-import { type CoverEvidence, gatherCoverEvidence } from "./evidence";
+import { readPlaywrightBaseURL } from "../testing/playwright-config";
+import {
+    baseUrlPathPrefix,
+    injectStorageState,
+    resolveGotoPathsAgainstBaseUrl,
+    rewriteAbsoluteGotosToRelative,
+} from "../testing/spec-normalize";
+import { assessGeneratedDraft } from "./assess-draft";
+import { suggestCollectedOutputPath } from "./draft-quality";
+import { type CoverEvidence, formatAuthLoginEvidence, gatherCoverEvidence } from "./evidence";
+import { formatNavigationFlows } from "./flows";
+import { extractAcs } from "./intent-coverage";
+import { ensureSiteKnowledge } from "./knowledge-gate";
+import { authLivenessBlocks, probeAuthState } from "../config/auth-liveness";
+import { validationError } from "../errors";
+
+/** Re-export for callers that historically imported from cover.ts. */
+export { assessTodoMarkers } from "./assess-draft";
+export { extractAcs } from "./intent-coverage";
 
 export type CoverTargetKind = "ac" | "symbol" | "free";
 
@@ -51,6 +70,19 @@ export interface CoverOptions {
      * Useful for plumbing checks and offline tests.
      */
     dryRun?: boolean;
+    /**
+     * Skip the cold-start discovery gate (intentional scaffolds / offline
+     * tests). Without this, cover refuses or auto-discovers before drafting.
+     */
+    allowUngrounded?: boolean;
+    /**
+     * When the draft would be blocked by a restrictive testMatch, widen
+     * testMatch to the permissive `*.spec.ts` glob instead of only steering
+     * the filename.
+     */
+    fixConfig?: boolean;
+    /** Progress lines (e.g. auto-discover started) for CLI stderr. */
+    onProgress?: (message: string) => void;
     onEvent?: (event: CoverEvent) => void;
 }
 
@@ -58,6 +90,13 @@ export type CoverEvent =
     | { type: "target_resolved"; kind: CoverTargetKind; description: string }
     | { type: "ticket_loaded"; ticketId: string; title: string }
     | { type: "symbols_resolved"; matches: Array<{ name: string; file: string }> }
+    | {
+          type: "knowledge_ensured";
+          status: "ready" | "skipped";
+          reason?: "allow_ungrounded" | "already_present";
+          seedUrl?: string;
+          discovered?: boolean;
+      }
     | {
           type: "evidence_gathered";
           pages: number;
@@ -85,13 +124,21 @@ export interface CoverResult {
      */
     grounding?: GroundingReport;
     /**
-     * True when the draft cannot run as written — it still contains TODO
-     * placeholders or locators contradicted by captured pages. The CLI keys
-     * its exit message on this instead of unconditionally claiming success.
+     * True when the draft cannot run as written — TODO placeholders, invalid
+     * syntax, Playwright config mismatch, or locators contradicted by captured
+     * pages. The CLI keys its exit message (and exit code) on this.
      */
     needsReview: boolean;
     /** Reviewer-readable reasons behind `needsReview`. */
     reviewReasons: string[];
+    /** TODOs in comments only — optional follow-ups, not blockers. */
+    todoNotes: number;
+    /**
+     * True when the draft fails a hard gate (does not parse, or Playwright
+     * will not collect it). Distinct from soft review reasons so callers can
+     * refuse to treat the write as success.
+     */
+    blocked: boolean;
 }
 
 const AC_PATTERN = /^AC-?(\d+)$/i;
@@ -114,57 +161,129 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
 
     // ---- 3. Determine output path
     const testDir = options.testDirectory ?? loadTestDirectory(projectPath);
-    const outputPath = options.outputPath
+    let outputPath = options.outputPath
         ? path.resolve(projectPath, options.outputPath)
         : path.resolve(projectPath, testDir, defaultFileName(kind, options.target));
+    const steeredReasons: string[] = [];
+    // Default (invented) names often miss a project's narrow testMatch — steer
+    // to the single collected basename when that is unambiguous. Explicit
+    // --output keeps the caller's path and the hard block below.
+    if (!options.outputPath) {
+        const steered = await suggestCollectedOutputPath(projectPath, outputPath);
+        if (steered) {
+            outputPath = steered.path;
+            steeredReasons.push(
+                `wrote to ${steered.basename} so Playwright testMatch collects the draft — ` +
+                    "pass --output to choose a different name (and widen testMatch if needed)",
+            );
+        }
+    }
 
-    // ---- 4. Build prompt + call LLM (or scaffold on --dry-run)
+    // ---- 4. Cold-start knowledge gate (refuse or auto-discover)
+    const knowledge = await ensureSiteKnowledge({
+        projectPath,
+        allowUngrounded: options.allowUngrounded === true,
+        onProgress: options.onProgress,
+    });
+    emit({
+        type: "knowledge_ensured",
+        status: knowledge.status === "ready" ? "ready" : "skipped",
+        ...(knowledge.status === "skipped" ? { reason: knowledge.reason } : {}),
+        ...(knowledge.status === "ready"
+            ? { seedUrl: knowledge.seedUrl, discovered: knowledge.discovered }
+            : {}),
+    });
+
+    // When a storageState exists, prove it still authenticates — file expiry
+    // alone misses session-cookie / localStorage-only "looks valid" states.
+    if (!options.allowUngrounded) {
+        const liveness = await probeAuthState({ projectPath });
+        if (authLivenessBlocks(liveness)) {
+            throw validationError(liveness.message, { code: "INVALID_INPUT" });
+        }
+        if (liveness.status === "live" || liveness.status === "stale") {
+            options.onProgress?.(liveness.message);
+        }
+    }
+
+    // ---- 5. Build prompt + call LLM (or scaffold on --dry-run)
     let body: string;
     let usedModel: string | undefined;
-    let grounding: GroundingReport | undefined;
+    // Always gather — dry-run still needs auth/cold-start gates against real
+    // knowledge, and the gatherers degrade to empty when nothing is on disk.
+    const evidence = await gatherCoverEvidence(projectPath, resolved.description);
+    emit({
+        type: "evidence_gathered",
+        pages: evidence.pages.length,
+        snapshots: evidence.snapshots.length,
+        sourceSelectors: evidence.sourceSelectors.length,
+        baseURL: evidence.baseURL,
+    });
     const requiresKey = options.ai && getProvider(options.ai.provider).envVars.length > 0;
     if (options.dryRun || !options.ai || (requiresKey && !options.ai.apiKey)) {
         body = buildScaffold(resolved.description, resolved.sourceFiles);
     } else {
-        // Everything the project already knows about the app: baseURL,
-        // discovered pages + snapshots, template selectors, selector memory.
-        // Gathered only for the LLM path — the scaffold is static by design.
-        const evidence = await gatherCoverEvidence(projectPath, resolved.description);
-        emit({
-            type: "evidence_gathered",
-            pages: evidence.pages.length,
-            snapshots: evidence.snapshots.length,
-            sourceSelectors: evidence.sourceSelectors.length,
-            baseURL: evidence.baseURL,
-        });
         emit({ type: "llm_started" });
         const result = await callLLM(options.ai, resolved, evidence);
         body = result.body;
         usedModel = result.model;
         emit({ type: "llm_finished", bytes: Buffer.byteLength(body, "utf-8") });
-        // Hold the draft to the same evidence it was given. Contradictions and
-        // unverified locators don't block the write — cover is a drafting
-        // tool — but they must reach the result instead of vanishing.
-        grounding = validateSelectorGrounding(body, evidence.snapshots, evidence.sourceSelectors);
     }
 
-    const reviewReasons: string[] = [];
-    const todoCount = (body.match(/\bTODO\b/g) ?? []).length;
-    if (todoCount > 0) {
-        reviewReasons.push(`${todoCount} TODO placeholder(s) must be filled in`);
+    // Deterministic normalizations — same as the agent generation path so
+    // cover drafts don't invent absolute URLs against a known baseURL or
+    // stall at a login wall when a storageState already exists.
+    const authStateRel = resolveAuthStorageStateRelativePath(projectPath);
+    if (authStateRel) {
+        body = injectStorageState(body, authStateRel);
     }
-    if (grounding && grounding.contradictions.length > 0) {
-        reviewReasons.push(
-            `${grounding.contradictions.length} locator(s) contradict captured pages`,
-        );
-    }
-    if (grounding && grounding.unverified.length > 0) {
-        reviewReasons.push(
-            `${grounding.unverified.length} locator(s) match neither captured pages nor source markup`,
-        );
+    const baseURL =
+        evidence.baseURL ?? (await readPlaywrightBaseURL(projectPath).catch(() => null));
+    body = rewriteAbsoluteGotosToRelative(body, baseURL);
+    body = resolveGotoPathsAgainstBaseUrl(body, baseURL);
+
+    const assessed = await assessGeneratedDraft({
+        body,
+        projectPath,
+        outputPath,
+        evidence,
+        description: resolved.description,
+        extraReviewReasons: steeredReasons,
+    });
+
+    // At the point of pain: draft blocked solely by testMatch — offer/apply
+    // the one-shot widen when the caller asked for config fixes.
+    if (
+        options.fixConfig &&
+        assessed.blocked &&
+        assessed.reviewReasons.some((r) => /testMatch/i.test(r))
+    ) {
+        const { applyWidenTestMatch } = await import("../doctor/fixes");
+        const { isRestrictiveTestMatch } = await import("./draft-quality");
+        const { readPlaywrightTestMatch } = await import("../testing/playwright-config");
+        const patterns = await readPlaywrightTestMatch(projectPath).catch(() => null);
+        if (isRestrictiveTestMatch(patterns)) {
+            const fix = await applyWidenTestMatch(projectPath);
+            options.onProgress?.(fix.message);
+            if (fix.applied) {
+                const reassessed = await assessGeneratedDraft({
+                    body,
+                    projectPath,
+                    outputPath,
+                    evidence,
+                    description: resolved.description,
+                    extraReviewReasons: [
+                        ...steeredReasons,
+                        `widened playwright testMatch to ["**/*.spec.ts"] so this draft is collected`,
+                    ],
+                });
+                Object.assign(assessed, reassessed);
+            }
+        }
     }
 
-    // ---- 5. Write the file
+    // ---- 6. Write the file (even when blocked — reviewers need the artifact,
+    // but the CLI exits non-zero so CI cannot treat it as success).
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, body, "utf-8");
     emit({ type: "file_written", outputPath });
@@ -176,9 +295,11 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
         usedModel,
         ticket: resolved.ticket,
         sourceFiles: resolved.sourceFiles,
-        grounding,
-        needsReview: reviewReasons.length > 0,
-        reviewReasons,
+        grounding: assessed.grounding,
+        needsReview: assessed.needsReview,
+        reviewReasons: assessed.reviewReasons,
+        todoNotes: assessed.todoNotes,
+        blocked: assessed.blocked,
     };
 }
 
@@ -305,46 +426,9 @@ function resolveSymbol(
 }
 
 /**
- * Extract acceptance criteria from a ticket description. Supports the
- * three common conventions:
- *   - "AC1: ..." / "AC-1: ..." prefixed lines
- *   - "- [ ] ..." or "- [x] ..." checkbox bullets
- *   - "1. ..." numbered list items (only when no AC prefix is present)
- *
- * If the description mixes conventions, AC-prefixed wins.
+ * Extract acceptance criteria — see {@link extractAcs} in intent-coverage.
+ * Re-exported above for historical import paths.
  */
-export function extractAcs(description: string): string[] {
-    const lines = description.split(/\r?\n/);
-    const acPrefixed: string[] = [];
-    const checkboxes: string[] = [];
-    const numbered: string[] = [];
-
-    for (const raw of lines) {
-        const line = raw.trim();
-        if (!line) continue;
-
-        const acMatch = /^AC[-:\s]?(\d+)[.:\s)]+(.+)$/i.exec(line);
-        if (acMatch) {
-            acPrefixed.push(acMatch[2].trim());
-            continue;
-        }
-
-        const cbMatch = /^[-*]\s*\[[\sxX]\]\s*(.+)$/.exec(line);
-        if (cbMatch) {
-            checkboxes.push(cbMatch[1].trim());
-            continue;
-        }
-
-        const numMatch = /^(\d+)[.):]\s*(.+)$/.exec(line);
-        if (numMatch) {
-            numbered.push(numMatch[2].trim());
-        }
-    }
-
-    if (acPrefixed.length > 0) return acPrefixed;
-    if (checkboxes.length > 0) return checkboxes;
-    return numbered;
-}
 
 // ---------------------------------------------------------------------------
 // LLM call
@@ -404,8 +488,18 @@ ${formatEvidence(evidence)}
   application context above (and the source files); never invent one. If the
   context lists nothing for a step, mark that step with a \`// TODO:\` comment
   naming the decision the reviewer must make.
+- Prefer relative page.goto('/path') against the baseURL above. Do not hardcode
+  the origin. Use page.goto only for the initial entry URL. Mid-flow, prefer clicking
+  in-app links/buttons from the known page context — full reloads wipe SPA
+  client state (cart, wizards, session UI).
+- If a reusable auth session exists, the draft will receive test.use({ storageState })
+  automatically — do not invent a login flow.
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
 - Assertions must be specific and tied to the scenario.
+- Keep the polarity the scenario asked for. "X is visible" becomes toBeVisible(),
+  never .not.toBeVisible() / toHaveCount(0) / toBeHidden() just because the
+  known context doesn't show X — that turns an unverified check into a false
+  green. Write the assertion as asked and mark the line \`// TODO:\` instead.
 - NEVER emit page.waitForTimeout, setTimeout, or sleep — fixed sleeps are
   the largest single source of flakes (~45%, Luo et al., FSE 2014). Use
   expect.toBeVisible({ timeout }) / waitForURL / waitForResponse instead.`;
@@ -420,7 +514,14 @@ function formatEvidence(evidence: CoverEvidence): string {
     const sections: string[] = [];
 
     if (evidence.baseURL) {
-        sections.push(`[BASE URL]\n${evidence.baseURL}  (page.goto paths resolve against this)`);
+        const prefix = baseUrlPathPrefix(evidence.baseURL);
+        sections.push(
+            `[BASE URL]\n${evidence.baseURL}  (page.goto paths resolve against this)${
+                prefix
+                    ? `\nThis app is served from the sub-path ${prefix}. A leading "/" resolves against the origin and leaves the app, so every path MUST start with ${prefix} — the entry point is page.goto("${prefix}").`
+                    : ""
+            }`,
+        );
     }
 
     if (evidence.pages.length > 0) {
@@ -428,6 +529,14 @@ function formatEvidence(evidence: CoverEvidence): string {
             .map((page) => `- ${page.url}${page.title ? `  ("${page.title}")` : ""}`)
             .join("\n");
         sections.push(`[DISCOVERED PAGES — the only URLs known to exist]\n${pages}`);
+    }
+
+    if (evidence.authLogin) {
+        sections.push(formatAuthLoginEvidence(evidence.authLogin));
+    }
+
+    if (evidence.flows.length > 0) {
+        sections.push(formatNavigationFlows(evidence.flows));
     }
 
     if (evidence.snapshots.length > 0) {
@@ -469,6 +578,9 @@ function formatEvidence(evidence: CoverEvidence): string {
     return `\n${sections.join("\n\n")}\n`;
 }
 
+/**
+ * Strip markdown fences the model sometimes wraps around the whole file.
+ */
 function stripCodeFences(text: string): string {
     const body = text.trim();
     // If the whole response is wrapped in a single fenced block (possibly with

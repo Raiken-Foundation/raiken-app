@@ -15,6 +15,8 @@ export type AgentStreamEvent =
           type: "done";
           ok: boolean;
           response?: string;
+          /** Present when the streamed text was superseded by a regenerated draft. */
+          finalDraft?: string;
           savedTest?: string | null;
           /** Why a requested save didn't happen/succeed, when `ok` is false because of it. */
           saveError?: string | null;
@@ -23,6 +25,12 @@ export type AgentStreamEvent =
            * missing artifact, a run that never happened, or failing tests.
            */
           reason?: string;
+          /** Cover-equivalent honesty gates on the produced draft. */
+          needsReview?: boolean;
+          blocked?: boolean;
+          reviewReasons?: string[];
+          /** AI verdict on a failed run: is the test or the application at fault? */
+          diagnosis?: string | null;
           run?: {
               success: boolean;
               passed: number;

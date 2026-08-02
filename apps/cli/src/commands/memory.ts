@@ -1,4 +1,8 @@
-import { AgentMemory, createProjectApplication } from "@raiken/core";
+import {
+    AgentMemory,
+    createProjectApplication,
+    isRunScopedPreference,
+} from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { exitUsage } from "../errors";
@@ -6,6 +10,8 @@ import { confirmDestructive } from "./confirm-destructive";
 
 interface MemoryOptions {
     json?: boolean;
+    /** Include run/session working state (goal, pause reason, last exploration). */
+    all?: boolean;
     /** Skip the confirmation prompt for destructive actions (scripts / CI). */
     force?: boolean;
     /** REPL-injected confirm prompt (inquirer can't run inside the REPL). */
@@ -18,15 +24,14 @@ function categorize(prefs: Record<string, string>): Record<string, [string, stri
         Project: [],
         "Learned actions": [],
         "Learned selectors": [],
-        Auth: [],
+        Session: [],
         Other: [],
     };
     for (const [key, value] of Object.entries(prefs)) {
-        if (key.startsWith("action_path:")) groups["Learned actions"].push([key, value]);
+        if (isRunScopedPreference(key)) groups.Session.push([key, value]);
+        else if (key.startsWith("action_path:")) groups["Learned actions"].push([key, value]);
         else if (key.startsWith("selector:")) groups["Learned selectors"].push([key, value]);
-        else if (key === "auth_login" || key.includes("auth") || key.includes("entry"))
-            groups.Auth.push([key, value]);
-        else if (key.includes("base_url") || key.includes("project"))
+        else if (key.includes("base_url") || key.includes("project") || key === "test_directory")
             groups.Project.push([key, value]);
         else groups.Other.push([key, value]);
     }
@@ -38,6 +43,10 @@ function categorize(prefs: Record<string, string>): Record<string, [string, stri
  * this project: the base URL, remembered authenticated entry, action paths, and
  * learned selectors. Makes the agent's persistent memory transparent instead of
  * a black box.
+ *
+ * By default only durable knowledge is shown. Run/session markers
+ * (`paused_reason`, `active_goal`, last exploration, …) used to look like
+ * lasting preferences — pass `--all` to include them.
  */
 export async function memoryCommand(
     sub: string | undefined,
@@ -68,7 +77,7 @@ export async function memoryCommand(
     // it explicitly; anything else is a usage error.
     if (action && action !== "show") {
         exitUsage(
-            `Unknown memory action: '${sub}'\nUsage: raiken memory [show|clear] [--json] [--force]`,
+            `Unknown memory action: '${sub}'\nUsage: raiken memory [show|clear] [--all] [--json] [--force]`,
         );
     }
 
@@ -77,7 +86,7 @@ export async function memoryCommand(
     const restore = options.json ? routeDiagnosticsToStderr() : null;
     const mem = AgentMemory.getInstance(projectPath);
     mem.initialize(false);
-    const prefs = mem.getAllPreferences();
+    const prefs = options.all ? mem.getAllPreferences() : mem.getDurablePreferences();
 
     if (options.json) {
         restore?.();
@@ -85,14 +94,21 @@ export async function memoryCommand(
         return;
     }
 
-    const keys = Object.keys(prefs);
+    const keys = Object.keys(prefs).filter((key) => prefs[key] !== "");
     if (keys.length === 0) {
-        console.log(dim("\n  Agent memory is empty. It fills in as you run the agent.\n"));
+        console.log(
+            dim(
+                options.all
+                    ? "\n  Agent memory is empty. It fills in as you run the agent.\n"
+                    : "\n  No durable agent memory yet. Run the agent, or pass --all to include session state.\n",
+            ),
+        );
         return;
     }
 
-    console.log(accent("\n  Agent memory") + dim(`  ·  ${keys.length} entries`));
-    const groups = categorize(prefs);
+    const title = options.all ? "Agent memory (all)" : "Agent memory";
+    console.log(accent(`\n  ${title}`) + dim(`  ·  ${keys.length} entries`));
+    const groups = categorize(Object.fromEntries(keys.map((key) => [key, prefs[key] ?? ""])));
     for (const [group, entries] of Object.entries(groups)) {
         if (entries.length === 0) continue;
         console.log(accent(`\n  ${group}`));
@@ -100,6 +116,9 @@ export async function memoryCommand(
             const shown = value.length > 100 ? `${value.slice(0, 100)}…` : value;
             console.log(`  ${dim("•")} ${chalk.white(key)} ${dim("=")} ${dim(shown)}`);
         }
+    }
+    if (!options.all) {
+        console.log(dim("\n  Session state hidden — pass --all to include it."));
     }
     console.log(dim("\n  Reset with `raiken memory clear`.\n"));
 }

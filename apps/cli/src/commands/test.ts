@@ -1,6 +1,11 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import {
     createProjectApplication,
+    describeTestMatchRemedy,
+    isRestrictiveTestMatch,
+    readPlaywrightTestDir,
+    readPlaywrightTestMatch,
     runPlaywrightSubprocess,
     startTestWatcher,
     type TestExecutionInput,
@@ -232,6 +237,16 @@ export async function testCommand(file: string | undefined, options: TestOptions
     // --fix: hand the run we just did to the repair flow — no second
     // execution. The exit code stays 1: an unverified fix must not
     // green-light a CI pipeline.
+    if (
+        looksLikeNoTestsCollected(
+            `${summarizeRunForCli(result.parsedRun, result.stderr).error ?? ""}\n${result.stderr ?? ""}`,
+        )
+    ) {
+        process.stderr.write(
+            dim("  --fix: nothing was collected, so there is no spec to repair — fix the config first.\n"),
+        );
+        cliExit(code);
+    }
     const target = resolveRepairTarget(projectPath, file, result);
     if (!target) {
         process.stderr.write(
@@ -253,6 +268,53 @@ export async function testCommand(file: string | undefined, options: TestOptions
             ...(options.confirm ? { confirm: options.confirm } : {}),
         },
     });
+}
+
+/**
+ * Playwright reports "No tests found" as a build error, which reads like the
+ * spec is broken. It isn't: the file was never collected, so nothing about it
+ * ran. Repair cannot help, and offering it sends people editing a fine spec.
+ */
+export function looksLikeNoTestsCollected(errorText: string | undefined): boolean {
+    return /no tests found/i.test(errorText ?? "");
+}
+
+/** The config reason a spec was not collected, as a printable block. */
+async function describeNoTestsCollected(
+    projectPath: string,
+    target: string | undefined,
+): Promise<string[]> {
+    const [testMatch, testDir] = await Promise.all([
+        readPlaywrightTestMatch(projectPath).catch(() => null),
+        readPlaywrightTestDir(projectPath).catch(() => null),
+    ]);
+    const lines = [
+        `  Playwright collected 0 test files${target ? ` for ${target}` : ""} — nothing ran, ` +
+            "so this is not a failing test.",
+    ];
+
+    // Missing file is the most common junior mistake after cover steers a name
+    // or someone re-runs an old path. Blame that before waving at testMatch.
+    if (target) {
+        const abs = path.resolve(projectPath, target);
+        if (!fs.existsSync(abs)) {
+            lines.push(`  ${target} does not exist on disk — nothing for Playwright to collect.`);
+            return lines;
+        }
+    }
+
+    if (isRestrictiveTestMatch(testMatch) && testMatch) {
+        lines.push(`  ${describeTestMatchRemedy(testMatch)}`);
+    } else if (testDir) {
+        lines.push(
+            `  Playwright looks inside testDir ("${testDir}") for files matching ` +
+                `${JSON.stringify(testMatch ?? ["**/*.{spec,test}.*"])}. ` +
+                "Check the path, or run `raiken doctor` for the full environment check.",
+        );
+    } else {
+        lines.push("  Run `raiken doctor` to check testDir / testMatch and the rest of the setup.");
+    }
+    return lines;
 }
 
 /** Pick the spec to repair: the explicit argument, else the first failure's file. */
@@ -407,7 +469,14 @@ async function executeRun(
                 );
             }
         }
-        if (passed + failed + skipped === 0) {
+        const noneCollected = looksLikeNoTestsCollected(
+            `${summary.error ?? ""}\n${result.stderr ?? ""}`,
+        );
+        if (noneCollected) {
+            for (const line of await describeNoTestsCollected(projectPath, input.testFile)) {
+                console.log(dim(line));
+            }
+        } else if (passed + failed + skipped === 0) {
             console.log(
                 dim(
                     "  No tests ran — the suite failed before executing any spec " +
@@ -416,6 +485,13 @@ async function executeRun(
             );
         } else if (!summary.error && result.stderr) {
             console.log(dim(result.stderr.split("\n").slice(0, 8).join("\n")));
+        }
+        // Repair rewrites a spec, so it can only help a spec that actually ran.
+        const repairTarget = noneCollected
+            ? null
+            : resolveRepairTarget(projectPath, input.testFile, result);
+        if (repairTarget && !options.fix) {
+            console.log(dim(`  Next: raiken repair ${repairTarget}`));
         }
     }
     console.log("");

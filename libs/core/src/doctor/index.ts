@@ -14,3 +14,16 @@ export {
     type DoctorSeverity,
     scanTests,
 } from "./scan";
+
+export {
+    applyAlignBaseUrlPort,
+    applyAddWebServer,
+    applyDoctorFix,
+    applyDoctorFixes,
+    applyWidenTestMatch,
+    doctorFixLabel,
+    FIXABLE_DOCTOR_RULES,
+    isFixableDoctorFinding,
+    type DoctorFixId,
+    type DoctorFixResult,
+} from "./fixes";

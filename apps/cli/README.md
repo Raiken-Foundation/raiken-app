@@ -120,7 +120,7 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 | Command | Description |
 |---------|-------------|
 | `raiken` | Interactive chat REPL (slash commands: `/test`, `/repair`, `/report`, `/doctor`, `/ci`, `/cover`, `/sessions`, …) |
-| `raiken -p "test the login flow"` | One-shot agent request (`--json`, `--stream-json`, `--run`, `--no-save`, `--headed`, `--timeout <ms>`) |
+| `raiken -p "test the login flow"` | One-shot agent request (`--json`, `--stream-json`, `--run`, `--no-save`, `--headed`, `--timeout <ms>`, `--allow-ungrounded`) |
 | `raiken sessions` | List saved sessions (`--json`) |
 | `raiken resume [name]` | Resume a saved session (latest if omitted) |
 
@@ -147,8 +147,8 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 | `raiken repair [file]` | AI-repair a failing spec: runs it, shows the fix as a diff, writes after confirmation (`--apply`, `--json`, `--no-interpret`) |
 | `raiken report [file]` | HTML/Markdown/JSON report with screenshots (`--from`, `--format`, `--output`, `--open`) |
 | `raiken show-trace [path]` | Open a Playwright trace.zip in the trace viewer (newest when omitted) |
-| `raiken cover <target>` | Draft a test from an AC reference, symbol, or free text (`-t`, `-o`, `--dir`, `--dry-run`) |
-| `raiken doctor` | Environment checks (Playwright, browsers, webServer script, baseURL) + flake anti-pattern lint (`--dir`, `--fail-on`, `--json`) |
+| `raiken cover <target>` | Draft a test from an AC reference, symbol, or free text (`-t`, `-o`, `--dir`, `--dry-run`, `--allow-ungrounded`, `--fix-config`, `--json`) |
+| `raiken doctor` | Environment checks (Playwright, browsers, webServer script, baseURL) + flake anti-pattern lint (`--dir`, `--fail-on`, `--fix`, `--json`) |
 | `raiken eval <suite> [target]` | Eval harness: `playground`, `benchmark`, `flakiness <spec>` (`--runs`, `--expect-tests`, `--out`) |
 | `raiken organize` | AI-assisted test-dir + config cleanup (`-y`, `--tests-only`, `--config-only`) |
 
@@ -172,17 +172,33 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 | `raiken discover [url]` | Autonomously discover web application structure (`--max-pages`, `--auth`, `--continue`, `--status`) |
 | `raiken knowledge` (alias `kb`) | Inspect discovered pages, links, and blockers |
 | `raiken memory` | What the agent has learned about this project (`show` / `clear`) |
-| `raiken auth` | Save browser session state for authenticated tests (`--url`, `--script`, `--manual`, `--cookie`) |
+| `raiken auth` | Save browser session state for authenticated tests (`--url`, `--script`, `--manual`, `--cookie`, `--write-login-script`) |
 
 ### The everyday test loop
 
 ```bash
+# Cold start (app must already be running at Playwright baseURL)
+raiken status                # missing site knowledge → discover hint
+raiken doctor --fix           # widen a restrictive testMatch, etc.
+raiken discover <url>        # or let cover auto-discover when seed URL is known
+raiken auth --url <login>    # before post-login scenarios
+
+raiken cover "login as admin and see the dashboard"
+raiken test e2e/<draft>.spec.ts
+raiken repair e2e/<draft>.spec.ts   # after a real failure (not "No tests found")
+
 raiken test --watch          # inner loop: re-runs on every edit
 raiken test --list           # what would run?
 raiken test --fix            # failure → AI repair with diff review
-raiken doctor                # environment + flake lint before committing
 raiken show-trace            # open the newest failure trace
 ```
+
+`cover` / `-p` refuse or auto-discover when site knowledge is empty (unless
+`--allow-ungrounded`). Auth scenarios without a saved session are flagged:
+everything after sign-in is unverified until you run `raiken auth` then
+`raiken discover`. A blocked draft (e.g. filename outside `testMatch`) points
+at `raiken doctor --fix` / `--fix-config` instead of suggesting a doomed
+`raiken test`.
 
 Quarantining a flaky spec — add it to `raiken.config.json` and it is skipped by default:
 

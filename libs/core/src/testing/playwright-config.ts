@@ -256,6 +256,87 @@ export async function readPlaywrightTestDir(projectPath: string): Promise<string
 }
 
 /**
+ * Best-effort extraction of `webServer.url` from an existing Playwright config
+ * (static string only — same conservatism as {@link readPlaywrightBaseURL}).
+ * Used as a discover seed when `use.baseURL` is absent.
+ */
+export async function readPlaywrightWebServerUrl(projectPath: string): Promise<string | null> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+
+    const candidates = [
+        "playwright.config.ts",
+        "playwright.config.mts",
+        "playwright.config.js",
+        "playwright.config.mjs",
+        "playwright.config.cjs",
+    ];
+
+    for (const candidate of candidates) {
+        let content: string;
+        try {
+            content = await fs.readFile(path.join(projectPath, candidate), "utf-8");
+        } catch {
+            continue;
+        }
+
+        // Prefer a url field inside a webServer block when both appear.
+        const webServerBlock = content.match(/webServer\s*:\s*\{([\s\S]*?)\}/);
+        const scope = webServerBlock?.[1] ?? content;
+        const match = scope.match(/\burl\s*:\s*(["'`])([^"'`\n\r]+)\1/);
+        if (match?.[2]) {
+            const value = match[2].trim();
+            if (value.length > 0) return value;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Best-effort extraction of `testMatch` from an existing Playwright config.
+ * Supports a string literal or a static array of string literals. Returns
+ * `null` when absent or not statically readable (spread, variables, etc.).
+ */
+export async function readPlaywrightTestMatch(projectPath: string): Promise<string[] | null> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+
+    const candidates = [
+        "playwright.config.ts",
+        "playwright.config.mts",
+        "playwright.config.js",
+        "playwright.config.mjs",
+        "playwright.config.cjs",
+    ];
+
+    for (const candidate of candidates) {
+        let content: string;
+        try {
+            content = await fs.readFile(path.join(projectPath, candidate), "utf-8");
+        } catch {
+            continue;
+        }
+
+        const single = content.match(/testMatch\s*:\s*(["'`])([^"'`\n\r]+)\1/);
+        if (single?.[2]) {
+            const value = single[2].trim();
+            if (value.length > 0) return [value];
+        }
+
+        const array = content.match(/testMatch\s*:\s*\[([\s\S]*?)\]/);
+        if (array?.[1] !== undefined) {
+            const values = [...array[1].matchAll(/(["'`])([^"'`\n\r]+)\1/g)].map((m) =>
+                m[2].trim(),
+            );
+            if (values.length > 0) return values;
+        }
+    }
+
+    return null;
+}
+
+/**
  * Write playwright config to a project
  */
 export async function writePlaywrightConfig(

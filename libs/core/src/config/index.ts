@@ -5,6 +5,7 @@
  */
 
 export * from "./auth-credentials";
+export * from "./auth-liveness";
 export * from "./auth-state";
 export * from "./load";
 export * from "./patch";

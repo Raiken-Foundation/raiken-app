@@ -1042,7 +1042,7 @@ export class SiteKnowledgeDB {
             )
             .get(this.projectPath) as { count: number };
 
-        const unresolvedBlockersCount = this.db
+        const unresolvedCount = this.db
             .prepare(
                 `
             SELECT COUNT(*) as count FROM discovery_blockers
@@ -1057,7 +1057,100 @@ export class SiteKnowledgeDB {
             verifiedLinksCount: verifiedCount.count,
             brokenLinksCount: brokenCount.count,
             authBlockersCount: blockersCount.count,
-            unresolvedBlockersCount: unresolvedBlockersCount.count,
+            unresolvedBlockersCount: unresolvedCount.count,
         };
+    }
+
+    // ==========================================================================
+    // Recorded flows
+    // ==========================================================================
+
+    saveRecordedFlow(input: {
+        name: string;
+        label: string;
+        stepsJson: string;
+        source: string;
+        lastVerifiedAt?: number;
+    }): void {
+        this.db
+            .prepare(
+                `
+            INSERT INTO recorded_flows (
+              project_path, name, label, steps_json, source, last_verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_path, name) DO UPDATE SET
+              label = excluded.label,
+              steps_json = excluded.steps_json,
+              source = excluded.source,
+              last_verified_at = excluded.last_verified_at
+        `,
+            )
+            .run(
+                this.projectPath,
+                input.name,
+                input.label,
+                input.stepsJson,
+                input.source,
+                input.lastVerifiedAt ?? Date.now(),
+            );
+    }
+
+    listRecordedFlows(): Array<{
+        id: number;
+        name: string;
+        label: string;
+        stepsJson: string;
+        source: string;
+        lastVerifiedAt: number;
+    }> {
+        const rows = this.db
+            .prepare(
+                `
+            SELECT id, name, label, steps_json as stepsJson, source,
+                   last_verified_at as lastVerifiedAt
+            FROM recorded_flows
+            WHERE project_path = ?
+            ORDER BY last_verified_at DESC
+        `,
+            )
+            .all(this.projectPath) as Array<{
+            id: number;
+            name: string;
+            label: string;
+            stepsJson: string;
+            source: string;
+            lastVerifiedAt: number;
+        }>;
+        return rows;
+    }
+
+    getRecordedFlow(name: string): {
+        id: number;
+        name: string;
+        label: string;
+        stepsJson: string;
+        source: string;
+        lastVerifiedAt: number;
+    } | null {
+        const row = this.db
+            .prepare(
+                `
+            SELECT id, name, label, steps_json as stepsJson, source,
+                   last_verified_at as lastVerifiedAt
+            FROM recorded_flows
+            WHERE project_path = ? AND name = ?
+        `,
+            )
+            .get(this.projectPath, name) as
+            | {
+                  id: number;
+                  name: string;
+                  label: string;
+                  stepsJson: string;
+                  source: string;
+                  lastVerifiedAt: number;
+              }
+            | undefined;
+        return row ?? null;
     }
 }

@@ -71,4 +71,34 @@ describe("discover auth pause expiry note", () => {
         expect(output).toContain("Skipping protected route");
         expect(output).not.toContain("may have expired");
     });
+
+    it("announces a recorded login page when the blocker is informational", () => {
+        const { ux, progressInterval } = buildForegroundUx({
+            projectPath: "/tmp/irrelevant",
+            spinner: makeSpinner(),
+            maxPages: 10,
+            maxDepth: 5,
+            pauseOnAuth: false,
+            showAuthOptions: false,
+            authHeader: "Authentication required",
+            authHint: "Discovery paused.",
+            hadAuthState: false,
+        });
+        clearInterval(progressInterval);
+        ux.onBlockerDetected?.({
+            type: "blocker_detected",
+            data: {
+                blocker: {
+                    url: "http://app.local/login",
+                    category: "auth_required",
+                    severity: "log",
+                    detectorId: "auth:form",
+                },
+            },
+            timestamp: 0,
+        } as never);
+        const output = logSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+        expect(output).toContain("Recorded login page");
+        expect(output).toContain("http://app.local/login");
+    });
 });

@@ -100,4 +100,82 @@ describe("computeOneShotOutcome", () => {
         const outcome = computeOneShotOutcome(base({ producedTest: false, runRequested: true }));
         expect(outcome).toEqual({ ok: true, exitCode: 0 });
     });
+
+    // Observed: an agent that stopped at a login form to ask for credentials
+    // exited 0 having tested nothing, so a CI step went green on a flow that
+    // never ran.
+    it("fails with config/auth when the agent paused for user input", () => {
+        const outcome = computeOneShotOutcome(
+            base({
+                awaitedUserInput: true,
+                awaitUserMessage: "This page is asking for: Username, Password.",
+            }),
+        );
+        expect(outcome.ok).toBe(false);
+        expect(outcome.exitCode).toBe(3);
+        expect(outcome.reason).toContain("Username, Password");
+        expect(outcome.reason).toMatch(/raiken auth|auth\.credentials/);
+    });
+
+    // "No tests found" for a spec that exists means testMatch excluded it —
+    // reporting "0 passed, 1 failed" sends people debugging the wrong thing.
+    it("blames the playwright config when the saved spec is not collected", () => {
+        const outcome = computeOneShotOutcome(
+            base({
+                producedTest: true,
+                savedTest: "e2e/new.spec.ts",
+                runRequested: true,
+                runSummary: { success: false, passed: 0, failed: 1, skipped: 0 },
+                uncollectedSpecReason:
+                    'Saved e2e/new.spec.ts, but output path is not collected by playwright testMatch ("workflows.spec.ts").',
+            }),
+        );
+        expect(outcome.ok).toBe(false);
+        expect(outcome.reason).toMatch(/testMatch/);
+        expect(outcome.reason).not.toMatch(/0 passed, 1 failed/);
+    });
+
+    it("reports the pause even when a test was produced and run first", () => {
+        const outcome = computeOneShotOutcome(
+            base({
+                producedTest: true,
+                savedTest: "e2e/login.spec.ts",
+                runRequested: true,
+                runSummary: { success: true, passed: 1, failed: 0, skipped: 0 },
+                awaitedUserInput: true,
+                awaitUserMessage: "Enter the verification code.",
+            }),
+        );
+        expect(outcome.ok).toBe(false);
+        expect(outcome.exitCode).toBe(3);
+    });
+
+    it("fails when the saved draft needs review (cover contract)", () => {
+        const outcome = computeOneShotOutcome(
+            base({
+                producedTest: true,
+                savedTest: "e2e/login.spec.ts",
+                needsReview: true,
+                reviewReasons: ["2 locator(s) match neither captured pages nor source markup"],
+            }),
+        );
+        expect(outcome.ok).toBe(false);
+        expect(outcome.exitCode).toBe(1);
+        expect(outcome.reason).toMatch(/needs review/i);
+        expect(outcome.reason).toMatch(/locator/);
+    });
+
+    it("fails when the saved draft is blocked", () => {
+        const outcome = computeOneShotOutcome(
+            base({
+                producedTest: true,
+                savedTest: "e2e/login.spec.ts",
+                blocked: true,
+                needsReview: true,
+                reviewReasons: ["draft is not valid Playwright/TS: does not parse"],
+            }),
+        );
+        expect(outcome.ok).toBe(false);
+        expect(outcome.reason).toMatch(/blocked/i);
+    });
 });

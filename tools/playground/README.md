@@ -50,23 +50,50 @@ pnpm --filter @raiken/playground exec playwright test e2e/auth.spec.ts
 
 ## Exercising Raiken
 
-After installing the global `raiken` CLI:
+After installing / linking the CLI (`pnpm run cli:install` from the monorepo,
+or a global `raiken`):
 
 ```bash
 cd tools/playground
 
-# Sanity-check the codebase (impact section is on by default;
-# pass --no-impact to skip the pending-changes / affected-tests block)
-raiken context
+# 1. Start the app the Playwright config points at (baseURL :5180).
+#    Cover/discover need the app up — they do not start webServer themselves.
+pnpm exec vite --host 127.0.0.1 --port 5180
 
-# Scan the e2e suite for anti-patterns (the _flaky file is a fixture)
-raiken doctor
+# 2. In another terminal — cold-start ritual:
+raiken status                 # shows missing site knowledge clearly
+raiken doctor                 # flags narrow testMatch / env footguns
+raiken doctor --fix            # one-shot widen testMatch → **/*.spec.ts
 
-# Find tests that cover a stack frame
+# Optional but required for post-login flows:
+raiken auth --url http://127.0.0.1:5180/login
+raiken discover http://127.0.0.1:5180
+
+# 3. Draft, run, repair
+raiken cover "about page shows the heading"
+raiken test e2e/<written-spec>.spec.ts
+raiken repair e2e/<written-spec>.spec.ts   # after a real failure
+
+# Dashboard (Quality → doctor / cover / discovery)
+raiken start    # http://localhost:7101
+```
+
+Notes for first-time users:
+
+- This playground ships with `testMatch: ["workflows.spec.ts"]`. Prefer
+  `raiken doctor --fix` (or `raiken cover … --fix-config`) before expecting
+  arbitrary `*.spec.ts` drafts to run.
+- Auth scenarios without `raiken auth` invent what happens after sign-in;
+  cover will say so and name the next commands.
+- `raiken test` on a missing / uncollected file exits non-zero and does **not**
+  suggest repair — that is a config problem, not a broken assertion.
+
+Also useful:
+
+```bash
+raiken context                # portable project snapshot for IDE agents
+raiken doctor                 # flake anti-patterns (see e2e/_flaky-examples.spec.ts)
 raiken trace "at createTask (src/api/client.ts:213)"
-
-# Dashboard
-raiken start    # http://localhost:7101 → Quality view
 ```
 
 ## Tweaking the mock backend at runtime

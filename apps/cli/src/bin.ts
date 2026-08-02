@@ -108,7 +108,7 @@ program.addHelpText(
         '  $ raiken -p "cover checkout" --json         emit a machine-readable JSON result\n' +
         '  $ raiken -p "..." --stream-json             emit NDJSON events (start/tool/text/done)\n' +
         '  $ raiken -p "..." --run                     run the generated test (exit code = pass/fail)\n' +
-        "     flags: --json  --stream-json  --run  --no-save  --headed  --timeout <ms>\n" +
+        "     flags: --json  --stream-json  --run  --no-save  --no-diagnose  --headed  --timeout <ms>  --allow-ungrounded\n" +
         "\nSessions:\n" +
         "  $ raiken sessions                           list saved sessions\n" +
         "  $ raiken resume                             reopen the latest saved session\n" +
@@ -256,6 +256,7 @@ program
     .option("--skip-auth", "Skip authentication-required routes")
     .option("--continue", "Resume a paused discovery session")
     .option("--status", "Show discovery statistics")
+    .option("--json", "Emit discovery status (with --status) as JSON", false)
     .action(async (url, options) => {
         await checkApiKey();
         try {
@@ -293,6 +294,11 @@ program
     .option(
         "--from-state-file <path>",
         "Copy an existing Playwright storage-state JSON into the configured auth state path",
+    )
+    .option(
+        "--write-login-script",
+        "Write .raiken/login.ts from the last observed login form and point auth.customLoginScript at it",
+        false,
     )
     .action(async (options) => {
         try {
@@ -342,6 +348,11 @@ program
         "error",
     )
     .option("--json", "Emit findings as JSON", false)
+    .option(
+        "--fix",
+        "Apply mechanical fixes (widen testMatch, align baseURL port, add webServer)",
+        false,
+    )
     .action(async (options) => {
         try {
             const { doctorCommand } = await import("./commands/doctor");
@@ -429,6 +440,16 @@ program
     .option("-o, --output <path>", "Explicit output file path")
     .option("--dir <path>", "Test directory (overrides raiken.config.json)")
     .option("--dry-run", "Skip the LLM call and write a TODO scaffold", false)
+    .option(
+        "--allow-ungrounded",
+        "Skip the discovery gate (scaffold without site knowledge)",
+        false,
+    )
+    .option(
+        "--fix-config",
+        "Widen a restrictive Playwright testMatch when it would block the draft",
+        false,
+    )
     .option("--json", "Emit the result as JSON", false)
     .action(async (target, options) => {
         try {
@@ -582,6 +603,7 @@ program
 program
     .command("memory [action]")
     .description("Inspect what the agent has learned about this project ([show] | clear)")
+    .option("--all", "Include run/session working state (goal, pause, last exploration)", false)
     .option("--json", "Emit memory as JSON", false)
     .option("-f, --force", "Skip the confirmation prompt for `clear` (scripts / CI)", false)
     .action(async (action, options) => {
@@ -749,6 +771,8 @@ async function runOneShotFromArgv(argv: string[]): Promise<void> {
         save: !flag("--no-save"),
         run: flag("--run"),
         headed: flag("--headed"),
+        diagnose: !flag("--no-diagnose"),
+        allowUngrounded: flag("--allow-ungrounded"),
         timeoutMs,
     });
 }

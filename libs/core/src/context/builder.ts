@@ -232,7 +232,9 @@ function appendCoverageSection(lines: string[], projectPath: string, maxRows: nu
     // graph-query for each source file batch — accurate enough for a
     // navigational hint without hammering the DB.
     const query = new GraphQueryService(projectPath);
-    const sourceFiles = files.map((f) => f.relative_path).filter((p) => !isLikelyTest(p));
+    const sourceFiles = files
+        .map((f) => f.relative_path)
+        .filter((p) => isLikelyAppSource(p));
 
     let evidence: ReturnType<typeof query.getAffectedTests> = [];
     try {
@@ -300,4 +302,32 @@ function isLikelyTest(filePath: string): boolean {
         lower.includes("/__tests__/") ||
         lower.includes("/e2e/")
     );
+}
+
+/** Coverage hints should list app source, not lockfiles / markdown / configs. */
+function isLikelyAppSource(filePath: string): boolean {
+    const lower = filePath.toLowerCase().replace(/\\/g, "/");
+    if (isLikelyTest(lower)) return false;
+    if (
+        /(^|\/)(node_modules|dist|build|coverage|\.git|\.raiken|playwright-report|test-results)\//.test(
+            lower,
+        )
+    ) {
+        return false;
+    }
+    if (
+        /\.(md|json|lock|ya?ml|toml|css|scss|sass|less|svg|png|jpe?g|gif|webp|ico|map|html)$/.test(
+            lower,
+        )
+    ) {
+        return false;
+    }
+    // Prefer paths under common source roots; still allow root-level .ts/.tsx/.js/.jsx/.vue
+    if (/\.(tsx?|jsx?|vue|svelte)$/.test(lower)) {
+        return (
+            /(^|\/)(src|app|apps|packages|lib|libs|components|pages|server|client)\//.test(lower) ||
+            !lower.includes("/")
+        );
+    }
+    return false;
 }

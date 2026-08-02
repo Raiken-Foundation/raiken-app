@@ -4,6 +4,11 @@ import { z } from "zod";
 import { ProjectContext } from "../../../analysis/project-context";
 import { authCredentialEnvGuidance } from "../../../config/auth-credentials";
 import { resolveAuthStorageStateRelativePath } from "../../../config/auth-state";
+import { assessAssertionPolarity } from "../../../cover/draft-quality";
+import {
+    injectStorageState,
+    resolveGotoPathsAgainstBaseUrl,
+} from "../../../testing/spec-normalize";
 import { validateTestCode } from "../../../testing/test-code-validation";
 import { cleanGeneratedTestCode } from "../../../utils";
 import {
@@ -15,6 +20,7 @@ import type { GroundingReport } from "../../grounding";
 import {
     collectSourceSelectors,
     describeGroundingViolations,
+    formatAssertionPolarityCorrection,
     formatGroundingCorrection,
     formatGroundingRejection,
     validateSelectorGrounding,
@@ -151,22 +157,6 @@ function formatAuthPreconditionGuidance(precondition: AuthPrecondition): string 
  * `test.use({ storageState })` right after the import block when the code
  * doesn't already reference a storage state. Idempotent.
  */
-function injectStorageState(code: string, relPath: string): string {
-    if (!code.trim()) return code;
-    if (/storageState/.test(code)) return code; // model already added it
-    const lines = code.split("\n");
-    let lastImport = -1;
-    for (let i = 0; i < lines.length; i++) {
-        if (/^\s*import\b.*\bfrom\b.*['"].*['"];?\s*$/.test(lines[i])) lastImport = i;
-    }
-    const useLine = `test.use({ storageState: ${JSON.stringify(relPath)} });`;
-    if (lastImport >= 0) {
-        lines.splice(lastImport + 1, 0, "", useLine);
-        return lines.join("\n");
-    }
-    return `${useLine}\n\n${code}`;
-}
-
 /**
  * Build an [AUTH FLOW] block from what the agent actually observed while going
  * through the app: the real login page URL + fields (captured when the login
@@ -631,6 +621,12 @@ export const createGenerateTestsNode =
             if (cleaned && authStateRel) {
                 cleaned = injectStorageState(cleaned, authStateRel);
             }
+            // A baseURL served from a sub-path makes a root-absolute goto
+            // resolve to the origin instead of the app, so every later
+            // locator times out on a page the test never opened.
+            if (cleaned) {
+                cleaned = resolveGotoPathsAgainstBaseUrl(cleaned, context.baseURL ?? null);
+            }
             return cleaned;
         };
 
@@ -657,15 +653,28 @@ export const createGenerateTestsNode =
             // model can replace flagged-but-correct locators with different
             // guesses. Keep every pass and ship the one with the fewest
             // violations, not the most recent one.
-            const violationScore = (report: GroundingReport): number =>
-                report.contradictions.length * 10 + report.unverified.length;
+            const violationScore = (report: GroundingReport, invertedAssertions = false): number =>
+                report.contradictions.length * 10 +
+                report.unverified.length +
+                (invertedAssertions ? 5 : 0);
             let best: { draft: string; grounding: GroundingReport } | null = null;
+            // Carries the polarity complaint into the next pass's correction.
+            let previousPolarityReason: string | null = null;
 
             for (let pass = 1; pass <= MAX_GROUNDING_PASSES; pass++) {
-                const cleaned = await generateDraft(
-                    previous ? formatGroundingCorrection(previous) : undefined,
-                    pass === 1,
-                );
+                const correction =
+                    [
+                        previous ? formatGroundingCorrection(previous) : "",
+                        previousPolarityReason
+                            ? formatAssertionPolarityCorrection(
+                                  state.userPrompt,
+                                  previousPolarityReason,
+                              )
+                            : "",
+                    ]
+                        .filter(Boolean)
+                        .join("\n\n") || undefined;
+                const cleaned = await generateDraft(correction, pass === 1);
 
                 const validation = validateTestCode(cleaned);
                 if (!validation.ok) {
@@ -683,13 +692,25 @@ export const createGenerateTestsNode =
                     groundingSummaries,
                     sourceSelectors,
                 );
-                if (!best || violationScore(grounding) < violationScore(best.grounding)) {
+                // A draft whose every assertion checks for absence is the shape
+                // an inverted request takes — and it passes on a blank page, so
+                // nothing downstream would catch it. Worth one corrective pass;
+                // never a hard block, because "the deleted row is gone" is a
+                // legitimate all-negative test.
+                const polarity = assessAssertionPolarity(cleaned);
+                if (
+                    !best ||
+                    violationScore(grounding, polarity.allNegative) <
+                        violationScore(best.grounding, false)
+                ) {
                     best = { draft: cleaned, grounding };
                 }
                 const lastPass = pass === MAX_GROUNDING_PASSES;
                 const clean =
-                    !grounding.enforceable ||
-                    (grounding.contradictions.length === 0 && grounding.unverified.length === 0);
+                    (!grounding.enforceable ||
+                        (grounding.contradictions.length === 0 &&
+                            grounding.unverified.length === 0)) &&
+                    !polarity.allNegative;
 
                 if (clean || lastPass) {
                     // On the last pass, fall back to the best draft seen — the
@@ -736,11 +757,17 @@ export const createGenerateTestsNode =
                     };
                 }
 
-                previous = grounding;
+                previous =
+                    grounding.contradictions.length > 0 || grounding.unverified.length > 0
+                        ? grounding
+                        : null;
+                previousPolarityReason = polarity.allNegative ? (polarity.reason ?? null) : null;
                 onProgress?.(
-                    `Regenerating: ${
-                        grounding.contradictions.length + grounding.unverified.length
-                    } selector(s) don't match the captured DOM`,
+                    previous
+                        ? `Regenerating: ${
+                              grounding.contradictions.length + grounding.unverified.length
+                          } selector(s) don't match the captured DOM`
+                        : "Regenerating: every assertion checks for absence — the requested check may have been inverted",
                 );
             }
 

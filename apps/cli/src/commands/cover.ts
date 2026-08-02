@@ -82,8 +82,16 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
         return;
     }
 
+    const relativePath = path.relative(projectPath, result.outputPath);
     console.log();
-    console.log(chalk.green(`✓ Wrote ${path.relative(projectPath, result.outputPath)}`));
+    if (result.needsReview) {
+        console.log(chalk.yellow(`⚠ Wrote ${relativePath} — draft needs edits before it can run`));
+        for (const reason of result.reviewReasons) {
+            console.log(chalk.yellow(`   - ${reason}`));
+        }
+    } else {
+        console.log(chalk.green(`✓ Wrote ${relativePath}`));
+    }
     if (result.usedModel) {
         console.log(chalk.dim(`   model: ${result.usedModel}`));
     } else {
@@ -95,12 +103,22 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     if (result.sourceFiles.length > 0) {
         console.log(chalk.dim(`   context: ${result.sourceFiles.length} source file(s)`));
     }
+    if (result.grounding && result.grounding.sourceGrounded.length > 0) {
+        console.log(
+            chalk.dim(
+                `   ${result.grounding.sourceGrounded.length} selector(s) grounded in source markup (state not captured live)`,
+            ),
+        );
+    }
     console.log();
     console.log(
-        chalk.dim(
-            "Review the draft, replace TODOs, and run with " +
-                `${chalk.bold(`raiken test ${path.relative(projectPath, result.outputPath)}`)}.`,
-        ),
+        result.needsReview
+            ? chalk.dim(
+                  `Fix the items above, then run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
+              )
+            : chalk.dim(
+                  `Review the draft and run with ${chalk.bold(`raiken test ${relativePath}`)}.`,
+              ),
     );
 }
 
@@ -121,6 +139,22 @@ function logEvent(event: CoverEvent): void {
                 console.log(chalk.dim(`  symbol: ${m.name} — ${m.file}`));
             }
             break;
+        case "evidence_gathered": {
+            const parts = [
+                event.baseURL ? `baseURL ${event.baseURL}` : null,
+                event.pages > 0 ? `${event.pages} discovered page(s)` : null,
+                event.snapshots > 0 ? `${event.snapshots} snapshot(s)` : null,
+                event.sourceSelectors > 0 ? `${event.sourceSelectors} source selector(s)` : null,
+            ].filter(Boolean);
+            console.log(
+                chalk.dim(
+                    parts.length > 0
+                        ? `  evidence: ${parts.join(", ")}`
+                        : "  evidence: none found — run `raiken discover` / `raiken index` for grounded drafts",
+                ),
+            );
+            break;
+        }
         case "llm_started":
             console.log(chalk.dim("  calling LLM…"));
             break;

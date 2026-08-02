@@ -22,10 +22,13 @@ import {
     LLM_REQUEST_TIMEOUT_MS,
     type ResolvedAIConfig,
 } from "../agent/ai-providers";
+import type { GroundingReport } from "../agent/grounding";
+import { validateSelectorGrounding } from "../agent/grounding";
 import { loadTestDirectory } from "../config";
 import { CodeGraphDB } from "../database/db";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
+import { type CoverEvidence, gatherCoverEvidence } from "./evidence";
 
 export type CoverTargetKind = "ac" | "symbol" | "free";
 
@@ -55,6 +58,13 @@ export type CoverEvent =
     | { type: "target_resolved"; kind: CoverTargetKind; description: string }
     | { type: "ticket_loaded"; ticketId: string; title: string }
     | { type: "symbols_resolved"; matches: Array<{ name: string; file: string }> }
+    | {
+          type: "evidence_gathered";
+          pages: number;
+          snapshots: number;
+          sourceSelectors: number;
+          baseURL: string | null;
+      }
     | { type: "llm_started" }
     | { type: "llm_finished"; bytes: number }
     | { type: "file_written"; outputPath: string };
@@ -69,6 +79,19 @@ export interface CoverResult {
     ticket?: TicketInfo;
     /** Resolved source files used as context for the LLM. */
     sourceFiles: string[];
+    /**
+     * Locator check of the draft against discovery snapshots and source
+     * markup. Absent in scaffold mode (there is nothing to check).
+     */
+    grounding?: GroundingReport;
+    /**
+     * True when the draft cannot run as written — it still contains TODO
+     * placeholders or locators contradicted by captured pages. The CLI keys
+     * its exit message on this instead of unconditionally claiming success.
+     */
+    needsReview: boolean;
+    /** Reviewer-readable reasons behind `needsReview`. */
+    reviewReasons: string[];
 }
 
 const AC_PATTERN = /^AC-?(\d+)$/i;
@@ -98,15 +121,47 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     // ---- 4. Build prompt + call LLM (or scaffold on --dry-run)
     let body: string;
     let usedModel: string | undefined;
+    let grounding: GroundingReport | undefined;
     const requiresKey = options.ai && getProvider(options.ai.provider).envVars.length > 0;
     if (options.dryRun || !options.ai || (requiresKey && !options.ai.apiKey)) {
         body = buildScaffold(resolved.description, resolved.sourceFiles);
     } else {
+        // Everything the project already knows about the app: baseURL,
+        // discovered pages + snapshots, template selectors, selector memory.
+        // Gathered only for the LLM path — the scaffold is static by design.
+        const evidence = await gatherCoverEvidence(projectPath, resolved.description);
+        emit({
+            type: "evidence_gathered",
+            pages: evidence.pages.length,
+            snapshots: evidence.snapshots.length,
+            sourceSelectors: evidence.sourceSelectors.length,
+            baseURL: evidence.baseURL,
+        });
         emit({ type: "llm_started" });
-        const result = await callLLM(options.ai, resolved);
+        const result = await callLLM(options.ai, resolved, evidence);
         body = result.body;
         usedModel = result.model;
         emit({ type: "llm_finished", bytes: Buffer.byteLength(body, "utf-8") });
+        // Hold the draft to the same evidence it was given. Contradictions and
+        // unverified locators don't block the write — cover is a drafting
+        // tool — but they must reach the result instead of vanishing.
+        grounding = validateSelectorGrounding(body, evidence.snapshots, evidence.sourceSelectors);
+    }
+
+    const reviewReasons: string[] = [];
+    const todoCount = (body.match(/\bTODO\b/g) ?? []).length;
+    if (todoCount > 0) {
+        reviewReasons.push(`${todoCount} TODO placeholder(s) must be filled in`);
+    }
+    if (grounding && grounding.contradictions.length > 0) {
+        reviewReasons.push(
+            `${grounding.contradictions.length} locator(s) contradict captured pages`,
+        );
+    }
+    if (grounding && grounding.unverified.length > 0) {
+        reviewReasons.push(
+            `${grounding.unverified.length} locator(s) match neither captured pages nor source markup`,
+        );
     }
 
     // ---- 5. Write the file
@@ -121,6 +176,9 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
         usedModel,
         ticket: resolved.ticket,
         sourceFiles: resolved.sourceFiles,
+        grounding,
+        needsReview: reviewReasons.length > 0,
+        reviewReasons,
     };
 }
 
@@ -295,6 +353,7 @@ export function extractAcs(description: string): string[] {
 async function callLLM(
     ai: NonNullable<CoverOptions["ai"]>,
     resolved: ResolvedTarget,
+    evidence: CoverEvidence,
 ): Promise<{ body: string; model: string }> {
     // One factory owns native-provider versus OpenAI-compatible wiring. This
     // keeps `raiken cover` aligned with chat, organize, and repair instead of
@@ -305,7 +364,7 @@ async function callLLM(
         maxTokens: 1500,
     });
 
-    const prompt = buildCoverPrompt(resolved);
+    const prompt = buildCoverPrompt(resolved, evidence);
     const response = await llm.invoke(prompt, { timeout: LLM_REQUEST_TIMEOUT_MS });
     const text =
         typeof response.content === "string"
@@ -319,7 +378,7 @@ async function callLLM(
     return { body: stripCodeFences(text), model: ai.model };
 }
 
-function buildCoverPrompt(resolved: ResolvedTarget): string {
+function buildCoverPrompt(resolved: ResolvedTarget, evidence: CoverEvidence): string {
     const fileList =
         resolved.sourceFiles.length > 0
             ? resolved.sourceFiles.map((f) => `- ${f}`).join("\n")
@@ -334,23 +393,80 @@ ${resolved.description}
 
 [RELATED SOURCE FILES]
 ${fileList}
-
+${formatEvidence(evidence)}
 [OUTPUT]
 - Complete .ts file. No markdown fences. No prose.
 - Imports → describe → test cases (Arrange/Act/Assert).
 - TypeScript types and async/await. No Jest/Vitest syntax.
 
 [RULES]
-- This draft has NO live DOM. Do not assume how the app is built — its routes,
-  auth method, field names, framework, or copy. Base the test only on the
-  scenario and any source files above.
+- This draft has no live browser. Base every URL and selector on the known
+  application context above (and the source files); never invent one. If the
+  context lists nothing for a step, mark that step with a \`// TODO:\` comment
+  naming the decision the reviewer must make.
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
 - Assertions must be specific and tied to the scenario.
 - NEVER emit page.waitForTimeout, setTimeout, or sleep — fixed sleeps are
   the largest single source of flakes (~45%, Luo et al., FSE 2014). Use
-  expect.toBeVisible({ timeout }) / waitForURL / waitForResponse instead.
-- Any selector, URL, or credential you cannot derive from the inputs MUST be a
-  \`// TODO:\` comment naming the decision the reviewer must make. Never invent.`;
+  expect.toBeVisible({ timeout }) / waitForURL / waitForResponse instead.`;
+}
+
+/**
+ * Render gathered project evidence as prompt sections. Empty sections are
+ * omitted entirely so a project with no discovery/index gets the same prompt
+ * shape as before, not empty headings implying evidence that isn't there.
+ */
+function formatEvidence(evidence: CoverEvidence): string {
+    const sections: string[] = [];
+
+    if (evidence.baseURL) {
+        sections.push(`[BASE URL]\n${evidence.baseURL}  (page.goto paths resolve against this)`);
+    }
+
+    if (evidence.pages.length > 0) {
+        const pages = evidence.pages
+            .map((page) => `- ${page.url}${page.title ? `  ("${page.title}")` : ""}`)
+            .join("\n");
+        sections.push(`[DISCOVERED PAGES — the only URLs known to exist]\n${pages}`);
+    }
+
+    if (evidence.snapshots.length > 0) {
+        sections.push(
+            `[CAPTURED PAGE SNAPSHOTS — real elements on the most relevant pages]\n${evidence.snapshots.join("\n\n")}`,
+        );
+    }
+
+    if (evidence.sourceSelectors.length > 0) {
+        const byKind = new Map<string, string[]>();
+        for (const selector of evidence.sourceSelectors) {
+            const list = byKind.get(selector.kind) ?? [];
+            if (!list.includes(selector.value)) list.push(selector.value);
+            byKind.set(selector.kind, list);
+        }
+        const lines: string[] = [];
+        const label: Record<string, string> = {
+            testId: "test ids (getByTestId)",
+            label: "aria-labels (getByLabel / role name)",
+            placeholder: "placeholders (getByPlaceholder)",
+            role: "explicit roles",
+        };
+        for (const [kind, values] of byKind) {
+            lines.push(`- ${label[kind] ?? kind}: ${values.join(", ")}`);
+        }
+        sections.push(
+            `[SELECTORS PRESENT IN SOURCE MARKUP — safe to use even for states not captured above]\n${lines.join("\n")}`,
+        );
+    }
+
+    if (evidence.knownSelectors.length > 0) {
+        const lines = evidence.knownSelectors
+            .map((entry) => `- ${entry.element}: ${entry.selector}`)
+            .join("\n");
+        sections.push(`[SELECTORS PROVEN IN PREVIOUS RUNS]\n${lines}`);
+    }
+
+    if (sections.length === 0) return "";
+    return `\n${sections.join("\n\n")}\n`;
 }
 
 function stripCodeFences(text: string): string {

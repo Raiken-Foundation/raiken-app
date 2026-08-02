@@ -275,6 +275,64 @@ function collectSelectorLines(summary: string): string[] {
     return selectors;
 }
 
+/**
+ * ARIA roles accepted from a Playwright `ariaSnapshot()` line. The gate exists
+ * because the parser is a line regex, not a YAML parser: a prose bullet like
+ * `- some note` would otherwise register a bogus role "some".
+ */
+const ARIA_SNAPSHOT_ROLES = new Set([
+    ...CAPTURED_ROLES,
+    "heading",
+    "list",
+    "listitem",
+    "table",
+    "row",
+    "cell",
+    "columnheader",
+    "rowheader",
+    "img",
+    "text",
+    "paragraph",
+    "navigation",
+    "banner",
+    "contentinfo",
+    "main",
+    "region",
+    "form",
+    "searchbox",
+    "menuitem",
+    "menu",
+    "option",
+    "listbox",
+    "group",
+    "article",
+    "alert",
+    "status",
+    "separator",
+    "spinbutton",
+    "progressbar",
+]);
+
+const ARIA_SNAPSHOT_LINE = /^-\s+([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*[:[]?/;
+
+/**
+ * Parse the YAML-ish output of Playwright's `page.ariaSnapshot()` — the format
+ * `raiken discover` persists for every crawled page (`- button "Add to cart"`).
+ * Without this, knowledge produced by the crawler carries no structured
+ * elements and grounding degrades to advisory for every non-agent caller.
+ */
+function parseAriaSnapshotElements(summary: string): Array<{ role: string; name: string }> {
+    const elements: Array<{ role: string; name: string }> = [];
+    for (const raw of summary.split("\n")) {
+        const match = ARIA_SNAPSHOT_LINE.exec(raw.trim());
+        if (!match) continue;
+        const role = match[1];
+        if (!ARIA_SNAPSHOT_ROLES.has(role)) continue;
+        elements.push({ role, name: (match[2] ?? "").replace(/\\(.)/g, "$1") });
+    }
+    return elements;
+}
+
 function buildCapturedIndex(summaries: string[]): CapturedIndex {
     const elements: Array<{ role: string; name: string }> = [];
     const roles = new Set<string>();
@@ -283,13 +341,22 @@ function buildCapturedIndex(summaries: string[]): CapturedIndex {
     for (const summary of summaries) {
         if (!summary) continue;
         textParts.push(summary);
-        for (const el of parseSummaryElements(summary)) {
-            const role = el.role.trim().toLowerCase();
-            elements.push({ role, name: el.name });
-            roles.add(role);
-            for (const selector of el.selectors) {
-                const normalized = normalizeSelector(selector);
-                if (normalized) textParts.push(normalized);
+        const parsed = parseSummaryElements(summary);
+        if (parsed.length > 0) {
+            for (const el of parsed) {
+                const role = el.role.trim().toLowerCase();
+                elements.push({ role, name: el.name });
+                roles.add(role);
+                for (const selector of el.selectors) {
+                    const normalized = normalizeSelector(selector);
+                    if (normalized) textParts.push(normalized);
+                }
+            }
+        } else {
+            // Not the agent's summary format — try the crawler's ariaSnapshot.
+            for (const el of parseAriaSnapshotElements(summary)) {
+                elements.push({ role: el.role, name: el.name });
+                roles.add(el.role);
             }
         }
         // Form-field selectors carry test ids / labels / placeholders that the

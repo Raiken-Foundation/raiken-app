@@ -337,3 +337,48 @@ describe("validateSelectorGrounding — source markup as second evidence", () =>
         expect(report.contradictions[0].kind).toBe("role_mismatch");
     });
 });
+
+describe("validateSelectorGrounding — crawler ariaSnapshot format", () => {
+    const ARIA_SNAPSHOT = [
+        "- banner:",
+        '  - link "VueMart"',
+        '  - link "Cart 0"',
+        "- main:",
+        '  - heading "Jumper Wire Kit" [level=1]',
+        '  - spinbutton "Quantity"',
+        '  - button "Add to cart"',
+        "- prose bullet that is not an element",
+    ].join("\n");
+
+    it("treats ariaSnapshot lines as captured elements (enforceable)", () => {
+        const report = validateSelectorGrounding(
+            testWith("    await page.getByRole('button', { name: 'Add to cart' }).click();"),
+            [ARIA_SNAPSHOT],
+        );
+
+        expect(report.enforceable).toBe(true);
+        expect(report.contradictions).toEqual([]);
+        expect(report.unverified).toEqual([]);
+    });
+
+    it("flags a role the snapshot contradicts", () => {
+        const report = validateSelectorGrounding(
+            testWith("    await page.getByRole('link', { name: 'Add to cart' }).click();"),
+            [ARIA_SNAPSHOT],
+        );
+
+        expect(report.contradictions).toHaveLength(1);
+        expect(report.contradictions[0].suggestion).toContain("getByRole('button'");
+    });
+
+    it("ignores prose bullets instead of minting fake roles", () => {
+        const report = validateSelectorGrounding(
+            testWith("    await page.getByRole('button', { name: 'prose bullet' }).click();"),
+            [ARIA_SNAPSHOT],
+        );
+
+        // "prose" is not an ARIA role, so that line contributed no element;
+        // the locator is merely unverified (its name appears in captured text).
+        expect(report.contradictions).toEqual([]);
+    });
+});

@@ -293,6 +293,17 @@ export class CodeGraphDB {
         );
     }
 
+    upsertRunOutcome(input: {
+        testFile: string;
+        testName: string;
+        status: "passed" | "failed" | "error" | "timeout";
+        executionTimeMs?: number;
+        errorMessage?: string;
+        failingSelector?: string;
+    }): void {
+        this.testOutcomes.upsertRunOutcome(input);
+    }
+
     getRecentFailures(limit = 10): Array<{
         id: number;
         testFile: string;

@@ -57,6 +57,77 @@ export class TestOutcomesRepository {
     }
 
     /**
+     * Record the outcome of running an arbitrary spec — one the agent did not
+     * generate, so there is no prior `recordTestGenerated` row to attach to.
+     * Updates the newest row for (test_file, test_name) when one exists
+     * (keeping an agent-generated test's history in one place), otherwise
+     * inserts a runner-origin row with empty agent-only columns. This is what
+     * lets `raiken test` / `report` / `ci` feed the same failure memory that
+     * `raiken context` and repair prompts read.
+     */
+    upsertRunOutcome(input: {
+        testFile: string;
+        testName: string;
+        status: "passed" | "failed" | "error" | "timeout";
+        executionTimeMs?: number;
+        errorMessage?: string;
+        failingSelector?: string;
+    }): void {
+        const testFile = normalizeTestFileKey(input.testFile);
+        const now = Date.now();
+        this.adapter.runWithRetry(() => {
+            const transaction = this.adapter.db.transaction(() => {
+                const existing = this.adapter.db
+                    .prepare(`
+      SELECT id FROM test_outcomes
+      WHERE project_path = ? AND test_file = ? AND test_name = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `)
+                    .get(this.adapter.projectPath, testFile, input.testName) as
+                    | { id: number }
+                    | undefined;
+
+                if (existing) {
+                    this.adapter.db
+                        .prepare(`
+      UPDATE test_outcomes
+      SET status = ?, execution_time_ms = ?, error_message = ?, failing_selector = ?, last_run = ?, retry_count = retry_count + 1
+      WHERE id = ?
+    `)
+                        .run(
+                            input.status,
+                            input.executionTimeMs ?? null,
+                            input.errorMessage ?? null,
+                            input.failingSelector ?? null,
+                            now,
+                            existing.id,
+                        );
+                    return;
+                }
+
+                this.adapter.db
+                    .prepare(`
+      INSERT INTO test_outcomes (project_path, test_file, test_name, source_prompt, generated_code, status, error_message, failing_selector, execution_time_ms, created_at, last_run, origin)
+      VALUES (?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, 'runner')
+    `)
+                    .run(
+                        this.adapter.projectPath,
+                        testFile,
+                        input.testName,
+                        input.status,
+                        input.errorMessage ?? null,
+                        input.failingSelector ?? null,
+                        input.executionTimeMs ?? null,
+                        now,
+                        now,
+                    );
+            });
+            transaction();
+        });
+    }
+
+    /**
      * Get recent test failures.
      */
     getRecentFailures(limit = 10): Array<{

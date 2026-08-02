@@ -187,6 +187,63 @@ describe("database repositories", () => {
         );
     });
 
+    it("TestOutcomesRepository upserts runner outcomes for specs the agent never generated", () => {
+        const opened = openDatabase(testDir, dbPath);
+        const outcomes = new TestOutcomesRepository(opened.adapter);
+        const testFile = "tests/handwritten.spec.ts";
+
+        // First run of a hand-written spec: no generation row exists, so an
+        // insert with runner origin must be created.
+        outcomes.upsertRunOutcome({
+            testFile,
+            testName: "checkout applies coupon",
+            status: "failed",
+            errorMessage: "locator resolved to 0 elements",
+            failingSelector: "getByTestId('discount')",
+        });
+
+        const failures = outcomes.getRecentFailures(5);
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.testFile).toBe(testFile);
+        expect(failures[0]?.errorMessage).toBe("locator resolved to 0 elements");
+
+        const origin = opened.adapter.db
+            .prepare("SELECT origin, source_prompt FROM test_outcomes WHERE test_file = ?")
+            .get(testFile) as { origin: string; source_prompt: string };
+        expect(origin.origin).toBe("runner");
+        expect(origin.source_prompt).toBe("");
+
+        // A later passing run updates the same row instead of inserting a
+        // duplicate, clearing it from the failure list.
+        outcomes.upsertRunOutcome({
+            testFile,
+            testName: "checkout applies coupon",
+            status: "passed",
+            executionTimeMs: 900,
+        });
+        expect(outcomes.getRecentFailures(5)).toHaveLength(0);
+        const count = opened.adapter.db
+            .prepare("SELECT COUNT(*) AS n FROM test_outcomes WHERE test_file = ?")
+            .get(testFile) as { n: number };
+        expect(count.n).toBe(1);
+    });
+
+    it("upsertRunOutcome attaches to an existing agent-generated row for the same test", () => {
+        const opened = openDatabase(testDir, dbPath);
+        const outcomes = new TestOutcomesRepository(opened.adapter);
+        const testFile = "tests/generated.spec.ts";
+
+        const id = outcomes.recordTestGenerated(testFile, "login works", "prompt", "code");
+        outcomes.upsertRunOutcome({ testFile, testName: "login works", status: "failed" });
+
+        expect(outcomes.getLatestTestOutcomeId(testFile)).toBe(id);
+        const row = opened.adapter.db
+            .prepare("SELECT status, origin FROM test_outcomes WHERE id = ?")
+            .get(id) as { status: string; origin: string };
+        expect(row.status).toBe("failed");
+        expect(row.origin).toBe("agent");
+    });
+
     it("SymbolsRepository replaces symbols and edges per file", () => {
         const opened = openDatabase(testDir, dbPath);
         const symbols = new SymbolsRepository(opened.adapter);

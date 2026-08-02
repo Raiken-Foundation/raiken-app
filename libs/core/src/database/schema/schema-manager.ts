@@ -31,10 +31,31 @@ export class SchemaManager {
         this.ensureEmbeddingsSchema();
         this.ensureKeywordIndexSchema();
         this.ensureMemorySchema();
+        this.ensureTestOutcomeColumns();
         this.ensureDependencyColumns();
         this.ensureFileColumns();
         this.ensureSymbolGraphSchema();
         this.ensureDiscoveredPageColumns();
+    }
+
+    /**
+     * Idempotently add columns to `test_outcomes` that post-date its creation
+     * in `ensureMemorySchema`. `origin` distinguishes agent-generated tests
+     * (which carry a source prompt and generated code) from outcomes recorded
+     * by plain runners (`raiken test` / `report` / `ci`) for arbitrary specs;
+     * runner rows use empty strings for the agent-only NOT NULL columns, since
+     * relaxing those would require a full table rebuild for no reader benefit.
+     * Must run after `ensureMemorySchema`, which creates the table.
+     */
+    private ensureTestOutcomeColumns(): void {
+        const columns = this.adapter.db.prepare(`PRAGMA table_info(test_outcomes)`).all() as Array<{
+            name: string;
+        }>;
+        if (!columns.some((column) => column.name === "origin")) {
+            this.adapter.db.exec(
+                `ALTER TABLE test_outcomes ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'`,
+            );
+        }
     }
 
     /**

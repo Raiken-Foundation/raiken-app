@@ -34,6 +34,20 @@ export interface CoverEvidence {
     knownSelectors: Array<{ element: string; selector: string }>;
 }
 
+/**
+ * Evidence for repairing an existing spec: the discovery snapshots that match
+ * the spec's own text, the selector facts in source markup, and the set of
+ * URL origins the project is known to talk to. `knownOrigins` exists for the
+ * no-new-origins lint — a "fix" that navigates to an origin found in neither
+ * the spec nor the knowledge DB is a hallucination, not a repair.
+ */
+export interface RepairEvidence {
+    snapshots: string[];
+    sourceSelectors: TemplateSelector[];
+    knownOrigins: Set<string>;
+    baseURL: string | null;
+}
+
 const MAX_PAGES = 20;
 const MAX_SNAPSHOTS = 4;
 const MAX_SNAPSHOT_CHARS = 1600;
@@ -98,6 +112,83 @@ export async function gatherCoverEvidence(
     }
 
     return evidence;
+}
+
+export async function gatherRepairEvidence(
+    projectPath: string,
+    referenceText: string,
+): Promise<RepairEvidence> {
+    const evidence: RepairEvidence = {
+        snapshots: [],
+        sourceSelectors: [],
+        knownOrigins: new Set<string>(),
+        baseURL: null,
+    };
+
+    try {
+        evidence.baseURL = (await readPlaywrightBaseURL(projectPath)) ?? null;
+        const origin = toOrigin(evidence.baseURL);
+        if (origin) evidence.knownOrigins.add(origin);
+    } catch {
+        // No playwright config.
+    }
+
+    try {
+        const discovery = new DiscoveryQueryService(projectPath);
+        try {
+            const { pages } = discovery.listPages({ limit: 200 });
+            for (const page of pages) {
+                const origin = toOrigin(page.url);
+                if (origin) evidence.knownOrigins.add(origin);
+            }
+            for (const page of rankPagesByScenario(pages, referenceText).slice(0, MAX_SNAPSHOTS)) {
+                const snapshot = discovery.getPageSnapshot(page.url)?.snapshotJson;
+                if (!snapshot) continue;
+                evidence.snapshots.push(
+                    `Page: ${page.url}${page.title ? ` — "${page.title}"` : ""}\n${snapshot.slice(
+                        0,
+                        MAX_SNAPSHOT_CHARS,
+                    )}`,
+                );
+            }
+        } finally {
+            discovery.close();
+        }
+    } catch {
+        // No site knowledge.
+    }
+
+    try {
+        const db = new CodeGraphDB(projectPath);
+        try {
+            evidence.sourceSelectors = collectTemplateSelectors(db);
+        } finally {
+            db.close();
+        }
+    } catch {
+        // No code graph.
+    }
+
+    return evidence;
+}
+
+/** Absolute URLs referenced in a blob of test code / run output. */
+export function extractOrigins(text: string): Set<string> {
+    const origins = new Set<string>();
+    for (const match of text.matchAll(/https?:\/\/[^\s'"`)\]]+/g)) {
+        const origin = toOrigin(match[0]);
+        if (origin) origins.add(origin);
+    }
+    return origins;
+}
+
+function toOrigin(url: string | null): string | null {
+    if (!url) return null;
+    try {
+        return new URL(url).origin;
+    } catch {
+        return null;
+    }
 }
 
 /**

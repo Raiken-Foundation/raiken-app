@@ -6,4 +6,10 @@ export {
     extractAcs,
     runCover,
 } from "./cover";
-export { type CoverEvidence, gatherCoverEvidence } from "./evidence";
+export {
+    type CoverEvidence,
+    extractOrigins,
+    gatherCoverEvidence,
+    gatherRepairEvidence,
+    type RepairEvidence,
+} from "./evidence";

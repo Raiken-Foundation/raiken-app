@@ -8,7 +8,15 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createProjectApplication, getProvider, resolveAIConfig } from "@raiken/core";
+import {
+    createProjectApplication,
+    describeGroundingViolations,
+    extractOrigins,
+    gatherRepairEvidence,
+    getProvider,
+    resolveAIConfig,
+    validateSelectorGrounding,
+} from "@raiken/core";
 import chalk from "chalk";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { formatUnifiedDiff } from "../diff";
@@ -21,6 +29,11 @@ export interface RepairCommandOptions {
     json?: boolean;
     /** Skip the interpretation step (repair still works, just colder). */
     interpret?: boolean;
+    /**
+     * Re-run the spec after writing the fix (default). `--no-verify` skips
+     * the run for callers who only want the diff applied.
+     */
+    verify?: boolean;
     /** REPL-injected prompt (inquirer can't own the terminal there). */
     confirm?: (message: string) => Promise<boolean>;
     /**
@@ -141,8 +154,20 @@ export async function repairFailedRun(input: {
     }));
     const rawOutput = composeRawOutput(run);
 
+    // Discovery snapshots, source-markup selectors, and known origins. This is
+    // what keeps the fix grounded in the app that exists rather than one the
+    // model imagines — and what the post-fix lint below compares against.
+    const evidence = await gatherRepairEvidence(projectPath, `${file}\n${testCode}\n${rawOutput}`);
+
     if (!options.json) {
         process.stderr.write(dim(`\n  Repairing ${file} (${failures.length} failing test(s))…\n`));
+        if (evidence.snapshots.length > 0) {
+            process.stderr.write(
+                dim(
+                    `  Using ${evidence.snapshots.length} captured page snapshot(s) as evidence.\n`,
+                ),
+            );
+        }
     }
 
     let interpretation: string | undefined;
@@ -152,6 +177,7 @@ export async function repairFailedRun(input: {
             testCode,
             testFilePath: file,
             rawOutput,
+            pageSummaries: evidence.snapshots,
         });
         if (!interpreted.error && interpreted.interpretation.trim()) {
             interpretation = interpreted.interpretation;
@@ -167,6 +193,7 @@ export async function repairFailedRun(input: {
         testCode,
         testFilePath: file,
         rawOutput,
+        pageSummaries: evidence.snapshots,
         ...(interpretation ? { interpretation } : {}),
     });
 
@@ -184,6 +211,60 @@ export async function repairFailedRun(input: {
         if (options.json) emit({ repaired: false, applied: false, filePath: file, message });
         else console.log(dim(`  ${message}`));
         cliExit(0);
+    }
+
+    // Lint the proposed fix against project evidence BEFORE anyone applies
+    // it. A fix may only reference origins the spec or the knowledge DB
+    // already knows (a new origin is a hallucinated URL, not a repair), and
+    // must not introduce locators the captured pages contradict.
+    const originalGrounding = validateSelectorGrounding(
+        repair.originalCode ?? testCode,
+        evidence.snapshots,
+        evidence.sourceSelectors,
+    );
+    const fixedGrounding = validateSelectorGrounding(
+        repair.fixedCode,
+        evidence.snapshots,
+        evidence.sourceSelectors,
+    );
+    const introducedContradictions = fixedGrounding.contradictions.filter(
+        (violation) =>
+            !originalGrounding.contradictions.some(
+                (previous) => previous.locator === violation.locator,
+            ),
+    );
+    const knownOrigins = new Set([...evidence.knownOrigins, ...extractOrigins(testCode)]);
+    const newOrigins = [...extractOrigins(repair.fixedCode)].filter(
+        (origin) => !knownOrigins.has(origin),
+    );
+    const lintFindings: string[] = [
+        ...newOrigins.map(
+            (origin) => `the fix navigates to an origin unknown to this project: ${origin}`,
+        ),
+        ...describeGroundingViolations(introducedContradictions).map(
+            (line) => `the fix introduces an ungrounded locator: ${line}`,
+        ),
+    ];
+
+    if (lintFindings.length > 0) {
+        const unattended = options.apply === true && !options.confirm;
+        if (options.json || unattended) {
+            restore?.();
+            const message = `Repair rejected by grounding lint:\n${lintFindings
+                .map((finding) => `- ${finding}`)
+                .join("\n")}`;
+            if (options.json) {
+                emit({ repaired: false, applied: false, filePath: file, error: message });
+            } else {
+                console.log(chalk.red(`  ${message.split("\n").join("\n  ")}`));
+            }
+            cliExit(1);
+        }
+        console.log("");
+        for (const finding of lintFindings) {
+            console.log(chalk.red(`  ✗ ${finding}`));
+        }
+        console.log(chalk.yellow("  Review the diff below with the findings above in mind."));
     }
 
     const diff = formatUnifiedDiff(repair.originalCode, repair.fixedCode, {
@@ -240,20 +321,64 @@ export async function repairFailedRun(input: {
     }
 
     const saved = await app.testing.saveFileContent({ filePath: file, content: repair.fixedCode });
+
+    // A repair isn't done when the diff is written — it's done when the spec
+    // passes. Re-run it now; in unattended --apply mode a fix that doesn't
+    // verify is reverted, because nobody reviewed the diff and a broken "fix"
+    // is strictly worse than the original failure (it lies about the state).
+    let verified: boolean | undefined;
+    let reverted = false;
+    if (options.verify !== false) {
+        if (!options.json) {
+            process.stderr.write(dim(`\n  Verifying: re-running ${saved.filePath}…\n`));
+        }
+        const rerun = (await app.testing.runTests({
+            testFile: saved.filePath,
+        })) as RepairRunResult;
+        verified = rerun.success === true;
+        if (!verified && options.apply === true && !options.confirm) {
+            await app.testing.saveFileContent({
+                filePath: file,
+                content: repair.originalCode ?? testCode,
+            });
+            reverted = true;
+        }
+    }
+
     restore?.();
     if (options.json) {
         emit({
             repaired: true,
-            applied: true,
+            applied: !reverted,
             filePath: saved.filePath,
             mode: repair.mode,
             editCount: repair.editCount,
             matchFailed: repair.matchFailed,
+            ...(verified === undefined ? {} : { verified }),
+            ...(reverted ? { reverted } : {}),
         });
-    } else {
-        console.log(chalk.green(`  ✓ Updated ${saved.filePath}`));
-        console.log(dim(`  Re-run to verify: raiken test ${saved.filePath}`));
+        cliExit(verified === false ? 1 : 0);
     }
+
+    if (verified === true) {
+        console.log(chalk.green(`  ✓ Updated ${saved.filePath} — re-run passed.`));
+        cliExit(0);
+    }
+    if (verified === false) {
+        if (reverted) {
+            console.log(
+                chalk.red(
+                    `  ✗ The fix did not pass on re-run — reverted ${saved.filePath} to its previous content.`,
+                ),
+            );
+        } else {
+            console.log(chalk.red(`  ✗ Updated ${saved.filePath}, but the re-run still fails.`));
+            console.log(dim(`  Inspect with: raiken test ${saved.filePath}`));
+        }
+        cliExit(1);
+    }
+    console.log(chalk.green(`  ✓ Updated ${saved.filePath}`));
+    console.log(dim(`  Re-run to verify: raiken test ${saved.filePath}`));
     cliExit(0);
 }
 

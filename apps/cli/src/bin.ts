@@ -633,6 +633,10 @@ program
     .option("--apply", "Write the fix without prompting (scripts / CI)", false)
     .option("--json", "Emit the repair outcome as JSON (implies no prompt)", false)
     .option("--no-interpret", "Skip the diagnosis step and go straight to the fix")
+    .option(
+        "--no-verify",
+        "Skip re-running the spec after the fix is written (verification is on by default; unattended --apply reverts a fix that fails it)",
+    )
     .action(async (file, options) => {
         try {
             const { repairCommand } = await import("./commands/repair");

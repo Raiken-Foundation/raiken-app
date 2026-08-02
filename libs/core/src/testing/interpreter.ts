@@ -86,6 +86,13 @@ export interface InterpretationContext {
     rawOutput?: string;
     sourceCode?: string;
     domContext?: DOMContext;
+    /**
+     * Formatted snapshots of relevant discovered pages (from the site
+     * knowledge DB). Gives headless callers — the CLI has no live browser —
+     * the same "what the page actually contains" evidence the dashboard's
+     * agent loop gets from live captures.
+     */
+    pageSummaries?: string[];
     projectPath: string;
 }
 
@@ -185,7 +192,15 @@ function inferAttachmentRole(att: InterpretationAttachment): string {
  * comparison surfaces that immediately without needing a live model.
  */
 export function buildInterpretationPrompt(context: InterpretationContext): string {
-    const { testResults, testCode, testFilePath, sourceCode, domContext, rawOutput } = context;
+    const {
+        testResults,
+        testCode,
+        testFilePath,
+        sourceCode,
+        domContext,
+        pageSummaries,
+        rawOutput,
+    } = context;
 
     const failedTests = testResults.filter((t) => t.status === "failed");
     const passedTests = testResults.filter((t) => t.status === "passed");
@@ -242,6 +257,18 @@ export function buildInterpretationPrompt(context: InterpretationContext): strin
         lines.push("Form fields:");
         for (const f of domContext.formFields.slice(0, 10)) {
             lines.push(`- ${f.name} (${f.type}): ${f.suggestedSelector}`);
+        }
+        lines.push("");
+    }
+
+    if (pageSummaries && pageSummaries.length > 0) {
+        lines.push("# Captured pages (discovery knowledge)");
+        lines.push(
+            "Snapshots of the discovered pages most relevant to this spec. Treat these as",
+            "the ground truth for which elements exist; prefer their selectors over guesses.",
+        );
+        for (const summary of pageSummaries.slice(0, 4)) {
+            lines.push("", summary);
         }
         lines.push("");
     }
@@ -486,6 +513,7 @@ export function buildRepairPrompt(
         testFilePath,
         sourceCode,
         domContext,
+        pageSummaries,
         rawOutput,
         interpretation,
         images,
@@ -587,6 +615,18 @@ export function buildRepairPrompt(
         lines.push("Form fields:");
         for (const f of domContext.formFields.slice(0, 10)) {
             lines.push(`- ${f.name} (${f.type}): ${f.suggestedSelector}`);
+        }
+        lines.push("");
+    }
+
+    if (pageSummaries && pageSummaries.length > 0) {
+        lines.push("# Captured pages (discovery knowledge)");
+        lines.push(
+            "Snapshots of the discovered pages most relevant to this spec. Treat these as",
+            "the ground truth for which elements exist; prefer their selectors over guesses.",
+        );
+        for (const summary of pageSummaries.slice(0, 4)) {
+            lines.push("", summary);
         }
         lines.push("");
     }

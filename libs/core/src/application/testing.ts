@@ -141,6 +141,7 @@ export class TestingApplication implements ProjectApplicationContext {
         rawOutput?: string;
         sourceCode?: string;
         domContext?: Parameters<typeof getQuickInterpretation>[0]["domContext"];
+        pageSummaries?: string[];
     }) {
         const resolved = resolveAIConfig(this.projectPath);
         const provider = getProvider(resolved.provider);
@@ -190,6 +191,7 @@ export class TestingApplication implements ProjectApplicationContext {
                     rawOutput: input.rawOutput,
                     sourceCode: input.sourceCode,
                     domContext: input.domContext,
+                    pageSummaries: input.pageSummaries,
                     projectPath: this.projectPath,
                 },
                 {
@@ -234,6 +236,7 @@ export class TestingApplication implements ProjectApplicationContext {
         sourceCode?: string;
         interpretation?: string;
         domContext?: Parameters<typeof getTestRepair>[0]["domContext"];
+        pageSummaries?: string[];
     }) {
         const resolved = resolveAIConfig(this.projectPath);
         const provider = getProvider(resolved.provider);
@@ -311,6 +314,7 @@ export class TestingApplication implements ProjectApplicationContext {
                         sourceCode: input.sourceCode,
                         interpretation: input.interpretation,
                         domContext: input.domContext,
+                        pageSummaries: input.pageSummaries,
                         images: images.length > 0 ? images : undefined,
                         projectPath: this.projectPath,
                     },

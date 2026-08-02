@@ -46,3 +46,32 @@ describe("cover honesty + evidence", () => {
         expect(written).toContain("TODO");
     });
 });
+
+describe("repair evidence + origin lint primitives", () => {
+    it("extractOrigins pulls unique origins out of test code and logs", async () => {
+        const { extractOrigins } = await import("../cover/evidence");
+        const origins = extractOrigins(
+            [
+                "await page.goto('http://localhost:5199/product/p1');",
+                'await page.goto("http://localhost:5199/cart");',
+                "// hallucinated: https://example.com/products/123",
+                "not a url",
+            ].join("\n"),
+        );
+        expect(origins).toEqual(new Set(["http://localhost:5199", "https://example.com"]));
+    });
+
+    it("gatherRepairEvidence degrades to empty in a bare project", async () => {
+        const { gatherRepairEvidence } = await import("../cover/evidence");
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-repair-evidence-"));
+        try {
+            const evidence = await gatherRepairEvidence(dir, "page.goto('/cart')");
+            expect(evidence.snapshots).toEqual([]);
+            expect(evidence.sourceSelectors).toEqual([]);
+            expect(evidence.knownOrigins.size).toBe(0);
+            expect(evidence.baseURL).toBeNull();
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});

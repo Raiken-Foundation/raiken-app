@@ -1,9 +1,11 @@
 export {
-    assessGeneratedDraft,
-    assessTodoMarkers,
-    describeSignedOutKnowledgeGap,
     type AssessGeneratedDraftInput,
     type AssessGeneratedDraftResult,
+    assessGeneratedDraft,
+    assessTodoMarkers,
+    containsUnverifiedMarker,
+    describeSignedOutKnowledgeGap,
+    UNVERIFIED_MARKER,
 } from "./assess-draft";
 export {
     type CoverEvent,
@@ -24,18 +26,6 @@ export {
     suggestCollectedOutputPath,
 } from "./draft-quality";
 export {
-    loadRecordedCoverFlows,
-    persistCoverFlows,
-    recordLoginFlowFromEvidence,
-    writeLoginScriptFromEvidence,
-} from "./flow-store";
-export {
-    buildNavigationFlows,
-    formatNavigationFlows,
-    type CoverFlow,
-    type CoverFlowStep,
-} from "./flows";
-export {
     type AuthLoginEvidence,
     type CoverEvidence,
     extractOrigins,
@@ -49,40 +39,63 @@ export {
     readAuthLoginEvidence,
 } from "./evidence";
 export {
+    loadRecordedCoverFlows,
+    persistCoverFlows,
+    recordLoginFlowFromEvidence,
+    writeLoginScriptFromEvidence,
+} from "./flow-store";
+export {
+    buildNavigationFlows,
+    type CoverFlow,
+    type CoverFlowStep,
+    formatNavigationFlows,
+} from "./flows";
+export {
     assessIntentCoverage,
     extractDraftSignalTokens,
     extractIntentCriteria,
-    significantTokens,
-    splitScenarioClauses,
     type IntentCoverageAssessment,
     type IntentCriterion,
+    significantTokens,
+    splitScenarioClauses,
 } from "./intent-coverage";
 export {
     BOUNDED_DISCOVER_MAX_DEPTH,
     BOUNDED_DISCOVER_MAX_PAGES,
-    ensureSiteKnowledge,
-    hasUsableSiteKnowledge,
-    resolveDiscoverSeedUrl,
-    siteKnowledgeRefuseMessage,
     type EnsureSiteKnowledgeOptions,
     type EnsureSiteKnowledgeResult,
+    ensureSiteKnowledge,
+    hasAuthenticatedSiteKnowledge,
+    hasUsableSiteKnowledge,
+    resolveDiscoverSeedUrl,
+    resolveUsableSessionPath,
+    runBoundedDiscover,
+    siteKnowledgeRefuseMessage,
 } from "./knowledge-gate";
 export {
     captureRepairPage,
     discoveryCoversUrl,
     extractFirstGotoTarget,
+    type LiveRepairCaptureResult,
     maybeCaptureMissingRepairPage,
+    type RepairCaptureDecision,
     resolveFailureUrl,
     shouldLiveCaptureRepairPage,
-    type LiveRepairCaptureResult,
-    type RepairCaptureDecision,
 } from "./repair-capture";
 export {
     applyRepairSetupFixes,
+    containsParentTraversal,
+    describeDroppedScenarioExpectation,
+    describeParentTraversal,
     describeReassertedAbsence,
+    describeRegressedSelector,
     describeTimeoutFocus,
     extractPendingLocators,
     extractProvenAbsentLocators,
-    stillAssertsAbsentLocators,
+    extractProvenPresentSelectors,
+    missingScenarioExpectations,
+    type ProvenSelector,
     type SetupFixResult,
+    scenarioExpectedTokens,
+    stillAssertsAbsentLocators,
 } from "./repair-setup";

@@ -267,7 +267,12 @@ function isCommentLine(line: string): boolean {
  * fields that were never rendered. Raiken generated exactly this spec for an
  * MFA prompt and `doctor` reported nothing.
  */
-function scanAuthPreconditions(text: string, file: string, projectPath: string): DoctorFinding[] {
+function scanAuthPreconditions(
+    text: string,
+    file: string,
+    projectPath: string,
+    baseURL: string | null,
+): DoctorFinding[] {
     const lines = text.split(/\r?\n/);
 
     let stateLine = 0;
@@ -363,6 +368,38 @@ function scanAuthPreconditions(text: string, file: string, projectPath: string):
                 message: `storageState points at "${statePath}", but all persistent cookies have expired.`,
                 suggestion: "Refresh the saved session with `raiken auth`.",
             });
+        } else if (inspection.status === "valid" && inspection.origins.length > 0 && baseURL) {
+            // A session scoped to one origin silently does nothing against a
+            // different baseURL — every test in this file starts signed out
+            // and stalls at the login wall. The state file "exists and is
+            // valid", so this needs its own rule rather than folding into
+            // missing/malformed checks.
+            let seedOrigin: string | null = null;
+            try {
+                seedOrigin = new URL(baseURL).origin;
+            } catch {
+                /* unparsable baseURL — skip */
+            }
+            if (seedOrigin) {
+                const normalize = (origin: string): string => origin.replace(/\/+$/, "");
+                const overlaps = inspection.origins.some(
+                    (origin) => normalize(origin) === normalize(seedOrigin),
+                );
+                if (!overlaps) {
+                    findings.push({
+                        rule: "auth-state-origin-mismatch",
+                        severity: "warning",
+                        file,
+                        line: stateLine,
+                        column: 1,
+                        snippet,
+                        message: `storageState "${statePath}" is scoped to ${inspection.origins.join(
+                            ", ",
+                        )}, but the Playwright baseURL is ${seedOrigin} — the saved session does not apply, so every test here starts signed out.`,
+                        suggestion: `Re-import the session with \`raiken auth --domain ${seedOrigin}\`, or change baseURL to an origin the session covers.`,
+                    });
+                }
+            }
         }
     }
 
@@ -405,7 +442,9 @@ export async function scanTests(options: DoctorOptions): Promise<DoctorReport> {
             const text = fs.readFileSync(absFile, "utf-8");
             const rel = path.relative(projectPath, absFile);
             findings.push(...scanText(text, rel, extraRules));
-            findings.push(...scanAuthPreconditions(text, rel, projectPath));
+            findings.push(
+                ...scanAuthPreconditions(text, rel, projectPath, projectFindings.baseURL),
+            );
         } catch {
             // Unreadable files are simply skipped; a crash here would be worse
             // than a silent miss for a lint-style tool.

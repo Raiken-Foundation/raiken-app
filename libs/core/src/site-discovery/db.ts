@@ -102,8 +102,8 @@ export class SiteKnowledgeDB {
             INSERT OR REPLACE INTO discovered_pages (
                 project_path, url, normalized_url, title, snapshot_json,
                 forms_json, parent_url, navigation_action, depth, discovered_at,
-                last_visited_at, visit_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_visited_at, visit_count, captured_authenticated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
             )
             .run(
@@ -119,6 +119,7 @@ export class SiteKnowledgeDB {
                 page.discoveredAt,
                 page.lastVisitedAt,
                 page.visitCount,
+                page.capturedAuthenticated ? 1 : 0,
             );
 
         return Number(result.lastInsertRowid);
@@ -220,7 +221,18 @@ export class SiteKnowledgeDB {
      */
     updatePageContent(
         url: string,
-        content: { title: string; snapshotJson: string | null; formsJson: string | null },
+        content: {
+            title: string;
+            snapshotJson: string | null;
+            formsJson: string | null;
+            /**
+             * Follows the content being written: a signed-in re-crawl upgrades
+             * the row, a signed-out one downgrades it, because the flag
+             * describes the snapshot now stored rather than the project's
+             * history.
+             */
+            capturedAuthenticated?: boolean;
+        },
     ): void {
         const normalizedUrl = this.normalizeUrl(url);
         this.db
@@ -228,6 +240,7 @@ export class SiteKnowledgeDB {
                 `
             UPDATE discovered_pages
             SET title = ?, snapshot_json = ?, forms_json = ?,
+                captured_authenticated = ?,
                 last_visited_at = ?, visit_count = visit_count + 1
             WHERE project_path = ? AND normalized_url = ?
         `,
@@ -236,6 +249,7 @@ export class SiteKnowledgeDB {
                 content.title,
                 content.snapshotJson,
                 content.formsJson,
+                content.capturedAuthenticated ? 1 : 0,
                 Date.now(),
                 this.projectPath,
                 normalizedUrl,
@@ -251,6 +265,24 @@ export class SiteKnowledgeDB {
                 `
             SELECT COUNT(*) as count FROM discovered_pages
             WHERE project_path = ?
+        `,
+            )
+            .get(this.projectPath) as { count: number };
+
+        return result.count;
+    }
+
+    /**
+     * Pages whose stored snapshot was captured while a session was loaded.
+     * Zero means every page on record is the signed-out application, however
+     * many auth-state files exist on disk.
+     */
+    getAuthenticatedPagesCount(): number {
+        const result = this.db
+            .prepare(
+                `
+            SELECT COUNT(*) as count FROM discovered_pages
+            WHERE project_path = ? AND captured_authenticated = 1
         `,
             )
             .get(this.projectPath) as { count: number };
@@ -877,6 +909,7 @@ export class SiteKnowledgeDB {
             discoveredAt: row["discovered_at"] as number,
             lastVisitedAt: row["last_visited_at"] as number,
             visitCount: row["visit_count"] as number,
+            capturedAuthenticated: Boolean(row["captured_authenticated"]),
         };
     }
 
@@ -1006,6 +1039,7 @@ export class SiteKnowledgeDB {
      */
     getStats(): {
         pagesCount: number;
+        authenticatedPagesCount: number;
         linksCount: number;
         verifiedLinksCount: number;
         brokenLinksCount: number;
@@ -1013,6 +1047,7 @@ export class SiteKnowledgeDB {
         unresolvedBlockersCount: number;
     } {
         const pagesCount = this.getPagesCount();
+        const authenticatedPagesCount = this.getAuthenticatedPagesCount();
         const linksCount = this.getLinksCount();
 
         const verifiedCount = this.db
@@ -1053,6 +1088,7 @@ export class SiteKnowledgeDB {
 
         return {
             pagesCount,
+            authenticatedPagesCount,
             linksCount,
             verifiedLinksCount: verifiedCount.count,
             brokenLinksCount: brokenCount.count,

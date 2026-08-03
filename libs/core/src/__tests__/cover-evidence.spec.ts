@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { assessTodoMarkers, runCover } from "../cover/cover";
+import { assessTodoMarkers, containsUnverifiedMarker, runCover } from "../cover/cover";
 import { gatherCoverEvidence } from "../cover/evidence";
 
 describe("cover honesty + evidence", () => {
@@ -42,9 +42,9 @@ describe("cover honesty + evidence", () => {
             allowUngrounded: true,
         });
         expect(result.needsReview).toBe(true);
-        expect(
-            result.reviewReasons.some((reason) => reason.includes("raiken discover")),
-        ).toBe(true);
+        expect(result.reviewReasons.some((reason) => reason.includes("raiken discover"))).toBe(
+            true,
+        );
     });
 
     it("dry-run scaffold reports needsReview with the TODO count", async () => {
@@ -71,6 +71,153 @@ describe("cover honesty + evidence", () => {
 
         const withPlaceholder = `await page.goto("TODO: Define product page URL");`;
         expect(assessTodoMarkers(withPlaceholder)).toEqual({ placeholders: 1, notes: 0 });
+    });
+
+    it("refuses to overwrite an existing spec unless force is set", async () => {
+        const out = path.join(projectDir, "e2e", "existing.spec.ts");
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, "test('real tests', () => {});\n");
+
+        await expect(
+            runCover({
+                projectPath: projectDir,
+                target: "add a product to the cart",
+                outputPath: "e2e/existing.spec.ts",
+                dryRun: true,
+                allowUngrounded: true,
+            }),
+        ).rejects.toThrow(/Refusing to overwrite/);
+        // The existing test survived untouched.
+        expect(fs.readFileSync(out, "utf-8")).toBe("test('real tests', () => {});\n");
+
+        const forced = await runCover({
+            projectPath: projectDir,
+            target: "add a product to the cart",
+            outputPath: "e2e/existing.spec.ts",
+            dryRun: true,
+            allowUngrounded: true,
+            force: true,
+        });
+        expect(forced.outputPath).toBe(out);
+        expect(fs.readFileSync(out, "utf-8")).toContain("TODO");
+    });
+});
+
+describe("cover @raiken-unverified marker", () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+        projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cover-unverified-"));
+    });
+
+    afterEach(() => {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it("stamps the marker when the review is grounding-driven (auth, no knowledge)", async () => {
+        const result = await runCover({
+            projectPath: projectDir,
+            target: "sign in with username and password then see the dashboard",
+            dryRun: true,
+            allowUngrounded: true,
+        });
+        const written = fs.readFileSync(result.outputPath, "utf-8");
+        expect(written).toContain("@raiken-unverified");
+        expect(result.needsReview).toBe(true);
+        expect(result.reviewReasons.some((reason) => reason.includes("@raiken-unverified"))).toBe(
+            true,
+        );
+    });
+
+    it("does not stamp a scaffold whose review is TODO-driven", async () => {
+        const result = await runCover({
+            projectPath: projectDir,
+            target: "add a product to the cart",
+            dryRun: true,
+            allowUngrounded: true,
+        });
+        const written = fs.readFileSync(result.outputPath, "utf-8");
+        expect(written).not.toContain("@raiken-unverified");
+        expect(result.needsReview).toBe(true);
+    });
+
+    it("parses the marker", () => {
+        expect(containsUnverifiedMarker("// @raiken-unverified — draft\nimport { test }")).toBe(
+            true,
+        );
+        expect(containsUnverifiedMarker("import { test } from '@playwright/test'")).toBe(false);
+    });
+});
+
+describe("cover --fix-config", () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+        projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cover-fixconfig-"));
+    });
+
+    afterEach(() => {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it("widens testMatch BEFORE steering, so the draft is not refused onto the collected file", async () => {
+        const configPath = path.join(projectDir, "playwright.config.ts");
+        fs.writeFileSync(
+            configPath,
+            `import { defineConfig } from "@playwright/test";
+export default defineConfig({
+  testDir: "e2e",
+  testMatch: ["workflows.spec.ts"],
+});
+`,
+        );
+        const e2e = path.join(projectDir, "e2e");
+        fs.mkdirSync(e2e, { recursive: true });
+        // The narrow testMatch collects exactly this file — without the fix,
+        // steering lands the draft here and step 6 refuses to overwrite it
+        // while telling the user to pass --fix-config (which they did).
+        fs.writeFileSync(path.join(e2e, "workflows.spec.ts"), "test('real', () => {});\n");
+
+        const result = await runCover({
+            projectPath: projectDir,
+            target: "add a product to the cart",
+            dryRun: true,
+            allowUngrounded: true,
+            fixConfig: true,
+        });
+
+        expect(fs.readFileSync(configPath, "utf-8")).toContain('testMatch: ["**/*.spec.ts"]');
+        expect(path.basename(result.outputPath)).not.toBe("workflows.spec.ts");
+        expect(fs.existsSync(result.outputPath)).toBe(true);
+        // The real test survived untouched.
+        expect(fs.readFileSync(path.join(e2e, "workflows.spec.ts"), "utf-8")).toBe(
+            "test('real', () => {});\n",
+        );
+        expect(result.reviewReasons.some((reason) => reason.includes("testMatch"))).toBe(true);
+    });
+
+    it("without --fix-config the steered-file refusal keeps happening", async () => {
+        const configPath = path.join(projectDir, "playwright.config.ts");
+        fs.writeFileSync(
+            configPath,
+            `export default defineConfig({
+  testDir: "e2e",
+  testMatch: ["workflows.spec.ts"],
+});
+`,
+        );
+        const e2e = path.join(projectDir, "e2e");
+        fs.mkdirSync(e2e, { recursive: true });
+        fs.writeFileSync(path.join(e2e, "workflows.spec.ts"), "test('real', () => {});\n");
+
+        await expect(
+            runCover({
+                projectPath: projectDir,
+                target: "add a product to the cart",
+                dryRun: true,
+                allowUngrounded: true,
+            }),
+        ).rejects.toThrow(/Refusing to overwrite/);
     });
 });
 

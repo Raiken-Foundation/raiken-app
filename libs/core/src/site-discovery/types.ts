@@ -26,6 +26,15 @@ export interface DiscoveredPage {
     discoveredAt: number;
     lastVisitedAt: number;
     visitCount: number;
+    /**
+     * True when the crawl that produced this row was carrying a loaded
+     * storageState — i.e. the snapshot is of the signed-in application.
+     * Describes the content currently stored, so a signed-out re-crawl of the
+     * same URL clears it. Cover reads this to know whether it has ever seen
+     * anything behind the login, which "an auth-state.json exists on disk"
+     * does not tell it.
+     */
+    capturedAuthenticated?: boolean;
 }
 
 /**

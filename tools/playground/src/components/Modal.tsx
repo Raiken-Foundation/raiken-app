@@ -1,87 +1,58 @@
-import { type ReactNode, useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
-interface ModalProps {
-    open: boolean;
+export interface ModalProps {
     title: string;
     onClose: () => void;
     children: ReactNode;
-    /** Wider content for forms with many fields. */
-    wide?: boolean;
-    /** Optional footer (action buttons). */
     footer?: ReactNode;
-    /** Stable test id; defaults to "modal". */
-    testId?: string;
 }
 
-export default function Modal({
-    open,
-    title,
-    onClose,
-    children,
-    wide = false,
-    footer,
-    testId = "modal",
-}: ModalProps) {
-    const cardRef = useRef<HTMLDivElement | null>(null);
+/**
+ * Accessible modal: labelled, focus-trapped (the fixture's Lyra project
+ * tracks exactly this behavior), ESC to close, backdrop click to close.
+ */
+export function Modal({ title, onClose, children, footer }: ModalProps) {
+    const dialogRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        if (!open) return;
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") onClose();
+        const previous = document.activeElement as HTMLElement | null;
+        const firstFocusable = dialogRef.current?.querySelector<HTMLElement>(
+            "input, select, textarea, button",
+        );
+        firstFocusable?.focus();
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape") onClose();
         };
-        window.addEventListener("keydown", onKey);
-        // Focus the first focusable element when the modal opens. We
-        // intentionally use requestAnimationFrame so the elements are
-        // mounted before we look for them.
-        const raf = requestAnimationFrame(() => {
-            const target = cardRef.current?.querySelector<HTMLElement>(
-                "input, textarea, select, button:not([data-modal-close])",
-            );
-            target?.focus();
-        });
+        document.addEventListener("keydown", onKey);
         return () => {
-            window.removeEventListener("keydown", onKey);
-            cancelAnimationFrame(raf);
+            document.removeEventListener("keydown", onKey);
+            previous?.focus();
         };
-    }, [open, onClose]);
-
-    if (!open) return null;
+    }, [onClose]);
 
     return (
-        <div className="modal-root">
-            {/* The backdrop is a dismissal click target, but the actual
-                accessible affordance is the close button inside the dialog. */}
-            <button
-                type="button"
-                className="modal-backdrop"
-                aria-label="Close dialog"
-                onClick={onClose}
-                tabIndex={-1}
-                data-testid={`${testId}-backdrop`}
-            />
+        <div className="modal-backdrop" data-testid="modal-backdrop" onClick={onClose}>
             <div
-                ref={cardRef}
-                className={`modal-card ${wide ? "modal-card-wide" : ""}`}
+                className="modal"
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby={`${testId}-title`}
-                data-testid={testId}
+                aria-label={title}
+                ref={dialogRef}
+                onClick={(event) => event.stopPropagation()}
             >
                 <header className="modal-header">
-                    <h3 id={`${testId}-title`}>{title}</h3>
+                    <h2>{title}</h2>
                     <button
                         type="button"
-                        className="modal-close"
-                        onClick={onClose}
+                        className="button button-ghost button-sm"
                         aria-label="Close dialog"
-                        data-modal-close
-                        data-testid={`${testId}-close`}
+                        onClick={onClose}
                     >
-                        ×
+                        ✕
                     </button>
                 </header>
                 <div className="modal-body">{children}</div>
-                {footer && <footer className="modal-footer">{footer}</footer>}
+                {footer ? <footer className="modal-footer">{footer}</footer> : null}
             </div>
         </div>
     );

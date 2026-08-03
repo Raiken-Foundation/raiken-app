@@ -5,9 +5,10 @@ import "./upstream-warnings";
 import path from "node:path";
 import { getRaikenVersion } from "@raiken/shared";
 import chalk from "chalk";
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Help } from "commander";
 import dotenv from "dotenv";
 import { CLI_EXIT, exitUsage, handleCliError } from "./errors";
+import { renderMainHelp } from "./help-text";
 import { cliExit } from "./repl/exit";
 
 // Load .env from the current working directory (where the user runs raiken).
@@ -88,7 +89,8 @@ async function checkApiKey(): Promise<void> {
 const program = new Command();
 program
     .name("raiken")
-    .description("AI QA Agent for Developers")
+    .usage("[command] [options]")
+    .description("AI QA agent for Playwright — draft, run, and repair browser tests.")
     .version(getRaikenVersion(), "-v, --version");
 
 // Throw instead of process.exit on argv-shape errors (unknown option, missing
@@ -101,19 +103,14 @@ program.exitOverride();
 // parses, so its flags (--json, --run, …) don't have to be declared globally —
 // declaring them globally collides with the identically-named options on
 // subcommands like `status`/`ci`/`discover`. See runOneShotFromArgv() below.
-program.addHelpText(
-    "after",
-    "\nOne-shot (non-interactive):\n" +
-        '  $ raiken -p "test the login flow"          run one request and stream the answer\n' +
-        '  $ raiken -p "cover checkout" --json         emit a machine-readable JSON result\n' +
-        '  $ raiken -p "..." --stream-json             emit NDJSON events (start/tool/text/done)\n' +
-        '  $ raiken -p "..." --run                     run the generated test (exit code = pass/fail)\n' +
-        "     flags: --json  --stream-json  --run  --no-save  --no-diagnose  --headed  --timeout <ms>  --allow-ungrounded\n" +
-        "\nSessions:\n" +
-        "  $ raiken sessions                           list saved sessions\n" +
-        "  $ raiken resume                             reopen the latest saved session\n" +
-        '  $ raiken resume "login-flow"                reopen a named session\n',
-);
+// Replace commander's flat command list with the task-grouped one. Scoped to
+// the root command by identity so subcommands (`raiken hooks --help`) keep
+// listing their own children normally.
+const defaultHelp = new Help();
+program.configureHelp({
+    visibleCommands: (cmd) => (cmd === program ? [] : defaultHelp.visibleCommands(cmd)),
+});
+program.addHelpText("after", renderMainHelp());
 
 program
     .command("start")
@@ -283,7 +280,7 @@ program
     )
     .option(
         "--domain <host>",
-        "Domain to scope imported cookies / localStorage entries to (e.g. app.example.com)",
+        "Origin to scope imported cookies / localStorage to — a bare host or host:port assumes https; pass a full URL (e.g. --domain http://localhost:5173) for plain-http apps",
     )
     .option(
         "--storage <key=value>",
@@ -299,6 +296,10 @@ program
         "--write-login-script",
         "Write .raiken/login.ts from the last observed login form and point auth.customLoginScript at it",
         false,
+    )
+    .option(
+        "--no-discover",
+        "Save the session without crawling the app behind it (post-login drafts stay unverified)",
     )
     .action(async (options) => {
         try {
@@ -448,6 +449,12 @@ program
     .option(
         "--fix-config",
         "Widen a restrictive Playwright testMatch when it would block the draft",
+        false,
+    )
+    .option("--force", "Overwrite an existing spec at the output path instead of refusing", false)
+    .option(
+        "--verify",
+        "Run the draft and drive the verified repair loop until it passes (or honestly fails)",
         false,
     )
     .option("--json", "Emit the result as JSON", false)
@@ -636,6 +643,11 @@ program
         false,
     )
     .option("--fix", "After a failure, run the AI repair flow (diff + confirm)", false)
+    .option(
+        "--allow-unverified",
+        "Run specs carrying the @raiken-unverified marker (default: refuse, exit 1)",
+        false,
+    )
     .action(async (file, options) => {
         try {
             const { testCommand } = await import("./commands/test");

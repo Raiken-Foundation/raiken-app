@@ -21,8 +21,8 @@ import { loadSiteKnowledge } from "../site-discovery/knowledge-loader";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
 import { readPlaywrightBaseURL } from "../testing/playwright-config";
 import type { TemplateSelector } from "../types";
-import { buildNavigationFlows, type CoverFlow } from "./flows";
 import { loadRecordedCoverFlows, persistCoverFlows } from "./flow-store";
+import { buildNavigationFlows, type CoverFlow } from "./flows";
 
 /** Observed login form persisted by interruption detection / discovery. */
 export interface AuthLoginEvidence {
@@ -49,6 +49,13 @@ export interface CoverEvidence {
     authLogin: AuthLoginEvidence | null;
     /** True when a reusable Playwright storageState exists for this project. */
     hasStorageState: boolean;
+    /**
+     * True when at least one captured page was crawled with a session loaded.
+     * `hasStorageState` only says somebody logged in once; this says the
+     * signed-in application was actually looked at, which is what a post-login
+     * draft needs in order to assert real UI.
+     */
+    hasAuthenticatedKnowledge: boolean;
     /**
      * Short multi-step navigation chains from verified discovery links,
      * ranked for the scenario. Empty when the link graph is thin.
@@ -170,6 +177,7 @@ export async function gatherCoverEvidence(
         knownSelectors: [],
         authLogin: null,
         hasStorageState: Boolean(resolveAuthStorageStateRelativePath(projectPath)),
+        hasAuthenticatedKnowledge: false,
         flows: [],
     };
 
@@ -184,6 +192,7 @@ export async function gatherCoverEvidence(
     try {
         const discovery = new DiscoveryQueryService(projectPath);
         try {
+            evidence.hasAuthenticatedKnowledge = discovery.getStats().authenticatedPagesCount > 0;
             const { pages } = discovery.listPages({ limit: 200 });
             evidence.pages = pages
                 .slice(0, MAX_PAGES)
@@ -215,11 +224,7 @@ export async function gatherCoverEvidence(
             const formsByUrl = new Map(
                 knowledge.routes.map((route) => [route.url, route.forms] as const),
             );
-            evidence.flows = buildNavigationFlows(
-                knowledge.verifiedPaths,
-                description,
-                formsByUrl,
-            );
+            evidence.flows = buildNavigationFlows(knowledge.verifiedPaths, description, formsByUrl);
             if (evidence.flows.length > 0) {
                 persistCoverFlows(projectPath, evidence.flows, "discovery");
             }

@@ -1,28 +1,37 @@
-// Domain types for the playground project tracker.
-//
-// The shape of these types is deliberately verbose so the code graph has
-// useful symbols for `raiken cover` and `raiken trace` to resolve to.
+/**
+ * Domain types for the Orbit project suite — the raiken dogfood fixture.
+ * Everything is deterministic (fixed ids, fixed timestamps) so E2E tests and
+ * discovery behave identically on every run.
+ */
 
-export type Role = "admin" | "member";
+export type Role = "admin" | "member" | "viewer";
 
 export interface User {
     id: string;
     username: string;
-    email: string;
+    displayName: string;
     role: Role;
-    avatarColor: string;
+    email: string;
+    /** Fixed anchor so "3 days ago" style rendering stays deterministic. */
+    joinedAt: string;
 }
 
-export type ProjectStatus = "active" | "archived" | "on_hold";
+export interface Session {
+    user: User;
+    /** Fixed for determinism; the login flow writes this to localStorage. */
+    issuedAt: string;
+}
+
+export type ProjectStatus = "active" | "completed" | "archived";
 
 export interface Project {
     id: string;
-    name: string;
     slug: string;
+    name: string;
     description: string;
     status: ProjectStatus;
     ownerId: string;
-    memberIds: string[];
+    teamIds: string[];
     createdAt: string;
     updatedAt: string;
 }
@@ -38,27 +47,8 @@ export interface Task {
     status: TaskStatus;
     priority: TaskPriority;
     assigneeId: string | null;
-    dueDate: string | null;
     createdAt: string;
     updatedAt: string;
-}
-
-export type ActivityKind =
-    | "project_created"
-    | "task_created"
-    | "task_status_changed"
-    | "task_assigned"
-    | "comment_added"
-    | "member_added"
-    | "member_removed";
-
-export interface ActivityEntry {
-    id: string;
-    projectId: string;
-    actorId: string;
-    kind: ActivityKind;
-    summary: string;
-    timestamp: string;
 }
 
 export interface Comment {
@@ -69,16 +59,24 @@ export interface Comment {
     createdAt: string;
 }
 
-export interface Pagination<T> {
-    items: T[];
-    total: number;
-    page: number;
-    pageSize: number;
+export interface ActivityEntry {
+    id: string;
+    actorId: string;
+    projectId: string | null;
+    message: string;
+    createdAt: string;
 }
 
-export type ContactMessage = {
-    name: string;
-    email: string;
-    subject: string;
-    message: string;
-};
+export interface ProjectStats {
+    projects: number;
+    activeProjects: number;
+    openTasks: number;
+    overdueTasks: number;
+}
+
+export interface ProjectTaskCounts {
+    todo: number;
+    in_progress: number;
+    review: number;
+    done: number;
+}

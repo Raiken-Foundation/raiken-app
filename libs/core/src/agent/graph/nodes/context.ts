@@ -36,6 +36,54 @@ import type { AgentNodeDeps } from "./types";
 const PAGE_SUMMARIES_MAX_CHARS = 3000;
 
 /**
+ * True when the user's request is about viewing/interacting with a live page
+ * rather than code — the signal that answering from the real DOM matters.
+ * Requires a browse verb AND a page-ish noun so "explain the auth flow in
+ * code" doesn't spin up a browser.
+ */
+function looksLikeLivePageQuestion(prompt: string): boolean {
+    return (
+        /\b(open|go to|navigate to|visit|load|browse|look at|check out|open up)\b/i.test(prompt) &&
+        /(page|app|site|url|screen|view|home|dashboard|profile|settings|login|sign[- ]?in|landing|route|tab|listing|detail)/i.test(
+            prompt,
+        )
+    );
+}
+
+/**
+ * Resolve the URL a live-page question should open: an explicit target first,
+ * then the Playwright baseURL, then the app origin inferred from discovery.
+ */
+async function resolveLiveBrowseUrl(
+    projectPath: string,
+    targetUrl: string | null,
+): Promise<string | null> {
+    if (targetUrl && /^https?:\/\//i.test(targetUrl)) return targetUrl;
+    if (targetUrl) {
+        try {
+            const { getAppOrigin } = await import("./auth-entry");
+            const origin = await getAppOrigin(projectPath);
+            if (origin) return new URL(targetUrl, origin).toString();
+        } catch {
+            /* fall through to baseURL */
+        }
+    }
+    try {
+        const { readPlaywrightBaseURL } = await import("../../../testing/playwright-config");
+        const baseURL = await readPlaywrightBaseURL(projectPath);
+        if (baseURL) return baseURL;
+    } catch {
+        /* no config */
+    }
+    try {
+        const { getAppOrigin } = await import("./auth-entry");
+        return await getAppOrigin(projectPath);
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Render a completed goal-directed action (e.g. "sign out") as a prompt block
  * so both the answer and the generated test reflect the exact path taken:
  * which page, which control, and whether it was performed.
@@ -949,10 +997,36 @@ export const createAnswerQuestionsNode =
             };
         }
 
+        // Live-page questions ("open the about page and tell me the heading")
+        // should answer from the real DOM, not from code files alone. The
+        // classifier can label such requests explain/none (leaving the browser
+        // unopened), so heal here: best-effort navigate + capture when the
+        // prompt implies browsing and no live DOM was captured yet. Failure
+        // degrades to today's code/discovery-only answer.
+        let liveDomSummary: string | null = null;
+        if (!state.domSummary && looksLikeLivePageQuestion(state.userPrompt)) {
+            try {
+                const resolved = await resolveLiveBrowseUrl(projectPath, state.targetUrl);
+                if (resolved) {
+                    const nav = await callTool("navigateTo", { url: resolved });
+                    if (nav.success) {
+                        const captured = await callTool("captureCurrentPage", {});
+                        const summary =
+                            (captured.success &&
+                                (captured.data as { summary?: string } | undefined)?.summary) ||
+                            null;
+                        if (summary) liveDomSummary = summary;
+                    }
+                }
+            } catch {
+                /* live browse is best-effort */
+            }
+        }
+
         const context =
             state.context ||
             (await gatherContext(state.userPrompt, projectPath, state.fileContext));
-        if (context.files.length === 0 && !state.domSummary) {
+        if (context.files.length === 0 && !state.domSummary && !liveDomSummary) {
             return {
                 summary: NO_EXPLORATION_CONTEXT_MESSAGE,
             };
@@ -981,6 +1055,8 @@ export const createAnswerQuestionsNode =
 
         if (state.domSummary) {
             systemPrompt = `${systemPrompt}\n\n[DOM SUMMARY]\n${state.domSummary}`;
+        } else if (liveDomSummary) {
+            systemPrompt = `${systemPrompt}\n\n[DOM SUMMARY]\n${liveDomSummary}`;
         }
 
         const actionBlock = formatActionResult(state);

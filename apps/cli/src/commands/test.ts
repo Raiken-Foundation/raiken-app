@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+    containsUnverifiedMarker,
     createProjectApplication,
     describeTestMatchRemedy,
     isRestrictiveTestMatch,
@@ -30,6 +31,12 @@ interface TestOptions {
     watch?: boolean;
     onlyFlaky?: boolean;
     fix?: boolean;
+    /**
+     * Run specs that carry the `@raiken-unverified` marker (cover stamps them
+     * when a draft has unverified steps). Default: refuse with exit 1 so an
+     * unverified draft can't green-light CI.
+     */
+    allowUnverified?: boolean;
     /** REPL-injected confirm prompt for --fix (inquirer can't run there). */
     confirm?: (message: string) => Promise<boolean>;
 }
@@ -66,6 +73,8 @@ export interface CliRunFailure {
     file?: string;
     line?: number;
     durationMs?: number;
+    /** The failure's error message (includes Playwright's locator call log). */
+    error?: string;
 }
 
 export interface CliRunSummary {
@@ -80,7 +89,7 @@ export interface CliRunSummary {
     error?: string;
 }
 
-const ERROR_LINE_LIMIT = 12;
+const ERROR_LINE_LIMIT = 30;
 const FAILURE_LIST_LIMIT = 10;
 
 /**
@@ -124,6 +133,12 @@ export function summarizeRunForCli(
             ...(t.error?.location?.file ? { file: t.error.location.file } : {}),
             ...(t.error?.location?.line ? { line: t.error.location.line } : {}),
             ...(typeof t.duration === "number" ? { durationMs: t.duration } : {}),
+            // Playwright's message carries the locator call log after the
+            // summary lines; keep enough of it for scripts to diagnose
+            // without re-running raw.
+            ...(t.error?.message?.trim()
+                ? { error: truncateLines(t.error.message.trim(), ERROR_LINE_LIMIT) }
+                : {}),
         }));
 
     const timeSeconds = parsedRun?.summary?.timeSeconds;
@@ -231,6 +246,30 @@ export async function testCommand(file: string | undefined, options: TestOptions
     }
 
     const { input } = await buildRunInput(projectPath, file, options, flags);
+
+    // Refuse to run unverified drafts: cover stamps `@raiken-unverified` on
+    // grounding-driven reviews, and such a spec must not be allowed to pass
+    // silently (a vacuous green). `--allow-unverified` opts out.
+    if (!options.allowUnverified) {
+        const unverified = await findUnverifiedSpecs(projectPath, file, input);
+        if (unverified.length > 0) {
+            const message =
+                `Refusing to run ${unverified.length === 1 ? "an unverified draft" : `${unverified.length} unverified drafts`}: ` +
+                unverified.map((spec) => `${spec} (@raiken-unverified)`).join(", ") +
+                ". These specs assert steps no captured page, source markup, or saved session " +
+                "proves. Ground them (`raiken cover` after `raiken auth` / `raiken discover`), " +
+                "review, and remove the marker — or pass --allow-unverified to run anyway.";
+            if (options.json) {
+                process.stdout.write(
+                    `${JSON.stringify({ success: false, unverified, error: message }, null, 2)}\n`,
+                );
+            } else {
+                console.log(chalk.red(`  ✗ ${message}`));
+            }
+            cliExit(1);
+        }
+    }
+
     const { code, result } = await executeRun(projectPath, input, options);
     if (!options.fix || code === 0) cliExit(code);
 
@@ -243,7 +282,9 @@ export async function testCommand(file: string | undefined, options: TestOptions
         )
     ) {
         process.stderr.write(
-            dim("  --fix: nothing was collected, so there is no spec to repair — fix the config first.\n"),
+            dim(
+                "  --fix: nothing was collected, so there is no spec to repair — fix the config first.\n",
+            ),
         );
         cliExit(code);
     }
@@ -382,6 +423,45 @@ async function buildRunInput(
         cliExit(0);
     }
     return { input: { ...input, testFiles: partition.included } };
+}
+
+/**
+ * Specs the upcoming run would execute that carry the `@raiken-unverified`
+ * marker. Scans exactly the files the run will touch: the explicit argument,
+ * the quarantine-filtered set, or the whole test directory otherwise.
+ */
+export async function findUnverifiedSpecs(
+    projectPath: string,
+    file: string | undefined,
+    input: TestExecutionInput,
+): Promise<string[]> {
+    const targets: string[] = [];
+    if (file) {
+        targets.push(path.resolve(projectPath, file));
+    } else if (input.testFiles && input.testFiles.length > 0) {
+        targets.push(
+            ...input.testFiles.map((spec) =>
+                path.isAbsolute(spec) ? spec : path.resolve(projectPath, spec),
+            ),
+        );
+    } else {
+        const app = createProjectApplication(projectPath);
+        const { files } = await app.testing.listTestFiles();
+        targets.push(...files.map((spec) => path.resolve(projectPath, spec.path)));
+    }
+
+    const unverified: string[] = [];
+    for (const target of targets) {
+        try {
+            const content = await fs.promises.readFile(target, "utf-8");
+            if (containsUnverifiedMarker(content)) {
+                unverified.push(path.relative(projectPath, target));
+            }
+        } catch {
+            // An unreadable spec is a Playwright problem, not a marker problem.
+        }
+    }
+    return unverified;
 }
 
 /** Execute one run, print the human or JSON summary, return code + raw result. */

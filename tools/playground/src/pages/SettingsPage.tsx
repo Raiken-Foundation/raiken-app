@@ -1,123 +1,111 @@
-import { useEffect, useId, useState } from "react";
-import { resetStore } from "../api";
-import ConfirmDialog from "../components/ConfirmDialog";
+import { useEffect, useState } from "react";
+import * as api from "../api";
+import { Skeleton } from "../components/Skeleton";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useAuth } from "../contexts/AuthContext";
 import { useToast } from "../contexts/ToastContext";
 
-const THEME_KEY = "playground.theme";
-
-type Theme = "light" | "dark";
-
-function readTheme(): Theme {
-    if (typeof window === "undefined") return "light";
-    try {
-        return (window.localStorage.getItem(THEME_KEY) as Theme) ?? "light";
-    } catch {
-        return "light";
-    }
-}
-
-export default function SettingsPage() {
-    const { user, logout } = useAuth();
+export function SettingsPage() {
+    const { user, can } = useAuth();
     const { push } = useToast();
-    const [theme, setTheme] = useState<Theme>(readTheme);
-    const [notifications, setNotifications] = useState(true);
-    const [confirmReset, setConfirmReset] = useState(false);
-    const themeId = useId();
-    const notifyId = useId();
+    const [activityCount, setActivityCount] = useState<number | null>(null);
+    const [clearing, setClearing] = useState(false);
+    const [resetting, setResetting] = useState(false);
 
     useEffect(() => {
-        document.documentElement.dataset.theme = theme;
-        try {
-            window.localStorage.setItem(THEME_KEY, theme);
-        } catch {
-            // ignore
-        }
-    }, [theme]);
+        void api.listActivity().then((entries) => setActivityCount(entries.length));
+    }, []);
 
-    const handleReset = () => {
-        resetStore();
-        push("success", "Mock data reset");
-        setConfirmReset(false);
+    const handleClearActivity = async () => {
+        try {
+            await api.clearActivity(user!);
+            push("success", "Activity feed cleared");
+            setActivityCount(0);
+            setClearing(false);
+        } catch (err) {
+            push("error", err instanceof Error ? err.message : "Could not clear the feed.");
+            setClearing(false);
+        }
+    };
+
+    const handleReseed = async () => {
+        try {
+            await api.reseedFixture(user!);
+            push("success", "Fixture reset to the seed data");
+            setResetting(false);
+        } catch (err) {
+            push("error", err instanceof Error ? err.message : "Could not reset the fixture.");
+            setResetting(false);
+        }
     };
 
     return (
-        <div className="page" data-testid="settings-page">
+        <main className="page" data-testid="settings-page">
             <header className="page-header">
-                <div>
-                    <h1>Settings</h1>
-                    <p className="page-subtitle">
-                        Tune your experience. Preferences are scoped to this browser.
-                    </p>
-                </div>
+                <h1>Settings</h1>
             </header>
-
-            <section className="card" data-testid="settings-preferences">
-                <h3>Preferences</h3>
-                <div className="form-group">
-                    <label htmlFor={themeId}>Theme</label>
-                    <select
-                        id={themeId}
-                        value={theme}
-                        onChange={(e) => setTheme(e.target.value as Theme)}
-                        data-testid="theme-select"
-                    >
-                        <option value="light">Light</option>
-                        <option value="dark">Dark</option>
-                    </select>
-                </div>
-                <div className="form-group form-group-inline">
-                    <input
-                        id={notifyId}
-                        type="checkbox"
-                        checked={notifications}
-                        onChange={(e) => setNotifications(e.target.checked)}
-                        data-testid="notifications-toggle"
-                    />
-                    <label htmlFor={notifyId}>Email me about activity in my projects</label>
-                </div>
+            <section className="card settings-section">
+                <h2>Workspace</h2>
+                <p className="muted">Signed in as {user?.displayName} ({user?.role}).</p>
+                <dl className="settings-list">
+                    <dt>Activity feed</dt>
+                    <dd>
+                        {activityCount === null ? (
+                            <Skeleton lines={1} />
+                        ) : (
+                            <span data-testid="activity-count">
+                                {activityCount} entr{activityCount === 1 ? "y" : "ies"}
+                            </span>
+                        )}{" "}
+                        {can("manage") ? (
+                            <button
+                                type="button"
+                                className="button button-danger-outline button-sm"
+                                data-testid="clear-activity"
+                                onClick={() => setClearing(true)}
+                            >
+                                Clear feed
+                            </button>
+                        ) : null}
+                    </dd>
+                </dl>
             </section>
-
-            <section className="card card-danger" data-testid="settings-danger">
-                <h3>Danger zone</h3>
+            <section className="card settings-section">
+                <h2>Fixture controls</h2>
                 <p className="muted">
-                    Mock data lives in memory only. Resetting wipes any tasks, projects and comments
-                    you created during this session.
+                    This is a demo app — admins can reset the seeded data at any time.
                 </p>
-                <div className="settings-danger-actions">
+                {can("manage") ? (
                     <button
                         type="button"
-                        className="btn btn-danger"
-                        onClick={() => setConfirmReset(true)}
-                        data-testid="reset-data"
+                        className="button button-ghost"
+                        data-testid="reseed-fixture"
+                        onClick={() => setResetting(true)}
                     >
-                        Reset mock data
+                        Reset fixture to seed data
                     </button>
-                    {user && (
-                        <button
-                            type="button"
-                            className="btn btn-secondary"
-                            onClick={() => {
-                                logout();
-                                push("info", "Signed out");
-                            }}
-                            data-testid="settings-logout"
-                        >
-                            Sign out
-                        </button>
-                    )}
-                </div>
+                ) : null}
             </section>
 
-            <ConfirmDialog
-                open={confirmReset}
-                title="Reset mock data?"
-                message="This will restore the default seed data. Anything you've created in this session will be lost."
-                confirmLabel="Reset"
-                danger
-                onConfirm={handleReset}
-                onCancel={() => setConfirmReset(false)}
-            />
-        </div>
+            {clearing ? (
+                <ConfirmDialog
+                    title="Clear the activity feed?"
+                    body="All activity entries are removed. New actions still record."
+                    confirmLabel="Clear feed"
+                    onConfirm={() => void handleClearActivity()}
+                    onCancel={() => setClearing(false)}
+                />
+            ) : null}
+
+            {resetting ? (
+                <ConfirmDialog
+                    title="Reset the fixture?"
+                    body="Projects, tasks, comments, and activity return to the original seed data."
+                    confirmLabel="Reset fixture"
+                    onConfirm={() => void handleReseed()}
+                    onCancel={() => setResetting(false)}
+                />
+            ) : null}
+        </main>
     );
 }

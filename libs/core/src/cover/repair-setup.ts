@@ -152,6 +152,193 @@ export function describeReassertedAbsence(locators: string[]): string {
 }
 
 /**
+ * The literal expectations a scenario states: dollar amounts, percentages,
+ * standalone numbers, and quoted phrases. These are ground truth for
+ * verification — a test that passes without asserting them is a false green,
+ * and a "fix" that drops them has adapted the test to a buggy app.
+ */
+export function scenarioExpectedTokens(scenario: string): string[] {
+    const tokens = new Set<string>();
+    const patterns: RegExp[] = [
+        /\$\d+(?:\.\d{2})?/g,
+        /\d+(?:\.\d+)?%/g,
+        /(?:^|[\s,.;])(\d+)(?=$|[\s,.;])/g,
+        /["'`]([^"'`]{2,})["'`]/g,
+        // Identified things: a Title-Case phrase the scenario POINTS AT with
+        // "is/named/called" ("the most expensive product is the Lift Standing
+        // Desk"). Contextual mentions ("add the Pulse Ergonomic Mouse to the
+        // cart") are not assertion targets and must not be required.
+        /(?:is|are|named|called)\s+(?:the\s+)?([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,})/g,
+    ];
+    for (const pattern of patterns) {
+        for (const match of scenario.matchAll(pattern)) {
+            const token = (match[1] ?? match[0]).trim();
+            if (token) tokens.add(token);
+        }
+    }
+    return [...tokens];
+}
+
+/**
+ * Code without comments. A comment saying "$59.00" does not assert anything —
+ * expectation checks must never be satisfied by prose that isn't executed.
+ */
+function stripComments(code: string): string {
+    return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])[ \t]*\/\/[^\n]*/g, "$1");
+}
+
+/** Scenario expectations a body of test code does NOT assert. */
+export function missingScenarioExpectations(code: string, scenario: string): string[] {
+    const executable = stripComments(code);
+    return scenarioExpectedTokens(scenario).filter((token) => !executable.includes(token));
+}
+
+/**
+ * Escalation guidance after a fix dropped an expectation the scenario stated.
+ * The app may be broken — the test must keep asserting what the user asked
+ * for, or it stops being a bug-catcher.
+ */
+export function describeDroppedScenarioExpectation(tokens: string[]): string {
+    return [
+        "[REPAIR FOCUS — the fix dropped an expectation the scenario stated]",
+        `The corrected file no longer asserts: ${tokens.map((t) => `\`${t}\``).join(", ")}.`,
+        "These values came from the user's scenario, not from the page. If the app",
+        "shows something else, the APP is wrong — changing the assertion to match",
+        "the app turns a bug-catching test into a false green.",
+        "Keep the scenario's expectations. Fix only the test's mechanics (selectors,",
+        "waits, navigation). If the app genuinely contradicts the scenario, keep",
+        "the assertion and report the app-side issue in one `// TODO:` line.",
+    ].join("\n");
+}
+
+/**
+ * A locator the failure evidence PROVED resolves on the page. The failure is
+ * how the locator is used (strict-mode ambiguity), not its existence — so the
+ * repair must keep it, never replace it. When Playwright printed unambiguous
+ * alternatives for the same elements (`aka getByTestId(...)`), they are
+ * carried too: switching to one of those is a valid disambiguation, not a
+ * regression.
+ */
+export interface ProvenSelector {
+    /** The locator call as Playwright printed it, e.g. `getByTestId("stat-active")`. */
+    locator: string;
+    /** The bare selector value — the token that must survive any fix. */
+    value: string;
+    /** Unambiguous alternatives Playwright suggested in the same error (`aka …`). */
+    alternatives?: string[];
+}
+
+/**
+ * Locators the run PROVED exist on the page: strict-mode violations, where
+ * Playwright reports `resolved to N elements` with N ≥ 2. The mirror of
+ * {@link extractProvenAbsentLocators} — "resolved to 0 elements" proves
+ * absence; "resolved to 2 elements" proves presence (and ambiguity).
+ */
+export function extractProvenPresentSelectors(failureText: string): ProvenSelector[] {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes by construction
+    const plain = failureText.replace(/\u001b?\[\d{1,2}m/g, "");
+    const found = new Map<string, ProvenSelector>();
+    for (const match of plain.matchAll(
+        /strict mode violation:\s*(.+?)\s+resolved to (\d+) elements?:([\s\S]*?)(?=Error:|strict mode violation:|$)/gi,
+    )) {
+        const count = Number(match[2]);
+        if (!Number.isFinite(count) || count < 2) continue;
+        const locator = (match[1] ?? "").trim();
+        const value = selectorValueOf(locator);
+        if (!value) continue;
+        const alternatives = [...(match[3] ?? "").matchAll(/aka\s+([^\n]+)/g)]
+            .map((alt) => alt[1]?.trim().replace(/\s+$/, ""))
+            .filter((alt): alt is string => !!alt && alt !== locator);
+        if (!found.has(value)) {
+            found.set(value, {
+                locator,
+                value,
+                ...(alternatives.length > 0 ? { alternatives } : {}),
+            });
+        }
+    }
+    return [...found.values()];
+}
+
+/** Pull the bare selector value out of a locator call, e.g. `stat-active` from `getByTestId("stat-active")`. */
+function selectorValueOf(locatorCall: string): string | undefined {
+    const patterns = [
+        /locator\(\s*['"`](.+?)['"`]/,
+        /selector\s+['"`](.+?)['"`]/,
+        /getBy(?:Role|Text|TestId|Label|Placeholder|Title|AltText)\(\s*['"`](.+?)['"`]/,
+        /\[data-testid=['"`](.+?)['"`]\]/,
+    ];
+    for (const pattern of patterns) {
+        const match = locatorCall.match(pattern);
+        if (match?.[1]) return match[1];
+    }
+    return undefined;
+}
+
+/**
+ * Parent-traversal locators (`locator('..')`, `xpath=..`, `xpath=ancestor::*`)
+ * in a candidate fix. They are never stable: the fix breaks whenever the DOM
+ * nests differently, and a text-anchored climb reaches the wrong container
+ * (e.g. the title button instead of the row holding the status control).
+ * Playwright locators compose — target the row/container directly.
+ */
+export function containsParentTraversal(code: string): string[] {
+    const found = new Set<string>();
+    const patterns = [
+        /locator\(\s*['"]\.\.['"]\s*\)/g,
+        /xpath=\s*['"]?\.\.\b/g,
+        /xpath=\s*['"]?ancestor::/gi,
+    ];
+    for (const pattern of patterns) {
+        for (const match of code.matchAll(pattern)) {
+            found.add(match[0].trim());
+        }
+    }
+    return [...found];
+}
+
+/**
+ * Escalation guidance after a fix used parent traversal. The climb fails on
+ * any nesting difference, and the source context names the real container —
+ * use it directly.
+ */
+export function describeParentTraversal(locators: string[]): string {
+    return [
+        "[REPAIR FOCUS — the fix climbs the DOM with parent traversal]",
+        `The corrected file uses ${locators.map((locator) => `\`${locator}\``).join(", ")}, ` +
+            "which is never stable in Playwright.",
+        "Parent traversal breaks whenever the DOM nests differently, and climbing " +
+            "from a text node lands on the wrong container (a title button, not the " +
+            "row that holds the status control).",
+        "Target the container directly instead: use the row/card test id or role from " +
+            "the source context above (e.g. a `task-row-*` test id), then locate the " +
+            "control inside it.",
+    ].join("\n");
+}
+
+/**
+ * Escalation guidance after a fix removed a selector the run proved present.
+ * Models misread a strict-mode violation as "wrong locator" and replace the
+ * proven element with an invented one — which then fails for the opposite
+ * reason (zero matches).
+ */
+export function describeRegressedSelector(selectors: ProvenSelector[]): string {
+    return [
+        "[PROVEN ON PAGE — your previous fix removed a selector the failure evidence proved exists]",
+        `The failure evidence proved these locators resolve on the page (each matched ` +
+            `multiple elements — strict-mode ambiguity, not absence): ${selectors
+                .map((selector) => `\`${selector.locator}\``)
+                .join(", ")}.`,
+        "The element EXISTS — the failure is that the locator is ambiguous, not that it",
+        "is wrong.",
+        "Keep every one of these locators in the corrected file. Resolve the ambiguity",
+        "with .first(), .nth(i), a scoped parent locator, or a more specific assertion.",
+        "Do NOT replace them with invented locators and do NOT delete the assertion",
+        "that uses them.",
+    ].join("\n");
+}
+
+/**
  * Apply auth injection + relative-goto rewrites when evidence supports them.
  * Unknown origins (not in `knownOrigins`) that look like absolute navigations
  * are rewritten to `/` + pathname only when the origin is the project's

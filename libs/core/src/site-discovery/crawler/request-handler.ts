@@ -299,9 +299,18 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
 
             const now = Date.now();
             const existingPage = deps.siteDb.getPage(saveUrl);
+            // The loaded state, not the configured path: an expired or
+            // unreadable auth-state.json leaves this null, and the pages we
+            // capture with it really are signed-out.
+            const capturedAuthenticated = Boolean(deps.playwrightStorageState);
 
             if (existingPage) {
-                deps.siteDb.updatePageContent(saveUrl, { title, snapshotJson, formsJson });
+                deps.siteDb.updatePageContent(saveUrl, {
+                    title,
+                    snapshotJson,
+                    formsJson,
+                    capturedAuthenticated,
+                });
             } else {
                 deps.siteDb.savePage({
                     projectPath: deps.options.projectPath,
@@ -316,6 +325,7 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                     discoveredAt: now,
                     lastVisitedAt: now,
                     visitCount: 1,
+                    capturedAuthenticated,
                 });
             }
 

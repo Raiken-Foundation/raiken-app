@@ -1,42 +1,33 @@
-import type { ReactNode } from "react";
-
-export interface TabDefinition {
+export interface Tab {
     id: string;
     label: string;
-    badge?: string | number;
+    badge?: number;
 }
 
-interface TabsProps {
-    tabs: TabDefinition[];
-    activeId: string;
-    onSelect: (id: string) => void;
-    children: ReactNode;
+export interface TabsProps {
+    tabs: Tab[];
+    active: string;
+    onChange: (id: string) => void;
 }
 
-export default function Tabs({ tabs, activeId, onSelect, children }: TabsProps) {
+export function Tabs({ tabs, active, onChange }: TabsProps) {
     return (
-        <div className="tabs" data-testid="tabs">
-            <div className="tab-list" role="tablist">
-                {tabs.map((tab) => (
-                    <button
-                        key={tab.id}
-                        type="button"
-                        role="tab"
-                        aria-selected={activeId === tab.id}
-                        className={`tab ${activeId === tab.id ? "tab-active" : ""}`}
-                        onClick={() => onSelect(tab.id)}
-                        data-testid={`tab-${tab.id}`}
-                    >
-                        <span>{tab.label}</span>
-                        {tab.badge !== undefined && tab.badge !== "" && (
-                            <span className="tab-badge">{tab.badge}</span>
-                        )}
-                    </button>
-                ))}
-            </div>
-            <div className="tab-panel" role="tabpanel" data-testid={`tab-panel-${activeId}`}>
-                {children}
-            </div>
+        <div className="tabs" role="tablist">
+            {tabs.map((tab) => (
+                <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab.id === active}
+                    className={`tab ${tab.id === active ? "tab-active" : ""}`}
+                    onClick={() => onChange(tab.id)}
+                >
+                    {tab.label}
+                    {tab.badge !== undefined && tab.badge > 0 ? (
+                        <span className="tab-badge">{tab.badge}</span>
+                    ) : null}
+                </button>
+            ))}
         </div>
     );
 }

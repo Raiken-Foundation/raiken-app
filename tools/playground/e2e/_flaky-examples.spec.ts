@@ -15,14 +15,14 @@ test.describe("flaky examples (intentional)", () => {
     test("uses page.waitForTimeout", async ({ page }) => {
         await page.goto("/");
         await page.waitForTimeout(500);
-        await expect(page.getByTestId("home-page")).toBeVisible();
+        await expect(page.getByTestId("landing-page")).toBeVisible();
     });
 
     test("hand-rolled sleep", async ({ page }) => {
         await page.goto("/");
         await sleep(250);
         // await page.goto('/dashboard')
-        await expect(page.getByTestId("home-page")).toBeVisible();
+        await expect(page.getByTestId("landing-page")).toBeVisible();
     });
 
     test("trivial assertion", async () => {

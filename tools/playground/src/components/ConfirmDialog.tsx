@@ -1,54 +1,57 @@
-import Modal from "./Modal";
+import { useState } from "react";
+import { Modal } from "./Modal";
 
-interface ConfirmDialogProps {
-    open: boolean;
+export interface ConfirmDialogProps {
     title: string;
-    message: string;
-    confirmLabel?: string;
-    cancelLabel?: string;
-    danger?: boolean;
-    onConfirm: () => void;
+    body: string;
+    confirmLabel: string;
+    tone?: "danger" | "primary";
+    onConfirm: () => Promise<void> | void;
     onCancel: () => void;
 }
 
-export default function ConfirmDialog({
-    open,
+/** Destructive-action gate: every archive/remove in the fixture goes through this. */
+export function ConfirmDialog({
     title,
-    message,
-    confirmLabel = "Confirm",
-    cancelLabel = "Cancel",
-    danger = false,
+    body,
+    confirmLabel,
+    tone = "danger",
     onConfirm,
     onCancel,
 }: ConfirmDialogProps) {
+    const [busy, setBusy] = useState(false);
+
+    const handleConfirm = async () => {
+        setBusy(true);
+        try {
+            await onConfirm();
+        } finally {
+            setBusy(false);
+        }
+    };
+
     return (
         <Modal
-            open={open}
             title={title}
             onClose={onCancel}
-            testId="confirm-dialog"
             footer={
                 <>
-                    <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={onCancel}
-                        data-testid="confirm-cancel"
-                    >
-                        {cancelLabel}
+                    <button type="button" className="button button-ghost" onClick={onCancel}>
+                        Cancel
                     </button>
                     <button
                         type="button"
-                        className={`btn ${danger ? "btn-danger" : "btn-primary"}`}
-                        onClick={onConfirm}
-                        data-testid="confirm-accept"
+                        className={`button ${tone === "danger" ? "button-danger" : "button-primary"}`}
+                        data-testid="confirm-dialog-confirm"
+                        disabled={busy}
+                        onClick={handleConfirm}
                     >
                         {confirmLabel}
                     </button>
                 </>
             }
         >
-            <p className="confirm-message">{message}</p>
+            <p className="muted">{body}</p>
         </Modal>
     );
 }

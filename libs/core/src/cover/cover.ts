@@ -18,15 +18,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-    createLangChainModel,
+    callWithTokenBudget,
+    extractMessageContent,
     getProvider,
-    LLM_REQUEST_TIMEOUT_MS,
+    isEmptyLengthResponse,
     type ResolvedAIConfig,
 } from "../agent/ai-providers";
 import type { GroundingReport } from "../agent/grounding";
 import { loadTestDirectory } from "../config";
+import { authLivenessBlocks, probeAuthState } from "../config/auth-liveness";
 import { resolveAuthStorageStateRelativePath } from "../config/auth-state";
 import { CodeGraphDB } from "../database/db";
+import { validationError } from "../errors";
 import { syncCurrentTicket } from "../integrations/sync";
 import type { IntegrationConfig, TicketInfo } from "../integrations/types";
 import { readPlaywrightBaseURL } from "../testing/playwright-config";
@@ -36,17 +39,20 @@ import {
     resolveGotoPathsAgainstBaseUrl,
     rewriteAbsoluteGotosToRelative,
 } from "../testing/spec-normalize";
-import { assessGeneratedDraft } from "./assess-draft";
+import { assessGeneratedDraft, UNVERIFIED_MARKER } from "./assess-draft";
 import { suggestCollectedOutputPath } from "./draft-quality";
-import { type CoverEvidence, formatAuthLoginEvidence, gatherCoverEvidence } from "./evidence";
+import {
+    type CoverEvidence,
+    formatAuthLoginEvidence,
+    gatherCoverEvidence,
+    looksLikeAuthScenario,
+} from "./evidence";
 import { formatNavigationFlows } from "./flows";
 import { extractAcs } from "./intent-coverage";
 import { ensureSiteKnowledge } from "./knowledge-gate";
-import { authLivenessBlocks, probeAuthState } from "../config/auth-liveness";
-import { validationError } from "../errors";
 
 /** Re-export for callers that historically imported from cover.ts. */
-export { assessTodoMarkers } from "./assess-draft";
+export { assessTodoMarkers, containsUnverifiedMarker } from "./assess-draft";
 export { extractAcs } from "./intent-coverage";
 
 export type CoverTargetKind = "ac" | "symbol" | "free";
@@ -81,6 +87,13 @@ export interface CoverOptions {
      * the filename.
      */
     fixConfig?: boolean;
+    /**
+     * Allow overwriting an existing file at the resolved output path.
+     * Without this, cover refuses to clobber a spec that already has
+     * content (defaults can steer a draft onto the one file a narrow
+     * testMatch collects — silently replacing real tests is data loss).
+     */
+    force?: boolean;
     /** Progress lines (e.g. auto-discover started) for CLI stderr. */
     onProgress?: (message: string) => void;
     onEvent?: (event: CoverEvent) => void;
@@ -143,6 +156,10 @@ export interface CoverResult {
 
 const AC_PATTERN = /^AC-?(\d+)$/i;
 
+const UNVERIFIED_MARKER_LINE =
+    `// ${UNVERIFIED_MARKER} — drafted by raiken cover with unverified steps. ` +
+    "Ground it (raiken auth / raiken discover), review, and remove this marker before running.";
+
 export async function runCover(options: CoverOptions): Promise<CoverResult> {
     const projectPath = path.resolve(options.projectPath);
     const emit = options.onEvent ?? (() => {});
@@ -161,10 +178,32 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
 
     // ---- 3. Determine output path
     const testDir = options.testDirectory ?? loadTestDirectory(projectPath);
+    const steeredReasons: string[] = [];
+
+    // When --fix-config is passed, widen a narrow testMatch BEFORE steering.
+    // Steering moves the draft onto the single collected basename — which
+    // already contains a real test — and the refusal that follows (step 6)
+    // tells the user to pass --fix-config, the exact flag they already did.
+    // Widening first lets the draft land at its own default filename.
+    if (options.fixConfig) {
+        const { applyWidenTestMatch } = await import("../doctor/fixes");
+        const { isRestrictiveTestMatch } = await import("./draft-quality");
+        const { readPlaywrightTestMatch } = await import("../testing/playwright-config");
+        const patterns = await readPlaywrightTestMatch(projectPath).catch(() => null);
+        if (isRestrictiveTestMatch(patterns)) {
+            const fix = await applyWidenTestMatch(projectPath);
+            options.onProgress?.(fix.message);
+            if (fix.applied) {
+                steeredReasons.push(
+                    'widened playwright testMatch to ["**/*.spec.ts"] so this draft is collected',
+                );
+            }
+        }
+    }
+
     let outputPath = options.outputPath
         ? path.resolve(projectPath, options.outputPath)
         : path.resolve(projectPath, testDir, defaultFileName(kind, options.target));
-    const steeredReasons: string[] = [];
     // Default (invented) names often miss a project's narrow testMatch — steer
     // to the single collected basename when that is unambiguous. Explicit
     // --output keeps the caller's path and the hard block below.
@@ -183,6 +222,7 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     const knowledge = await ensureSiteKnowledge({
         projectPath,
         allowUngrounded: options.allowUngrounded === true,
+        needsAuthenticatedKnowledge: looksLikeAuthScenario(resolved.description),
         onProgress: options.onProgress,
     });
     emit({
@@ -209,6 +249,12 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     // ---- 5. Build prompt + call LLM (or scaffold on --dry-run)
     let body: string;
     let usedModel: string | undefined;
+    // The app's actual code, gathered the same way the interactive agent does
+    // (keyword index + entry points). Text ARIA snapshots alone make the model
+    // guess DOM structure — tabs, pagination, dialogs, option values — and
+    // guesses are what fail in the browser. Best-effort: no code graph → the
+    // prompt falls back to evidence only.
+    const sourceContext = await resolveSourceContext(projectPath, resolved);
     // Always gather — dry-run still needs auth/cold-start gates against real
     // knowledge, and the gatherers degrade to empty when nothing is on disk.
     const evidence = await gatherCoverEvidence(projectPath, resolved.description);
@@ -224,7 +270,7 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
         body = buildScaffold(resolved.description, resolved.sourceFiles);
     } else {
         emit({ type: "llm_started" });
-        const result = await callLLM(options.ai, resolved, evidence);
+        const result = await callLLM(options.ai, resolved, evidence, sourceContext);
         body = result.body;
         usedModel = result.model;
         emit({ type: "llm_finished", bytes: Buffer.byteLength(body, "utf-8") });
@@ -284,7 +330,33 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
 
     // ---- 6. Write the file (even when blocked — reviewers need the artifact,
     // but the CLI exits non-zero so CI cannot treat it as success).
+
+    // Grounding-driven review means the draft asserts things no captured page,
+    // source markup, or saved session proves. Stamp the marker so `raiken
+    // test` refuses to run it as if it were verified — an unverified draft
+    // must not green-light a pipeline.
+    const markerStamped =
+        assessed.needsReview && assessed.groundingDriven && !body.includes(UNVERIFIED_MARKER);
+    if (markerStamped) {
+        body = `${UNVERIFIED_MARKER_LINE}\n${body}`;
+        assessed.reviewReasons.push(
+            `stamped ${UNVERIFIED_MARKER} — raiken test refuses this draft until its unverified ` +
+                "steps are grounded (re-run `raiken auth`/`raiken discover`, review, then remove " +
+                "the marker; or pass --allow-unverified to run it anyway)",
+        );
+    }
+
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf-8") : null;
+    if (existing !== null && existing !== body && options.force !== true) {
+        throw validationError(
+            `Refusing to overwrite ${path.relative(projectPath, outputPath)} — it already ` +
+                "contains a test. Pass `--output <path>` to choose a different file, " +
+                "`--fix-config` (or `raiken doctor --fix`) to widen a narrow testMatch, " +
+                "or `--force` to replace the existing content.",
+            { code: "INVALID_INPUT" },
+        );
+    }
     fs.writeFileSync(outputPath, body, "utf-8");
     emit({ type: "file_written", outputPath });
 
@@ -335,6 +407,33 @@ async function resolveTarget(
         return resolveSymbol(options.target, projectPath, emit);
     }
     return { description: options.target.trim(), sourceFiles: [] };
+}
+
+/**
+ * The app's actual code as prompt context — the same `gatherContext` the
+ * interactive agent repairs with. Explicit targets (AC/symbol) already name
+ * source files; free-text scenarios get a keyword-index search. Returns a
+ * formatted snippet block, or null when there is no code graph.
+ */
+async function resolveSourceContext(
+    projectPath: string,
+    resolved: ResolvedTarget,
+): Promise<string | null> {
+    try {
+        const { gatherContext } = await import("../agent/agent");
+        const context = await gatherContext(
+            resolved.description,
+            projectPath,
+            resolved.sourceFiles.length > 0 ? resolved.sourceFiles : undefined,
+        );
+        if (context.files.length === 0) return null;
+        return context.files
+            .slice(0, 5)
+            .map((file) => `--- ${file.path} ---\n${file.fullContext.slice(0, 1500)}`)
+            .join("\n\n");
+    } catch {
+        return null;
+    }
 }
 
 async function resolveAc(
@@ -438,31 +537,32 @@ async function callLLM(
     ai: NonNullable<CoverOptions["ai"]>,
     resolved: ResolvedTarget,
     evidence: CoverEvidence,
+    sourceContext: string | null,
 ): Promise<{ body: string; model: string }> {
+    const prompt = buildCoverPrompt(resolved, evidence, sourceContext);
     // One factory owns native-provider versus OpenAI-compatible wiring. This
     // keeps `raiken cover` aligned with chat, organize, and repair instead of
     // silently sending every configured provider through OpenRouter's API.
-    const llm = createLangChainModel({
-        ...ai,
+    // The token budget respects the resolved config (never silently below the
+    // user's maxTokens), and the empty-length signature — a reasoning model
+    // that spent its whole budget thinking — retries once at 2× before the
+    // call gives up with a distinct error.
+    const response = await callWithTokenBudget({
+        ai,
         temperature: 0.4,
-        maxTokens: 1500,
+        invoke: (llm, timeoutMs) => llm.invoke(prompt, { timeout: timeoutMs }),
+        isExhausted: isEmptyLengthResponse,
     });
-
-    const prompt = buildCoverPrompt(resolved, evidence);
-    const response = await llm.invoke(prompt, { timeout: LLM_REQUEST_TIMEOUT_MS });
-    const text =
-        typeof response.content === "string"
-            ? response.content
-            : Array.isArray(response.content)
-              ? response.content
-                    .map((p) => (typeof p === "string" ? p : "text" in p ? p.text : ""))
-                    .join("")
-              : "";
+    const text = extractMessageContent(response);
 
     return { body: stripCodeFences(text), model: ai.model };
 }
 
-function buildCoverPrompt(resolved: ResolvedTarget, evidence: CoverEvidence): string {
+function buildCoverPrompt(
+    resolved: ResolvedTarget,
+    evidence: CoverEvidence,
+    sourceContext: string | null,
+): string {
     const fileList =
         resolved.sourceFiles.length > 0
             ? resolved.sourceFiles.map((f) => `- ${f}`).join("\n")
@@ -477,6 +577,7 @@ ${resolved.description}
 
 [RELATED SOURCE FILES]
 ${fileList}
+${sourceContext ? `\n[SOURCE CONTEXT — the app's actual code. Derive structure, options, and flow from it — do not guess.]\n${sourceContext}\n` : ""}
 ${formatEvidence(evidence)}
 [OUTPUT]
 - Complete .ts file. No markdown fences. No prose.
@@ -496,6 +597,13 @@ ${formatEvidence(evidence)}
   automatically — do not invent a login flow.
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
 - Assertions must be specific and tied to the scenario.
+- getByText matches ONE element's full text. Assert individual values — never
+  one assertion over concatenated text from separate elements.
+- <select> assertions: selectOption takes the option's value or { label };
+  toHaveValue asserts the option's value attribute (usually lowercase).
+- Content behind tabs, pagination, or confirmation dialogs is not visible
+  until you interact with it: switch to the tab, page to the item, confirm the
+  dialog — then assert.
 - Keep the polarity the scenario asked for. "X is visible" becomes toBeVisible(),
   never .not.toBeVisible() / toHaveCount(0) / toBeHidden() just because the
   known context doesn't show X — that turns an unverified check into a false

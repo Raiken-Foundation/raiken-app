@@ -54,6 +54,10 @@ export function hasAuthSession(projectPath: string): boolean {
 function isContentRoute(url: string, appOrigin: string | null): boolean {
     try {
         const u = new URL(url);
+        // about:blank / data: / file: parse fine but are not app pages —
+        // remembering one as the "authenticated entry" would poison every
+        // future run with a URL that can never render the app.
+        if (u.protocol !== "http:" && u.protocol !== "https:") return false;
         if (isAuthHost(u.hostname)) return false;
         if (appOrigin && u.origin !== appOrigin) return false;
         const p = u.pathname.replace(/\/+$/, "");

@@ -1,114 +1,86 @@
-import { type FormEvent, useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { ApiError } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 import { useToast } from "../contexts/ToastContext";
+import { FormField } from "../components/FormField";
 
-interface LocationState {
-    from?: { pathname: string };
-}
-
-export default function LoginPage() {
+export function LoginPage() {
     const { login } = useAuth();
     const { push } = useToast();
     const navigate = useNavigate();
     const location = useLocation();
-
-    const [username, setUsername] = useState("admin");
-    const [password, setPassword] = useState("password");
-    const [submitting, setSubmitting] = useState(false);
+    const [username, setUsername] = useState("");
+    const [password, setPassword] = useState("");
+    const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const submit = async (e: FormEvent) => {
-        e.preventDefault();
+    const from = (location.state as { from?: string } | null)?.from ?? "/dashboard";
+
+    const handleSubmit = async (event: FormEvent) => {
+        event.preventDefault();
         setError(null);
-        setSubmitting(true);
+        if (!username.trim() || !password) {
+            setError("Enter a username and password.");
+            return;
+        }
+        setBusy(true);
         try {
             const user = await login(username, password);
-            push("success", `Welcome back, ${user.username}`);
-            const state = location.state as LocationState | null;
-            const target = state?.from?.pathname ?? "/dashboard";
-            navigate(target, { replace: true });
+            push("success", `Welcome back, ${user.displayName}`);
+            navigate(from, { replace: true });
         } catch (err) {
-            const message =
-                err instanceof ApiError ? err.message : "Something went wrong while signing in.";
-            setError(message);
-            push("error", message);
+            setError(err instanceof Error ? err.message : "Sign in failed.");
         } finally {
-            setSubmitting(false);
+            setBusy(false);
         }
     };
 
     return (
-        <div className="login-page" data-testid="login-page">
-            <div className="login-card">
-                <header className="login-header">
-                    <span className="brand-mark" aria-hidden="true">
-                        ◢◣
-                    </span>
-                    <h2>Atlas Tracker</h2>
-                </header>
-                <p className="login-subtitle">
-                    Sign in to manage projects, tasks and team activity.
+        <main className="page login-page" data-testid="login-page">
+            <div className="card login-card">
+                <h1>Sign in to Orbit</h1>
+                <p className="muted">
+                    Demo accounts: <code>admin</code>, <code>priya</code>, or <code>kai</code> —
+                    password <code>password</code>.
                 </p>
-
-                <form onSubmit={submit} className="login-form" data-testid="login-form" noValidate>
-                    <div className="form-group">
-                        <label htmlFor="login-username">Username</label>
+                <form onSubmit={handleSubmit} noValidate>
+                    <FormField label="Username" htmlFor="username-input">
                         <input
-                            id="login-username"
+                            id="username-input"
+                            className="input"
                             type="text"
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            placeholder="admin"
                             autoComplete="username"
+                            value={username}
                             data-testid="username-input"
-                            required
-                            minLength={3}
+                            onChange={(event) => setUsername(event.target.value)}
                         />
-                    </div>
-
-                    <div className="form-group">
-                        <label htmlFor="login-password">Password</label>
+                    </FormField>
+                    <FormField label="Password" htmlFor="password-input">
                         <input
-                            id="login-password"
+                            id="password-input"
+                            className="input"
                             type="password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            placeholder="At least 4 characters"
                             autoComplete="current-password"
+                            value={password}
                             data-testid="password-input"
-                            required
-                            minLength={4}
+                            onChange={(event) => setPassword(event.target.value)}
                         />
-                    </div>
-
-                    {error && (
-                        <div className="form-error" role="alert" data-testid="login-error">
+                    </FormField>
+                    {error ? (
+                        <p className="form-error" role="alert" data-testid="login-error">
                             {error}
-                        </div>
-                    )}
-
+                        </p>
+                    ) : null}
                     <button
                         type="submit"
-                        className="btn btn-primary btn-full"
-                        disabled={submitting}
+                        className="button button-primary button-block"
+                        disabled={busy}
                         data-testid="login-submit"
                     >
-                        {submitting ? "Signing in…" : "Sign in"}
+                        {busy ? "Signing in…" : "Sign in"}
                     </button>
                 </form>
-
-                <ul className="login-hints" data-testid="login-hints">
-                    <li>
-                        <code>admin</code> · admin role (can create + delete projects)
-                    </li>
-                    <li>
-                        <code>amelia</code>, <code>jordan</code>, <code>priya</code> · member role
-                    </li>
-                    <li>Any other username auto-provisions a member account.</li>
-                </ul>
             </div>
-        </div>
+        </main>
     );
 }

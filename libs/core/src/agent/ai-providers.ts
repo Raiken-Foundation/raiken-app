@@ -33,6 +33,12 @@ export interface ModelCapabilities {
     vision?: boolean;
     /** Accepts `response_format` / structured-output (json_schema) requests. */
     structuredOutput?: boolean;
+    /**
+     * Spends output tokens on internal reasoning before the answer
+     * (o-series, deepseek-reasoner). Reasoning models need a larger token
+     * budget and a longer request timeout than their chat-model siblings.
+     */
+    reasoning?: boolean;
 }
 
 export interface ProviderDefinition {
@@ -128,7 +134,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 name: "o3 mini",
                 description: "Reasoning-oriented model",
                 source: "recommended",
-                capabilities: { vision: false, structuredOutput: true },
+                capabilities: { vision: false, structuredOutput: true, reasoning: true },
             },
         ],
     },
@@ -190,6 +196,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 name: "Gemini 2.5 Pro",
                 description: "Reasoning-oriented Gemini model",
                 source: "recommended",
+                capabilities: { reasoning: true },
             },
             {
                 id: "gemini-2.5-flash",
@@ -273,7 +280,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 name: "DeepSeek Reasoner",
                 description: "Reasoning model for harder planning/debugging",
                 source: "recommended",
-                capabilities: { vision: false, structuredOutput: false },
+                capabilities: { vision: false, structuredOutput: false, reasoning: true },
             },
         ],
     },
@@ -402,6 +409,11 @@ export function modelSupportsVision(provider: AIProviderId, model: string): bool
 
 export function modelSupportsStructuredOutput(provider: AIProviderId, model: string): boolean {
     return getModelCapabilities(provider, model).structuredOutput !== false;
+}
+
+/** True when the model is known to spend output tokens on reasoning. */
+export function modelSupportsReasoning(provider: AIProviderId, model: string): boolean {
+    return getModelCapabilities(provider, model).reasoning === true;
 }
 
 /**
@@ -853,6 +865,48 @@ export function createAIClient(resolved: ResolvedAIConfig): AIClient {
 export const LLM_REQUEST_TIMEOUT_MS = 60_000;
 
 /**
+ * Reasoning models can chew on a prompt for a while before their first output
+ * token; the standard request timeout can cut them off before they ever
+ * answer. Known reasoning models get 2× the standard timeout.
+ */
+export const REASONING_REQUEST_TIMEOUT_MS = 2 * LLM_REQUEST_TIMEOUT_MS;
+
+/**
+ * Minimum output-token budget for drafting calls. A call must never silently
+ * drop below the user's configured maxTokens (the config contract), and it
+ * must never be so small that a heavy draft cannot fit.
+ */
+export const TOKEN_BUDGET_FLOOR = 2000;
+
+/**
+ * Reasoning models spend output tokens on chain-of-thought before the answer
+ * (e.g. ~1700 tokens of thinking plus ~1300 tokens of content for one draft);
+ * give them twice the standard floor so the answer itself fits.
+ */
+export const REASONING_TOKEN_BUDGET_FLOOR = 4000;
+
+/** Per-request timeout for a provider/model pair; reasoning models get more. */
+export function requestTimeoutMs(ai: Pick<ResolvedAIConfig, "provider" | "model">): number {
+    return modelSupportsReasoning(ai.provider, ai.model)
+        ? REASONING_REQUEST_TIMEOUT_MS
+        : LLM_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * The output-token budget for one call: the resolved config, but never below
+ * the drafting floor — reasoning models get a higher floor because they spend
+ * tokens on thinking before the answer.
+ */
+export function resolveTokenBudget(
+    ai: Pick<ResolvedAIConfig, "provider" | "model" | "maxTokens">,
+): number {
+    const floor = modelSupportsReasoning(ai.provider, ai.model)
+        ? REASONING_TOKEN_BUDGET_FLOOR
+        : TOKEN_BUDGET_FLOOR;
+    return Math.max(ai.maxTokens, floor);
+}
+
+/**
  * Bounded retries. LangChain's default is 6 with exponential backoff, which on a
  * rate-limited/5xx provider can stall a single call for minutes. Two keeps us
  * resilient to transient blips without looking hung.
@@ -908,4 +962,82 @@ export function createLangChainModel(resolved: ResolvedAIConfig): BaseChatModel 
                 configuration: { baseURL: resolved.baseURL },
             });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Token-budgeted LLM calls
+// ---------------------------------------------------------------------------
+
+/** Normalize an AI SDK / LangChain content field into plain text. */
+export function extractContentText(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+        return content
+            .map((part) =>
+                typeof part === "string"
+                    ? part
+                    : typeof part === "object" && part !== null && "text" in part
+                      ? String((part as { text: unknown }).text)
+                      : "",
+            )
+            .join("");
+    }
+    return "";
+}
+
+/** Extract the plain text from a model response message (LangChain AIMessage). */
+export function extractMessageContent(response: unknown): string {
+    if (!response || typeof response !== "object") return "";
+    return extractContentText((response as { content?: unknown }).content);
+}
+
+/**
+ * The reasoning-model failure signature: the response is empty and the call
+ * was cut off at the output-token cap (finish_reason length/max_tokens), i.e.
+ * the model spent its whole budget thinking and produced nothing usable.
+ */
+export function isEmptyLengthResponse(response: unknown): boolean {
+    if (!response || typeof response !== "object") return false;
+    if (extractMessageContent(response).trim().length > 0) return false;
+    const meta =
+        (response as { response_metadata?: Record<string, unknown> }).response_metadata ?? {};
+    const finish = meta["finish_reason"] ?? meta["stop_reason"] ?? meta["finishReason"];
+    return finish === "length" || finish === "max_tokens" || finish === "MAX_TOKENS";
+}
+
+/**
+ * One LLM call under a config-respecting token budget, with a single bounded
+ * retry for the empty-length failure signature: retry once at 2× the budget so
+ * a reasoning model that spent its whole budget thinking isn't a guaranteed
+ * dead end. Cost-bounded — at most one extra call, and only when the first
+ * produced nothing usable. If the retry also exhausts, a distinct error is
+ * thrown instead of a broken result being handed to the caller.
+ */
+export async function callWithTokenBudget<T>(options: {
+    ai: ResolvedAIConfig;
+    temperature?: number;
+    /** Run the call once; receives the model, pre-built with its budget, and the request timeout. */
+    invoke: (llm: BaseChatModel, timeoutMs: number) => Promise<T>;
+    /** True when this result is a length-cap exhaustion with no usable output. */
+    isExhausted?: (result: T) => boolean;
+}): Promise<T> {
+    const isExhausted = options.isExhausted ?? (() => false);
+    const temperature = options.temperature ?? defaultConfig.ai.temperature;
+    let maxTokens = resolveTokenBudget(options.ai);
+    const timeoutMs = requestTimeoutMs(options.ai);
+    const build = () => createLangChainModel({ ...options.ai, temperature, maxTokens });
+
+    let result = await options.invoke(build(), timeoutMs);
+    if (isExhausted(result)) {
+        maxTokens *= 2;
+        result = await options.invoke(build(), timeoutMs);
+        if (isExhausted(result)) {
+            throw new Error(
+                `Model "${options.ai.model}" exhausted its reasoning budget: even after ` +
+                    `retrying at 2× output tokens (${maxTokens}) it returned nothing usable. ` +
+                    "Raise ai.maxTokens in raiken.config.json for reasoning-heavy drafts.",
+            );
+        }
+    }
+    return result;
 }

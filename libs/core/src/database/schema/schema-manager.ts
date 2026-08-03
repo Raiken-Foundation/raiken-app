@@ -63,6 +63,9 @@ export class SchemaManager {
      * creation. `forms_json` stores the structured form fields discovery
      * extracted from a page (label/type/selector per input) so test generation
      * can reference real form controls instead of guessing them.
+     * `captured_authenticated` records whether the crawl that wrote the row was
+     * carrying a session, which is what lets cover distinguish "we have pages"
+     * from "we have pages from behind the login".
      *
      * The table only exists once the v4 discovery migration has run, so this is
      * a no-op on databases that have never done discovery.
@@ -83,6 +86,16 @@ export class SchemaManager {
 
         if (!columnNames.includes("forms_json")) {
             this.adapter.db.exec(`ALTER TABLE discovered_pages ADD COLUMN forms_json TEXT`);
+        }
+
+        // Rows that predate the column were crawled before Raiken tracked this,
+        // so 0 ("not known to be authenticated") is the correct default: it
+        // makes cover re-crawl once with the session rather than trust a
+        // snapshot whose provenance nobody recorded.
+        if (!columnNames.includes("captured_authenticated")) {
+            this.adapter.db.exec(
+                `ALTER TABLE discovered_pages ADD COLUMN captured_authenticated INTEGER NOT NULL DEFAULT 0`,
+            );
         }
     }
 

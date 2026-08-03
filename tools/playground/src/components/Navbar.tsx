@@ -1,67 +1,56 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import Avatar from "./Avatar";
+import { Avatar } from "./Avatar";
 
-interface NavbarProps {
-    onLogout: () => void;
-}
-
-const NAV = [
-    { to: "/dashboard", label: "Dashboard" },
-    { to: "/projects", label: "Projects" },
-    { to: "/activity", label: "Activity" },
-    { to: "/settings", label: "Settings" },
+const NAV_ITEMS = [
+    { label: "Dashboard", to: "/dashboard", testId: "nav-dashboard" },
+    { label: "Projects", to: "/projects", testId: "nav-projects" },
+    { label: "Team", to: "/team", testId: "nav-team" },
+    { label: "Settings", to: "/settings", testId: "nav-settings" },
 ];
 
-export default function Navbar({ onLogout }: NavbarProps) {
-    const { user } = useAuth();
+export function Navbar() {
+    const { user, logout } = useAuth();
+    const navigate = useNavigate();
 
     return (
         <header className="topbar" data-testid="navbar">
-            <div className="topbar-left">
-                <NavLink to="/dashboard" className="brand" data-testid="brand">
-                    <span className="brand-mark" aria-hidden="true">
-                        ◢◣
-                    </span>
-                    <span className="brand-name">Atlas Tracker</span>
-                </NavLink>
-
-                <nav className="topbar-nav" aria-label="Primary">
-                    {NAV.map((item) => (
-                        <NavLink
-                            key={item.to}
-                            to={item.to}
-                            className={({ isActive }) =>
-                                `nav-link ${isActive ? "nav-link-active" : ""}`
-                            }
-                            data-testid={`nav-${item.label.toLowerCase()}`}
-                        >
-                            {item.label}
-                        </NavLink>
-                    ))}
-                </nav>
-            </div>
-
+            <NavLink to="/dashboard" className="brand" data-testid="brand">
+                Orbit
+            </NavLink>
+            <nav className="nav-links" aria-label="Main">
+                {NAV_ITEMS.map((item) => (
+                    <NavLink
+                        key={item.to}
+                        to={item.to}
+                        className={({ isActive }) => `nav-link ${isActive ? "nav-link-active" : ""}`}
+                        data-testid={item.testId}
+                    >
+                        {item.label}
+                    </NavLink>
+                ))}
+            </nav>
             <div className="topbar-right">
-                {user && (
-                    <>
-                        <NavLink to="/profile" className="user-chip" data-testid="user-chip">
-                            <Avatar user={user} size="sm" />
-                            <span className="user-meta">
-                                <span className="user-name">{user.username}</span>
-                                <span className="user-role">{user.role}</span>
-                            </span>
-                        </NavLink>
-                        <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={onLogout}
-                            data-testid="logout-button"
-                        >
-                            Sign out
-                        </button>
-                    </>
-                )}
+                <NavLink
+                    to="/profile"
+                    className="user-chip"
+                    data-testid="user-chip"
+                    aria-label={`Account for ${user?.displayName ?? "unknown"}`}
+                >
+                    <Avatar name={user?.displayName ?? "?"} size="sm" />
+                    <span className="user-chip-name">{user?.displayName ?? "Sign in"}</span>
+                </NavLink>
+                <button
+                    type="button"
+                    className="button button-ghost button-sm"
+                    data-testid="logout-button"
+                    onClick={() => {
+                        logout();
+                        navigate("/login");
+                    }}
+                >
+                    Sign out
+                </button>
             </div>
         </header>
     );

@@ -596,5 +596,70 @@ test('lists projects', async ({ page }) => {
                 undefined,
             );
         });
+
+        it("flags a storageState whose origin does not match the Playwright baseURL", async () => {
+            fs.writeFileSync(
+                path.join(projectPath, "playwright.config.ts"),
+                `import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: './e2e', use: { baseURL: 'http://127.0.0.1:5180' } });\n`,
+                "utf-8",
+            );
+            const statePath = path.join(projectPath, ".raiken", "auth-state.json");
+            fs.mkdirSync(path.dirname(statePath), { recursive: true });
+            fs.writeFileSync(
+                statePath,
+                JSON.stringify({
+                    cookies: [],
+                    origins: [{ origin: "http://localhost:5173", localStorage: [] }],
+                }),
+            );
+            writeSpec(
+                "origin.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            const finding = report.findings.find((f) => f.rule === "auth-state-origin-mismatch");
+
+            expect(finding).toBeDefined();
+            expect(finding?.severity).toBe("warning");
+            expect(finding?.message).toContain("http://localhost:5173");
+            expect(finding?.message).toContain("127.0.0.1:5180");
+        });
+
+        it("does NOT flag a storageState whose origin matches the baseURL", async () => {
+            fs.writeFileSync(
+                path.join(projectPath, "playwright.config.ts"),
+                `import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: './e2e', use: { baseURL: 'http://localhost:5173' } });\n`,
+                "utf-8",
+            );
+            const statePath = path.join(projectPath, ".raiken", "auth-state.json");
+            fs.mkdirSync(path.dirname(statePath), { recursive: true });
+            fs.writeFileSync(
+                statePath,
+                JSON.stringify({
+                    cookies: [],
+                    origins: [{ origin: "http://localhost:5173", localStorage: [] }],
+                }),
+            );
+            writeSpec(
+                "match.spec.ts",
+                `import { test } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('lists projects', async ({ page }) => {
+    await page.goto('/projects');
+});
+`,
+            );
+
+            const report = await scanTests({ projectPath, testDirectory: "e2e" });
+            expect(report.findings.some((f) => f.rule === "auth-state-origin-mismatch")).toBe(
+                false,
+            );
+        });
     });
 });

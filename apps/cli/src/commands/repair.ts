@@ -10,16 +10,23 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
     applyRepairSetupFixes,
+    containsParentTraversal,
     createProjectApplication,
     describeGroundingViolations,
+    describeParentTraversal,
     describeReassertedAbsence,
+    describeRegressedSelector,
     describeTimeoutFocus,
     extractOrigins,
     extractProvenAbsentLocators,
+    extractProvenPresentSelectors,
+    gatherContext,
     gatherRepairEvidence,
     getProvider,
     maybeCaptureMissingRepairPage,
+    missingScenarioExpectations,
     resolveAIConfig,
+    serializeSafeClientError,
     stillAssertsAbsentLocators,
     validateSelectorGrounding,
 } from "@raiken/core";
@@ -40,6 +47,12 @@ export interface RepairCommandOptions {
      * the run for callers who only want the diff applied.
      */
     verify?: boolean;
+    /**
+     * The original user scenario the failing draft was drafted for (cover
+     * --verify). Fed into the repair prompt as ground truth so the fix never
+     * adapts expectations to a buggy app.
+     */
+    scenario?: string;
     /** REPL-injected prompt (inquirer can't own the terminal there). */
     confirm?: (message: string) => Promise<boolean>;
     /**
@@ -82,6 +95,73 @@ failing right now, so "no change" cannot be correct. Identify the first step
 that cannot succeed against the captured page evidence and change that step.
 If the evidence genuinely does not show the element, change the locator to the
 closest element the evidence DOES show. Never respond with the file unchanged.`;
+
+/**
+ * One phase of a repair attempt (AI fix or verify run) is bounded by a hard
+ * deadline. The abort signal is handed to the underlying call — the AI SDK
+ * `generateText` and the Playwright run both honour it — so the request is
+ * actually cancelled, and the race rejects even if a caller ever ignores the
+ * signal. Elapsed time is returned so the CLI can log it: a slow run must be
+ * visible, not silent. Without this, the only bound on the loop is
+ * provider-retry timeouts stacked across attempts.
+ */
+export const REPAIR_LLM_DEADLINE_MS = 2 * 60_000;
+export const REPAIR_VERIFY_DEADLINE_MS = 3 * 60_000;
+
+export class RepairDeadlineExceededError extends Error {
+    readonly phase: string;
+    readonly deadlineMs: number;
+    readonly elapsedMs: number;
+
+    constructor(phase: string, deadlineMs: number, elapsedMs: number) {
+        super(
+            `Repair phase "${phase}" exceeded its ${Math.round(deadlineMs / 1000)}s deadline ` +
+                `(aborted after ${(elapsedMs / 1000).toFixed(1)}s)`,
+        );
+        this.name = "RepairDeadlineExceededError";
+        this.phase = phase;
+        this.deadlineMs = deadlineMs;
+        this.elapsedMs = elapsedMs;
+    }
+}
+
+export async function withRepairDeadline<T>(
+    phase: string,
+    deadlineMs: number,
+    run: (signal: AbortSignal) => Promise<T>,
+): Promise<{ result: T; elapsedMs: number }> {
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+            // Settle with the distinct deadline error BEFORE aborting, so a
+            // caller that honours the signal still sees "deadline exceeded"
+            // instead of a raw AbortError from the provider.
+            reject(new RepairDeadlineExceededError(phase, deadlineMs, Date.now() - startedAt));
+            controller.abort();
+        }, deadlineMs);
+    });
+    try {
+        const result = await Promise.race([run(controller.signal), deadline]);
+        return { result, elapsedMs: Date.now() - startedAt };
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * Oscillation detection: attempt N reverted attempt N−1's only change
+ * (A→B→A). `previousEntryCode` is the code attempt N−1 started from; a fix
+ * equal to it means the model flipped back, so the loop should stop and keep
+ * N−1's fix rather than reverting everything.
+ */
+export function isAttemptOscillation(
+    previousEntryCode: string | undefined,
+    fixedCode: string,
+): boolean {
+    return previousEntryCode !== undefined && fixedCode.trim() === previousEntryCode.trim();
+}
 
 /**
  * Same message the core repair service returns for a missing key — checked
@@ -176,10 +256,42 @@ export async function repairFailedRun(input: {
     // model imagines — and what the post-fix lint below compares against.
     const evidence = await gatherRepairEvidence(projectPath, `${file}\n${testCode}\n${rawOutput}`);
     const originalOnDisk = testCode;
-    const earlyFailureText = [
-        rawOutput,
-        ...failures.map((f) => f.error?.message ?? ""),
-    ].join("\n");
+
+    // The app's own source code, gathered the same way the interactive agent
+    // gathers it (keyword index + entry points). Without it the repair prompt's
+    // [SOURCE UNDER TEST] section is empty and the model must guess the UI
+    // structure — which is exactly how "the click opened a confirmation dialog"
+    // gets missed. Best-effort: no code graph → repair from evidence alone.
+    let sourceCode: string | undefined;
+    try {
+        const context = await gatherContext(`${file}\n${rawOutput}\n${testCode}`, projectPath);
+        const snippets = context.files
+            .slice(0, 5)
+            .map((entry) => `--- ${entry.path} ---\n${entry.fullContext.slice(0, 1500)}`)
+            .join("\n\n");
+        if (snippets) sourceCode = snippets;
+    } catch {
+        /* no code graph — repair without source context */
+    }
+
+    // A saved session scoped to a different origin than the app under test
+    // makes EVERY assertion fail signed-out — a spec-level fix cannot address
+    // it, and the interpreter has no way to see it unless we say so.
+    let environmentNote: string | null = null;
+    try {
+        const { describeStorageStateOriginMismatch, readPlaywrightBaseURL } = await import(
+            "@raiken/core"
+        );
+        const baseURL =
+            evidence.baseURL ?? (await readPlaywrightBaseURL(projectPath).catch(() => null));
+        if (baseURL) environmentNote = describeStorageStateOriginMismatch(projectPath, baseURL);
+    } catch {
+        /* best-effort */
+    }
+    if (environmentNote) {
+        process.stderr.write(chalk.yellow(`  ⚠ ${environmentNote}\n`));
+    }
+    const earlyFailureText = [rawOutput, ...failures.map((f) => f.error?.message ?? "")].join("\n");
     const live = await maybeCaptureMissingRepairPage({
         projectPath,
         testCode,
@@ -219,7 +331,9 @@ export async function repairFailedRun(input: {
             testResults,
             testCode,
             testFilePath: file,
-            rawOutput,
+            rawOutput: environmentNote
+                ? `[ENVIRONMENT]\n${environmentNote}\n\n${rawOutput}`
+                : rawOutput,
             pageSummaries,
         });
         if (!interpreted.error && interpreted.interpretation.trim()) {
@@ -233,10 +347,7 @@ export async function repairFailedRun(input: {
 
     // Deterministic setup fixes — missing storageState / absolute gotos against
     // the project's own baseURL are not AI problems.
-    const failureText = [
-        earlyFailureText,
-        interpretation ?? "",
-    ].join("\n");
+    const failureText = [earlyFailureText, interpretation ?? ""].join("\n");
     const setup = applyRepairSetupFixes(testCode, projectPath, {
         baseURL: evidence.baseURL,
         knownOrigins: new Set([...evidence.knownOrigins, ...extractOrigins(testCode)]),
@@ -270,9 +381,10 @@ export async function repairFailedRun(input: {
     let currentResults = testResults;
     let currentRaw = rawOutput;
     let previousFixed: string | undefined;
+    let previousEntryCode: string | undefined;
     let applied = false;
-    let verified: boolean | undefined;
     let reverted = false;
+    let oscillated = false;
     let lastRepair: Awaited<ReturnType<typeof app.testing.repairTestResults>> | undefined;
     let stopReason: string | undefined;
 
@@ -298,20 +410,59 @@ export async function repairFailedRun(input: {
     let absentLocators = extractProvenAbsentLocators(failureText);
     let absenceEscalated = false;
 
+    // Selectors the run PROVED exist (strict-mode violations: each matched
+    // ≥ 2 elements). Hard constraints for the repair — a fix that replaces one
+    // of these with an invented locator is rejected before it can be applied.
+    const provenSelectors = extractProvenPresentSelectors(failureText);
+    let provenEscalated = false;
+    let traversalEscalated = false;
+
     for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+        const attemptEntry = currentCode;
         const guidance = [attempt === 1 ? interpretation : undefined, timeoutFocus]
             .filter(Boolean)
             .join("\n\n");
-        const repair = await app.testing.repairTestResults({
-            testResults: currentResults,
-            testCode: currentCode,
-            testFilePath: file,
-            rawOutput: currentRaw,
-            pageSummaries,
-            // The diagnosis was made against the original failure; later
-            // attempts carry the fresh run output instead.
-            ...(guidance ? { interpretation: guidance } : {}),
-        });
+        let repair: Awaited<ReturnType<typeof app.testing.repairTestResults>>;
+        try {
+            const timed = await withRepairDeadline("AI fix", REPAIR_LLM_DEADLINE_MS, (signal) =>
+                app.testing.repairTestResults({
+                    testResults: currentResults,
+                    testCode: currentCode,
+                    testFilePath: file,
+                    rawOutput: currentRaw,
+                    pageSummaries,
+                    sourceCode,
+                    provenSelectors,
+                    scenario: options.scenario,
+                    signal,
+                    // The diagnosis was made against the original failure; later
+                    // attempts carry the fresh run output instead.
+                    ...(guidance ? { interpretation: guidance } : {}),
+                }),
+            );
+            repair = timed.result;
+            if (!options.json) {
+                console.log(
+                    dim(`  attempt ${attempt}: AI fix in ${(timed.elapsedMs / 1000).toFixed(1)}s`),
+                );
+            }
+        } catch (error) {
+            await revertIfUnattended();
+            restore?.();
+            const message = serializeSafeClientError(error).message;
+            if (options.json) {
+                emit({
+                    repaired: false,
+                    applied: applied && !reverted,
+                    filePath: file,
+                    error: message,
+                    ...(reverted ? { reverted } : {}),
+                });
+            } else {
+                console.log(chalk.red(`  ${message}`));
+            }
+            cliExit(1);
+        }
         lastRepair = repair;
 
         if (repair.error || !repair.fixedCode) {
@@ -334,6 +485,18 @@ export async function repairFailedRun(input: {
             failureText: [currentRaw, interpretation ?? ""].join("\n"),
         });
         const fixedCode = normalized.code;
+
+        // Oscillation: attempt N reverted attempt N−1's only change (A→B→A).
+        // The model is cycling, not converging — stop and keep N−1's fix
+        // instead of reverting everything to the state it just repaired away
+        // from.
+        if (isAttemptOscillation(previousEntryCode, fixedCode)) {
+            oscillated = true;
+            stopReason =
+                "the AI oscillated between two versions of the fix (this attempt reverted " +
+                "the previous one) — keeping the previous attempt's fix";
+            break;
+        }
 
         const unchangedFromCurrent = fixedCode === (repair.originalCode ?? currentCode);
         const unchangedFromPrevious =
@@ -381,6 +544,76 @@ export async function repairFailedRun(input: {
             continue;
         }
 
+        // The mirror check: a fix that DROPS a selector the run proved present
+        // (strict-mode violation — it matched ≥ 2 elements) regresses the
+        // evidence. Models misread strict-mode violations as "wrong locator"
+        // and replace the proven element with an invented one. Escalate once,
+        // then reject via the lint gate below. Switching to an unambiguous
+        // alternative Playwright itself suggested (`aka getByTestId(...)`) is
+        // a valid disambiguation, not a regression.
+        const regressed = provenSelectors.filter(
+            (selector) =>
+                !fixedCode.includes(selector.value) &&
+                !(selector.alternatives ?? []).some((alt) => fixedCode.includes(alt)),
+        );
+        if (regressed.length > 0 && !provenEscalated && attempt < MAX_FIX_ATTEMPTS) {
+            provenEscalated = true;
+            timeoutFocus = [timeoutFocus, describeRegressedSelector(regressed)]
+                .filter(Boolean)
+                .join("\n\n");
+            if (!options.json) {
+                console.log(
+                    chalk.yellow(
+                        `  ✗ The fix removed ${regressed.map((selector) => selector.value).join(", ")}, which the failure evidence proved is on the page — retrying.`,
+                    ),
+                );
+            }
+            continue;
+        }
+
+        // Parent-traversal locators (`locator('..')`, `xpath=ancestor`) are
+        // never stable — the climb fails on any nesting difference. Reject
+        // them deterministically instead of burning attempts on a browser run
+        // that can only fail the same way.
+        const parentTraversal = containsParentTraversal(fixedCode);
+        if (parentTraversal.length > 0 && !traversalEscalated && attempt < MAX_FIX_ATTEMPTS) {
+            traversalEscalated = true;
+            timeoutFocus = [timeoutFocus, describeParentTraversal(parentTraversal)]
+                .filter(Boolean)
+                .join("\n\n");
+            if (!options.json) {
+                console.log(
+                    chalk.yellow(
+                        `  ✗ The fix climbs the DOM with ${parentTraversal.join(", ")} — retrying with the container named.`,
+                    ),
+                );
+            }
+            continue;
+        }
+
+        // G2 — scenario mode (cover --verify): a fix that drops an expectation
+        // the scenario stated has adapted the test to the app. The app may be
+        // the broken one; the test must keep asserting what the user asked
+        // for. Reject deterministically — the repair loop must not wash a
+        // bug-catcher into a false green.
+        if (options.scenario) {
+            const dropped = missingScenarioExpectations(fixedCode, options.scenario);
+            if (dropped.length > 0) {
+                stopReason =
+                    `the fix dropped scenario-grounded expectation(s) ${dropped.join(", ")} — ` +
+                    "the app likely contradicts the scenario (application bug, not test bug); " +
+                    "the draft must keep asserting them";
+                if (!options.json) {
+                    console.log(
+                        chalk.red(
+                            `  ✗ Rejected: the fix dropped ${dropped.join(", ")} — an expectation the scenario stated. The app may be the broken side; the test must keep asserting it.`,
+                        ),
+                    );
+                }
+                break;
+            }
+        }
+
         // Lint the proposed fix against project evidence BEFORE anyone applies
         // it. A fix may only reference origins the spec or the knowledge DB
         // already knows (a new origin is a hallucinated URL, not a repair), and
@@ -410,6 +643,14 @@ export async function repairFailedRun(input: {
             ),
             ...describeGroundingViolations(introducedContradictions).map(
                 (line) => `the fix introduces an ungrounded locator: ${line}`,
+            ),
+            ...regressed.map(
+                (selector) =>
+                    `the fix removes a selector the failure evidence proved exists: ${selector.value} (${selector.locator})`,
+            ),
+            ...parentTraversal.map(
+                (locator) =>
+                    `the fix uses parent traversal (${locator}) — never stable; target the row/container directly`,
             ),
         ];
 
@@ -468,11 +709,17 @@ export async function repairFailedRun(input: {
                     : `Attempt ${attempt}: apply this follow-up fix to ${file}?`;
             if (options.confirm) {
                 apply = await options.confirm(question);
-            } else if (!process.stdin.isTTY) {
+            } else if (!process.stdin.isTTY && !options.json) {
                 restore?.();
                 exitUsage(
                     `Repair produced a fix but cannot prompt for confirmation (stdin is not interactive). Re-run with --apply to write it.`,
                 );
+            } else if (!process.stdin.isTTY) {
+                // `--json` is a scripting surface: there is no one to prompt,
+                // so fall through to the declined-apply emit below, which
+                // carries the diff — the documented "diff included when not
+                // applied" contract. CI consumers decide whether to --apply.
+                apply = false;
             } else {
                 const { confirm } = await import("@inquirer/prompts");
                 apply = await confirm({ message: question, default: false });
@@ -533,9 +780,39 @@ export async function repairFailedRun(input: {
                 ),
             );
         }
-        const rerun = (await app.testing.runTests({ testFile: file })) as RepairRunResult;
+        let rerun: RepairRunResult;
+        try {
+            const timed = await withRepairDeadline(
+                "verify run",
+                REPAIR_VERIFY_DEADLINE_MS,
+                (signal) => app.testing.runTests({ testFile: file, signal }),
+            );
+            rerun = timed.result as RepairRunResult;
+            if (!options.json) {
+                console.log(
+                    dim(
+                        `  attempt ${attempt}: verify run in ${(timed.elapsedMs / 1000).toFixed(1)}s`,
+                    ),
+                );
+            }
+        } catch (error) {
+            await revertIfUnattended();
+            restore?.();
+            const message = serializeSafeClientError(error).message;
+            if (options.json) {
+                emit({
+                    repaired: false,
+                    applied: applied && !reverted,
+                    filePath: file,
+                    error: message,
+                    ...(reverted ? { reverted } : {}),
+                });
+            } else {
+                console.log(chalk.red(`  ${message}`));
+            }
+            cliExit(1);
+        }
         if (rerun.success === true) {
-            verified = true;
             restore?.();
             if (options.json) {
                 emit({
@@ -558,7 +835,6 @@ export async function repairFailedRun(input: {
             cliExit(0);
         }
 
-        verified = false;
         const rerunFailures = (rerun.parsedRun?.tests ?? []).filter((t) => t.status === "failed");
         if (rerunFailures.length === 0) {
             // The run failed without per-test results (suite-level breakage) —
@@ -572,6 +848,7 @@ export async function repairFailedRun(input: {
             );
         }
         previousFixed = fixedCode;
+        previousEntryCode = attemptEntry;
         currentCode = fixedCode;
         currentResults = rerunFailures.map((t) => ({
             name: t.name ?? "unknown",
@@ -583,10 +860,21 @@ export async function repairFailedRun(input: {
         }));
         currentRaw = composeRawOutput(rerun);
         absentLocators = extractProvenAbsentLocators(currentRaw);
+        // The re-run's own failure evidence can prove NEW selectors present —
+        // keep them across attempts so a later fix can't regress them either.
+        for (const selector of extractProvenPresentSelectors(currentRaw)) {
+            if (!provenSelectors.some((existing) => existing.value === selector.value)) {
+                provenSelectors.push(selector);
+            }
+        }
     }
 
     // All attempts exhausted (or the loop stopped early) without a green run.
-    await revertIfUnattended();
+    // On oscillation, reverting would restore the exact broken state the loop
+    // just repaired away from — keep the last applied fix instead.
+    if (!oscillated) {
+        await revertIfUnattended();
+    }
     restore?.();
     if (options.json) {
         emit({
@@ -604,6 +892,12 @@ export async function repairFailedRun(input: {
         console.log(
             chalk.red(
                 `  ✗ No fix passed within ${MAX_FIX_ATTEMPTS} attempt(s) — reverted ${file} to its original content.`,
+            ),
+        );
+    } else if (oscillated) {
+        console.log(
+            chalk.yellow(
+                `  ✗ The AI oscillated between two versions of the fix (A→B→A) — kept the previous attempt's fix in ${file}.`,
             ),
         );
     } else if (applied) {

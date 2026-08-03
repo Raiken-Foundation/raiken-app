@@ -230,6 +230,44 @@ export function describeAuthStateProblem(inspection: AuthStateInspection): strin
 }
 
 /**
+ * Explain when a saved session cannot apply to a target URL.
+ *
+ * The state's origins (scheme + host + port) must overlap the seed's origin
+ * exactly — a state scoped to `http://localhost:5173` silently does nothing
+ * against `http://127.0.0.1:5180`, so crawls and generated tests start signed
+ * out and bounce off the login wall. Returns null when there is nothing to
+ * compare (no state, no origins, or an unparsable seed).
+ */
+export function describeStorageStateOriginMismatch(
+    projectPath: string,
+    seedUrl: string,
+): string | null {
+    const statePath = resolveAuthStorageStatePath(projectPath);
+    if (!statePath) return null;
+    const inspection = inspectAuthState(statePath);
+    if (inspection.status !== "valid" || inspection.origins.length === 0) return null;
+
+    let seedOrigin: string | null = null;
+    try {
+        seedOrigin = new URL(seedUrl).origin;
+    } catch {
+        return null;
+    }
+    const normalize = (origin: string): string => origin.replace(/\/+$/, "");
+    const overlaps = inspection.origins.some(
+        (origin) => normalize(origin) === normalize(seedOrigin),
+    );
+    if (overlaps) return null;
+
+    return (
+        `Saved session origins (${inspection.origins.join(", ")}) do not match ` +
+        `${seedOrigin} — the session will NOT apply there, so crawls and test runs ` +
+        "against this URL start signed out. Re-import with `raiken auth --domain <origin>` " +
+        "matching the app, or point discovery at an origin the session is scoped to."
+    );
+}
+
+/**
  * Validate and atomically replace a storage-state file. The previous session
  * remains intact when the new snapshot is empty, malformed, or expired.
  */

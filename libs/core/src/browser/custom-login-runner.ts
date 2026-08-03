@@ -9,8 +9,13 @@ import {
     resolvePathWithinProject,
     writeValidatedAuthState,
 } from "../config";
+import { isRestrictiveTestMatch } from "../cover/draft-quality";
 import { acquireProjectOperation } from "../operations";
-import { findPlaywrightConfigPath, readPlaywrightTestDir } from "../testing/playwright-config";
+import {
+    findPlaywrightConfigPath,
+    readPlaywrightTestDir,
+    readPlaywrightTestMatch,
+} from "../testing/playwright-config";
 import {
     customLoginPlaywrightSpawnOptions,
     runPlaywrightSubprocess,
@@ -213,6 +218,7 @@ export async function runCustomLoginScript(
         timeoutMs,
     });
     const lease = await acquireProjectOperation(projectPath, "browser", options.signal);
+    let tempConfigPath: string | null = null;
     try {
         await fs.writeFile(specPath, spec, { encoding: "utf-8", mode: 0o600 });
         await fs.writeFile(temporaryStatePath, '{"cookies":[],"origins":[]}', {
@@ -220,6 +226,7 @@ export async function runCustomLoginScript(
             mode: 0o600,
         });
         const configPath = await findPlaywrightConfigPath(projectPath);
+        tempConfigPath = await ensureAuthSpecCollected(projectPath, configPath);
         const environment = {
             ...process.env,
             RAIKEN_AUTH_STATE_PATH: temporaryStatePath,
@@ -230,7 +237,7 @@ export async function runCustomLoginScript(
             await runPlaywright(
                 projectPath,
                 specPath,
-                configPath,
+                tempConfigPath ?? configPath,
                 environment,
                 timeoutMs,
                 options.headed ?? false,
@@ -254,6 +261,38 @@ export async function runCustomLoginScript(
     } finally {
         await fs.rm(specPath, { force: true }).catch(() => undefined);
         await fs.rm(temporaryStatePath, { force: true }).catch(() => undefined);
+        if (tempConfigPath) await fs.rm(tempConfigPath, { force: true }).catch(() => undefined);
         await lease.release();
     }
+}
+
+/**
+ * A project's `testMatch` can be narrow (e.g. `["workflows.spec.ts"]`), which
+ * excludes the generated `raiken-auth-*.spec.ts` — the login run then fails
+ * with "No tests found" even though the script is fine. When that happens,
+ * run Playwright against a temporary config that extends the project's own
+ * config with `testMatch` widened to collect exactly the auth spec. testDir,
+ * webServer, projects, and reporters all carry over unchanged.
+ */
+async function ensureAuthSpecCollected(
+    projectPath: string,
+    configPath: string | null,
+): Promise<string | null> {
+    if (!configPath) return null;
+    const patterns = await readPlaywrightTestMatch(projectPath).catch(() => null);
+    if (!isRestrictiveTestMatch(patterns)) return null;
+
+    const id = `${Date.now()}-${randomUUID()}`;
+    const tempConfigPath = path.join(
+        path.dirname(configPath),
+        `playwright.config.raiken-auth-${id}.ts`,
+    );
+    const baseImport = configPath.replace(/\.(ts|mts|js|mjs|cjs)$/, "");
+    const configSource = [
+        `import baseConfig from ${JSON.stringify(baseImport)};`,
+        `export default { ...baseConfig, testMatch: ["**/raiken-auth-*.spec.ts"] };`,
+        "",
+    ].join("\n");
+    await fs.writeFile(tempConfigPath, configSource, { encoding: "utf-8", mode: 0o600 });
+    return tempConfigPath;
 }

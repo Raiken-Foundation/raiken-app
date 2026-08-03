@@ -176,11 +176,15 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
             pauseReason: null,
         };
 
-        // Ground test generation in the live app: when the user asks to
-        // generate a test but names no URL, reuse the remembered base URL so we
-        // explore the real DOM instead of guessing routes/selectors. Marked
-        // optional so a down app falls back to code-only generation.
-        if (result.intent === "generateTests" && !result.targetUrl && nextTool !== "domCapture") {
+        // Ground live-page requests: a test generation with no named URL
+        // reuses the remembered base URL (or the Playwright baseURL) so we
+        // explore the real DOM instead of guessing routes/selectors. Same for
+        // a browse request ("open the dashboard") — with no target URL the
+        // browser opens about:blank and the agent answers from an empty page.
+        const needsLiveTarget =
+            (result.intent === "generateTests" && nextTool !== "domCapture") ||
+            result.intent === "explore";
+        if (needsLiveTarget && !result.targetUrl) {
             try {
                 const { AgentMemory } = await import("../../memory");
                 const base = AgentMemory.getInstance(deps.projectPath).getPreference(
@@ -188,10 +192,31 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
                 );
                 if (base) {
                     stateUpdates["targetUrl"] = base;
-                    stateUpdates["groundingOptional"] = true;
+                    if (result.intent === "generateTests") {
+                        stateUpdates["groundingOptional"] = true;
+                    }
                 }
             } catch {
                 /* memory unavailable — generate from code only */
+            }
+            // No remembered base (cold project, no auth.baseUrl)? Mirror cover:
+            // the Playwright config's baseURL is the project's best-known app
+            // origin — a live-page prompt should open it, not about:blank.
+            if (!stateUpdates["targetUrl"]) {
+                try {
+                    const { readPlaywrightBaseURL } = await import(
+                        "../../../testing/playwright-config"
+                    );
+                    const baseURL = await readPlaywrightBaseURL(deps.projectPath);
+                    if (baseURL) {
+                        stateUpdates["targetUrl"] = baseURL;
+                        if (result.intent === "generateTests") {
+                            stateUpdates["groundingOptional"] = true;
+                        }
+                    }
+                } catch {
+                    /* no playwright config — generate from code only */
+                }
             }
         }
 

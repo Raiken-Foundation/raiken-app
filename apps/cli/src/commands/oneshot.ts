@@ -290,10 +290,11 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
     // Same cold-start gate as cover: refuse to invent without site knowledge,
     // or auto-discover when baseURL/webServer.url is known.
     try {
-        const { ensureSiteKnowledge } = await import("@raiken/core");
+        const { ensureSiteKnowledge, looksLikeAuthScenario } = await import("@raiken/core");
         const knowledge = await ensureSiteKnowledge({
             projectPath,
             allowUngrounded: options.allowUngrounded === true,
+            needsAuthenticatedKnowledge: looksLikeAuthScenario(prompt),
             onProgress: (message) => {
                 if (streamJson) {
                     events.emit({

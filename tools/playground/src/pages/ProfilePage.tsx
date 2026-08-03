@@ -1,78 +1,61 @@
-import { useId, useState } from "react";
-import Avatar from "../components/Avatar";
+import { useState, type FormEvent } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useToast } from "../contexts/ToastContext";
+import { FormField } from "../components/FormField";
+import { Avatar } from "../components/Avatar";
 
-export default function ProfilePage() {
+export function ProfilePage() {
     const { user } = useAuth();
     const { push } = useToast();
-    const emailId = useId();
-    const bioId = useId();
-    const [email, setEmail] = useState(user?.email ?? "");
-    const [bio, setBio] = useState("");
-    const [saving, setSaving] = useState(false);
+    const [displayName, setDisplayName] = useState(user?.displayName ?? "");
 
-    if (!user) return null;
-
-    const submit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setSaving(true);
-        // Simulate a save round-trip without persisting.
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        setSaving(false);
-        push("success", "Profile saved");
+    // The fixture keeps the profile local (no backend persistence) — the
+    // submit acknowledges the edit so the form has a real interaction.
+    const handleSubmit = (event: FormEvent) => {
+        event.preventDefault();
+        if (!displayName.trim()) {
+            push("error", "Display name cannot be empty.");
+            return;
+        }
+        push("success", "Profile updated (demo — not persisted)");
     };
 
     return (
-        <div className="page" data-testid="profile-page">
+        <main className="page" data-testid="profile-page">
             <header className="page-header">
-                <div>
-                    <h1>Profile</h1>
-                    <p className="page-subtitle">Manage your personal details.</p>
-                </div>
+                <h1>Profile</h1>
             </header>
-
             <section className="card profile-card">
                 <div className="profile-identity">
-                    <Avatar user={user} size="lg" />
+                    <Avatar name={user?.displayName ?? "?"} size="lg" />
                     <div>
-                        <h3 data-testid="profile-username">{user.username}</h3>
-                        <span className={`pill pill-role-${user.role}`}>{user.role}</span>
+                        <h2 data-testid="profile-display-name">{displayName}</h2>
+                        <p className="muted" data-testid="profile-username">
+                            @{user?.username} · {user?.role}
+                        </p>
+                        <p className="muted">{user?.email}</p>
                     </div>
                 </div>
-
-                <form className="profile-form" onSubmit={submit}>
-                    <div className="form-group">
-                        <label htmlFor={emailId}>Email</label>
+                <form onSubmit={handleSubmit} className="profile-form">
+                    <FormField label="Display name" htmlFor="display-name-input">
                         <input
-                            id={emailId}
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            data-testid="profile-email"
+                            id="display-name-input"
+                            className="input"
+                            type="text"
+                            value={displayName}
+                            data-testid="display-name-input"
+                            onChange={(event) => setDisplayName(event.target.value)}
                         />
-                    </div>
-                    <div className="form-group">
-                        <label htmlFor={bioId}>Bio</label>
-                        <textarea
-                            id={bioId}
-                            rows={3}
-                            value={bio}
-                            onChange={(e) => setBio(e.target.value)}
-                            placeholder="Tell your team a little about yourself"
-                            data-testid="profile-bio"
-                        />
-                    </div>
+                    </FormField>
                     <button
                         type="submit"
-                        className="btn btn-primary"
-                        disabled={saving}
+                        className="button button-primary"
                         data-testid="profile-save"
                     >
-                        {saving ? "Saving…" : "Save changes"}
+                        Save
                     </button>
                 </form>
             </section>
-        </div>
+        </main>
     );
 }

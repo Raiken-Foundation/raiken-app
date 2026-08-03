@@ -12,12 +12,7 @@
 
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
-import {
-    createLangChainModel,
-    getProvider,
-    LLM_REQUEST_TIMEOUT_MS,
-    type ResolvedAIConfig,
-} from "../agent/ai-providers";
+import { callWithTokenBudget, getProvider, type ResolvedAIConfig } from "../agent/ai-providers";
 import { GraphQueryService } from "../analysis/graph-query";
 import { ProjectContext } from "../analysis/project-context";
 import { CodeGraphDB } from "../database/db";
@@ -183,12 +178,6 @@ export class TicketAnalyzer {
     private async llmAnalyze(ticket: TicketInfo): Promise<ImpactAnalysis | null> {
         try {
             if (!this.config) return null;
-            const model = createLangChainModel({
-                ...this.config,
-                temperature: 0.3,
-                maxTokens: 1000,
-            });
-
             const ctx = ProjectContext.getInstance(this.projectPath);
             const allFiles = ctx.isInitialized() ? ctx.getAllFilePaths().slice(0, 200) : [];
 
@@ -206,14 +195,24 @@ ${ticket.description}
 Labels: ${ticket.labels.join(", ") || "none"}
 ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  ${f.status}: ${f.path}`).join("\n")}` : ""}`;
 
-            const structured = model.withStructuredOutput(impactSchema, {
-                name: "analyze_ticket_impact",
+            // Shared token-budget helper: respects the resolved config instead
+            // of a hardcoded cap, and extends the request timeout for
+            // reasoning models. Structured output cannot surface the
+            // empty-length signature, so no retry applies here.
+            const analysis = await callWithTokenBudget({
+                ai: this.config,
+                temperature: 0.3,
+                invoke: (model, timeoutMs) =>
+                    model
+                        .withStructuredOutput(impactSchema, {
+                            name: "analyze_ticket_impact",
+                        })
+                        .invoke([new SystemMessage(systemPrompt), new HumanMessage(ticketText)], {
+                            timeout: timeoutMs,
+                        }),
             });
 
-            return await structured.invoke(
-                [new SystemMessage(systemPrompt), new HumanMessage(ticketText)],
-                { timeout: LLM_REQUEST_TIMEOUT_MS },
-            );
+            return analysis;
         } catch (err) {
             console.warn(
                 "[TicketAnalyzer] LLM analysis failed:",

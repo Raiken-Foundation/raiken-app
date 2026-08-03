@@ -74,6 +74,46 @@ const STOPWORDS = new Set([
     "assert",
     "ensure",
     "confirm",
+    // Meta/imperative wrapper words ("draft a playwright test for X") that
+    // describe the REQUEST, not the scenario — keeping them as significant
+    // tokens inflated the required draft-overlap count and flagged drafts
+    // that genuinely asserted the requested flow.
+    "draft",
+    "write",
+    "writes",
+    "writing",
+    "create",
+    "creates",
+    "creating",
+    "generate",
+    "generates",
+    "generating",
+    "make",
+    "makes",
+    "cover",
+    "covers",
+    "build",
+    "builds",
+    "scaffold",
+    "add",
+    "adds",
+    "playwright",
+    "e2e",
+    "test",
+    "tests",
+    "testing",
+    "spec",
+    "specs",
+    "suite",
+    "please",
+    "me",
+    "my",
+    "some",
+    "one",
+    "want",
+    "wants",
+    "need",
+    "needs",
 ]);
 
 export interface IntentCriterion {
@@ -163,6 +203,24 @@ export function extractAcs(description: string): string[] {
     return numbered;
 }
 
+/**
+ * Strip a leading imperative wrapper from a free-text request so the
+ * scenario's real clauses are scored, not the phrasing of the request.
+ *
+ * One-shot prompts arrive as "draft a playwright test: X" / "write a test
+ * that verifies X" — the wrapper words are meta, and keeping them inflated
+ * the criterion token set past what any draft could cover. The separator is
+ * required ("test for/to/that/:") so a domain phrase like "add a test user"
+ * is never misread as a wrapper.
+ */
+export function cleanScenarioDescription(description: string): string {
+    const IMPERATIVE_WRAPPER =
+        /^\s*(?:please\s+)?(?:draft|write|writes|writing|create|creates|creating|generate|generates|generating|make|makes|cover|covers|build|builds|scaffold|add|adds)\s+(?:(?:me|my|some|a|an|the|one)\s+)*(?:(?:e2e|end[- ]to[- ]end|integration|unit|playwright|flow|scenario|test|spec)s?\s+)*(?:test|spec)s?\s*(?:that|for|to|on|about|of|covering|:|-|—)\s*/i;
+    const trimmed = description.trim();
+    const cleaned = trimmed.replace(IMPERATIVE_WRAPPER, "");
+    return cleaned.trim() || trimmed;
+}
+
 /** Prefer AC/checkbox/numbered lists; fall back to clause splitting. */
 export function extractIntentCriteria(description: string): IntentCriterion[] {
     const acs = extractAcs(description);
@@ -201,6 +259,12 @@ export function extractDraftSignalTokens(body: string): Set<string> {
     )) {
         haystack.push(match[2] ?? "");
     }
+    // test()/describe() titles are human restatements of the scenario — a
+    // draft whose title names the requested flow covers it even when the
+    // assertion strings paraphrase rather than repeat the exact wording.
+    for (const match of body.matchAll(/\b(?:test|describe)\(\s*(['"`])([^'"`\n]+)\1/g)) {
+        haystack.push(match[2] ?? "");
+    }
 
     // Also tokenize the whole body lightly so role names in comments/identifiers help.
     const tokens = new Set<string>();
@@ -226,11 +290,8 @@ function criterionCovered(criterion: IntentCriterion, draftTokens: Set<string>):
 /**
  * Flag scenario steps that have no matching assertion/action signal in the draft.
  */
-export function assessIntentCoverage(
-    description: string,
-    body: string,
-): IntentCoverageAssessment {
-    const criteria = extractIntentCriteria(description);
+export function assessIntentCoverage(description: string, body: string): IntentCoverageAssessment {
+    const criteria = extractIntentCriteria(cleanScenarioDescription(description));
     if (criteria.length === 0) {
         return { criteria: [], uncovered: [], reasons: [] };
     }

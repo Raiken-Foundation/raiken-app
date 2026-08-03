@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     describeAuthStateProblem,
+    describeStorageStateOriginMismatch,
     inspectAuthState,
     resolveAuthStorageStateDestination,
     resolveAuthStorageStatePath,
@@ -162,5 +163,29 @@ describe("auth storage state", () => {
         });
         expect(JSON.parse(fs.readFileSync(statePath, "utf-8")).cookies[0].value).toBe("new");
         expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
+    });
+
+    it("describeStorageStateOriginMismatch flags a session scoped elsewhere", () => {
+        write(".raiken/auth-state.json", {
+            cookies: [],
+            origins: [{ origin: "http://localhost:5173", localStorage: [] }],
+        });
+
+        expect(describeStorageStateOriginMismatch(projectPath, "http://localhost:5173")).toBeNull();
+        expect(
+            describeStorageStateOriginMismatch(projectPath, "http://localhost:5173/"),
+        ).toBeNull();
+        const mismatch = describeStorageStateOriginMismatch(projectPath, "http://127.0.0.1:5180");
+        expect(mismatch).toContain("http://localhost:5173");
+        expect(mismatch).toContain("127.0.0.1:5180");
+        expect(mismatch).toContain("raiken auth --domain");
+    });
+
+    it("describeStorageStateOriginMismatch is silent without a usable state", () => {
+        expect(describeStorageStateOriginMismatch(projectPath, "http://localhost:5173")).toBeNull();
+        write(".raiken/auth-state.json", { cookies: [], origins: [] });
+        expect(describeStorageStateOriginMismatch(projectPath, "http://localhost:5173")).toBeNull();
+        write(".raiken/auth-state.json", { cookies: [], origins: [{ origin: "https://a.com" }] });
+        expect(describeStorageStateOriginMismatch(projectPath, "not-a-url")).toBeNull();
     });
 });

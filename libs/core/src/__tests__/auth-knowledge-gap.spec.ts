@@ -23,6 +23,7 @@ function evidenceFixture(overrides: Partial<CoverEvidence> = {}): CoverEvidence 
         knownSelectors: [],
         authLogin: null,
         hasStorageState: false,
+        hasAuthenticatedKnowledge: false,
         flows: [],
         ...overrides,
     };
@@ -66,12 +67,35 @@ describe("signed-out knowledge gap", () => {
         expect(assessed.reviewReasons.some((reason) => reason.includes("signed-out"))).toBe(true);
     });
 
-    it("stays quiet once a session exists", async () => {
+    /**
+     * Saving a session adds no knowledge on its own. Treating the file as
+     * proof silenced this warning while the draft carried on inventing
+     * post-login UI — a worse failure than the one it was meant to catch,
+     * because nothing on screen said anything was missing.
+     */
+    it("keeps warning when a session was saved but nothing was crawled with it", async () => {
         const assessed = await assessGeneratedDraft({
             body: DRAFT,
             projectPath: projectDir,
             outputPath: path.join(projectDir, "e2e", "login.spec.ts"),
             evidence: evidenceFixture({ hasStorageState: true }),
+            description: "login as admin and see the dashboard",
+        });
+        expect(assessed.reviewReasons.some((reason) => reason.includes("signed-out"))).toBe(true);
+    });
+
+    it("asks only for discover when the session is already saved", () => {
+        const message = describeSignedOutKnowledgeGap(evidenceFixture({ hasStorageState: true }));
+        expect(message).toContain("raiken discover http://127.0.0.1:5180");
+        expect(message).not.toContain("raiken auth");
+    });
+
+    it("stays quiet once pages behind the login are captured", async () => {
+        const assessed = await assessGeneratedDraft({
+            body: DRAFT,
+            projectPath: projectDir,
+            outputPath: path.join(projectDir, "e2e", "login.spec.ts"),
+            evidence: evidenceFixture({ hasStorageState: true, hasAuthenticatedKnowledge: true }),
             description: "login as admin and see the dashboard",
         });
         expect(assessed.reviewReasons.some((reason) => reason.includes("signed-out"))).toBe(false);

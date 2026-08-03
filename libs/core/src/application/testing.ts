@@ -237,6 +237,9 @@ export class TestingApplication implements ProjectApplicationContext {
         interpretation?: string;
         domContext?: Parameters<typeof getTestRepair>[0]["domContext"];
         pageSummaries?: string[];
+        provenSelectors?: Parameters<typeof getTestRepair>[0]["provenSelectors"];
+        scenario?: Parameters<typeof getTestRepair>[0]["scenario"];
+        signal?: AbortSignal;
     }) {
         const resolved = resolveAIConfig(this.projectPath);
         const provider = getProvider(resolved.provider);
@@ -315,6 +318,9 @@ export class TestingApplication implements ProjectApplicationContext {
                         interpretation: input.interpretation,
                         domContext: input.domContext,
                         pageSummaries: input.pageSummaries,
+                        provenSelectors: input.provenSelectors,
+                        scenario: input.scenario,
+                        signal: input.signal,
                         images: images.length > 0 ? images : undefined,
                         projectPath: this.projectPath,
                     },

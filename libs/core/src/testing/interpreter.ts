@@ -31,6 +31,7 @@ import { generateText, streamText } from "ai";
 import { buildAISdkModel, modelSupportsVision } from "../agent/ai-providers";
 import type { DOMContext } from "../browser/dom-capture";
 import type { AIProviderId } from "../config/schema";
+import type { ProvenSelector } from "../cover/repair-setup";
 import { cleanGeneratedTestCode } from "../utils";
 import { applyEditBlocks, parseEditBlocks, stripEditMarkers } from "./edit-blocks";
 import { validateTestCode } from "./test-code-validation";
@@ -476,6 +477,23 @@ export interface RepairContext extends InterpretationContext {
      * transparently falls back to a text-only prompt.
      */
     images?: RepairImage[];
+    /**
+     * Locators the failure evidence PROVED resolve on the page (strict-mode
+     * violations: each matched ≥ 2 elements). Hard constraints: the fix must
+     * keep them — the failure is how they are used (ambiguity), not whether
+     * they exist — and must never replace them with invented locators.
+     */
+    provenSelectors?: ProvenSelector[];
+    /** Aborts the underlying model request (repair deadline). */
+    signal?: AbortSignal;
+    /**
+     * The original user scenario the test was drafted for, when known (cover
+     * --verify). Its stated expectations are ground truth: if the running app
+     * contradicts them, the APP is broken — the fix must never adapt the
+     * assertion to match buggy behavior (that turns a bug-catcher into a
+     * false green).
+     */
+    scenario?: string;
 }
 
 export interface RepairResult {
@@ -517,6 +535,8 @@ export function buildRepairPrompt(
         rawOutput,
         interpretation,
         images,
+        provenSelectors,
+        scenario,
     } = context;
 
     const failedTests = testResults.filter((t) => t.status === "failed");
@@ -566,6 +586,26 @@ export function buildRepairPrompt(
         );
     }
 
+    if (scenario && scenario.trim().length > 0) {
+        lines.push(
+            "# The scenario this test was drafted for (GROUND TRUTH)",
+            "The values, labels, and expectations stated in this scenario are the spec.",
+            "The APPLICATION may be wrong, not the test: a page showing a different",
+            "price, count, status, or message than the scenario states is an",
+            "application bug.",
+            "Rules:",
+            "- NEVER change an assertion's expected value to match what the page",
+            "  currently shows.",
+            "- If the app contradicts the scenario, KEEP the scenario's assertion",
+            "  intact, and add ONE `// TODO:` line naming the suspected app-side",
+            "  issue.",
+            "- Only change the MECHANICS of the test (selectors, waits, navigation,",
+            "  interaction order) — never its expectations.",
+            `Scenario: ${truncateTail(scenario, 800)}`,
+            "",
+        );
+    }
+
     if (failedTests.length > 0) {
         lines.push("# Failures (with evidence)");
         for (const test of failedTests) {
@@ -590,6 +630,26 @@ export function buildRepairPrompt(
             }
             lines.push("");
         }
+    }
+
+    if (provenSelectors && provenSelectors.length > 0) {
+        lines.push(
+            "# Selectors PROVEN on the page (hard constraints)",
+            "The failure evidence proves these locators resolve on the page — each one",
+            "matched MULTIPLE elements (strict-mode violation), so the element exists.",
+            "The failure is ambiguity, not absence.",
+            ...provenSelectors.map((selector) =>
+                selector.alternatives && selector.alternatives.length > 0
+                    ? `- ${selector.locator} — Playwright's unambiguous alternatives: ${selector.alternatives.join(", ")}`
+                    : `- ${selector.locator}`,
+            ),
+            "Keep every one of these locators in the corrected file. You may make them",
+            "unambiguous (.first(), .nth(i), a scoped parent locator, a more specific",
+            "assertion, or one of Playwright's own alternatives listed above) — never",
+            "replace them with invented locators and never delete the assertion that",
+            "uses them.",
+            "",
+        );
     }
 
     if (images && images.length > 0) {
@@ -658,6 +718,9 @@ export function buildRepairPrompt(
         "- Selector priority: `getByRole` > `getByLabel` > `getByPlaceholder` > `getByTestId` > `getByText`. Only fall back to CSS when nothing else fits the evidence.",
     );
     lines.push("- Keep imports and the overall structure of the original file.");
+    lines.push(
+        '- Keep every locator listed under "Selectors PROVEN on the page" in the file — resolve its ambiguity, never replace it.',
+    );
     lines.push(
         "- Output only runnable code — no explanatory prose or changelog inside the file. At most ONE `// TODO:` line is allowed, and only for a confirmed application-side regression (see above).",
     );
@@ -739,6 +802,7 @@ export async function getTestRepair(
                     model,
                     temperature: 0.2,
                     maxOutputTokens: 8192,
+                    abortSignal: context.signal,
                     messages: [
                         {
                             role: "user",
@@ -754,6 +818,10 @@ export async function getTestRepair(
                     ],
                 });
             } catch (err) {
+                // A repair deadline aborts the request — don't retry text-only
+                // (the signal is already aborted) and don't log the abort as a
+                // vision failure.
+                if (context.signal?.aborted) throw err;
                 console.warn(
                     "Test repair with vision failed; retrying text-only:",
                     err instanceof Error ? err.message : String(err),
@@ -765,6 +833,7 @@ export async function getTestRepair(
             prompt,
             temperature: 0.2,
             maxOutputTokens: 8192,
+            abortSignal: context.signal,
         });
     };
 

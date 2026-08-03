@@ -1,37 +1,47 @@
-export default function AboutPage() {
+import { Link } from "react-router-dom";
+
+/** Public about page — the discovery eval requires a titled, linked /about. */
+export function AboutPage() {
     return (
-        <div className="page" data-testid="about-page">
-            <header className="page-header">
-                <div>
-                    <h1>About Atlas Tracker</h1>
-                    <p className="page-subtitle">
-                        A deliberately small project tracker that exercises real UI patterns.
-                    </p>
-                </div>
-            </header>
-
-            <section className="card">
-                <h3>What it covers</h3>
-                <ul className="bulleted">
-                    <li>Asynchronous data fetching with realistic latency.</li>
-                    <li>Authentication, roles and protected routes.</li>
-                    <li>Tables with sort, filter, search and pagination.</li>
-                    <li>Modal forms with client- and server-side validation.</li>
-                    <li>Tabbed views, toasts and confirmation dialogs.</li>
-                    <li>An activity feed that reflects every mutation.</li>
-                </ul>
-            </section>
-
-            <section className="card">
-                <h3>How Raiken uses it</h3>
-                <p>
-                    The mock API throws errors with stack frames that point back to{" "}
-                    <code>src/api/client.ts</code>, so <code>raiken trace</code> has realistic
-                    input. The component graph is wide enough that <code>raiken cover</code> finds
-                    meaningful symbols, and the E2E suite under <code>e2e/</code> exercises every
-                    panel.
-                </p>
-            </section>
-        </div>
+        <main className="page" data-testid="about-page">
+            <h1>About Orbit</h1>
+            <p className="lead">
+                Orbit is a dogfood fixture: a deliberately realistic project-management app used to
+                exercise Raiken's discovery, drafting, and repair flows.
+            </p>
+            <h2>Demo accounts</h2>
+            <p className="muted">Every account uses the password <code>password</code>.</p>
+            <table className="table" data-testid="about-accounts">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>What the role can do</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>admin</code></td>
+                        <td>Admin</td>
+                        <td>Create/archive projects, manage team, clear activity</td>
+                    </tr>
+                    <tr>
+                        <td><code>priya</code></td>
+                        <td>Member</td>
+                        <td>Create tasks, move statuses, comment</td>
+                    </tr>
+                    <tr>
+                        <td><code>kai</code></td>
+                        <td>Viewer</td>
+                        <td>Read everything, change nothing</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p>
+                <Link to="/login" className="link" data-testid="about-login-link">
+                    Sign in
+                </Link>
+            </p>
+        </main>
     );
 }

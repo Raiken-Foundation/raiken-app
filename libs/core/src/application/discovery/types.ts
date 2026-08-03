@@ -124,6 +124,7 @@ export type CancelBrowserHandoffResult = DiscoveryCommandResult;
 
 export const EMPTY_STATS: SiteKnowledgeStats = {
     pagesCount: 0,
+    authenticatedPagesCount: 0,
     linksCount: 0,
     verifiedLinksCount: 0,
     brokenLinksCount: 0,

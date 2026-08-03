@@ -1,14 +1,26 @@
-// In-memory store backing the mock API.
-//
-// All API entry points (see ./client.ts) read and mutate this store after a
-// realistic latency window. Persisting to localStorage would be more
-// "correct" but it complicates Playwright test isolation, so the store is
-// intentionally re-seeded in memory on every page load.
+/**
+ * In-memory data store for the Orbit fixture. A single mutable module-level
+ * DB (seeded deterministically) so every page sees the same mutations during
+ * one browser session; reloads reset to the seed. Fixed latency simulates a
+ * real API without nondeterminism.
+ */
+import type {
+    ActivityEntry,
+    Comment,
+    Project,
+    Task,
+    User,
+} from "../types";
+import {
+    ACTIVITY,
+    COMMENTS,
+    PROJECTS,
+    TASKS,
+    USERS,
+    type SeedTask,
+} from "./seed";
 
-import type { ActivityEntry, Comment, Project, Task, User } from "../types";
-import { SEED_ACTIVITY, SEED_COMMENTS, SEED_PROJECTS, SEED_TASKS, SEED_USERS } from "./seed";
-
-interface Store {
+interface OrbitDB {
     users: User[];
     projects: Project[];
     tasks: Task[];
@@ -16,20 +28,36 @@ interface Store {
     activity: ActivityEntry[];
 }
 
-const cloneArray = <T>(items: T[]): T[] => items.map((item) => ({ ...item }));
+const taskFromSeed = (seed: SeedTask): Task => ({
+    id: seed.id,
+    projectId: seed.projectId,
+    title: seed.title,
+    description: seed.description,
+    status: seed.status,
+    priority: seed.priority,
+    assigneeId: seed.assigneeId,
+    createdAt: new Date(
+        Date.parse("2026-04-01T00:00:00.000Z") + seed.createdOffsetDays * 86_400_000,
+    ).toISOString(),
+    updatedAt: new Date(
+        Date.parse("2026-04-01T00:00:00.000Z") + seed.updatedOffsetDays * 86_400_000,
+    ).toISOString(),
+});
 
-export const store: Store = {
-    users: cloneArray(SEED_USERS),
-    projects: cloneArray(SEED_PROJECTS),
-    tasks: cloneArray(SEED_TASKS),
-    comments: cloneArray(SEED_COMMENTS),
-    activity: cloneArray(SEED_ACTIVITY),
-};
+const seedDb = (): OrbitDB => ({
+    users: [...USERS],
+    projects: [...PROJECTS],
+    tasks: TASKS.map(taskFromSeed),
+    comments: [...COMMENTS],
+    activity: [...ACTIVITY],
+});
 
-export function resetStore(): void {
-    store.users = cloneArray(SEED_USERS);
-    store.projects = cloneArray(SEED_PROJECTS);
-    store.tasks = cloneArray(SEED_TASKS);
-    store.comments = cloneArray(SEED_COMMENTS);
-    store.activity = cloneArray(SEED_ACTIVITY);
+let db: OrbitDB = seedDb();
+
+export function resetDb(): void {
+    db = seedDb();
+}
+
+export function getDb(): OrbitDB {
+    return db;
 }

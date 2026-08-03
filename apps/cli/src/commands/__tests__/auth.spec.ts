@@ -10,10 +10,13 @@ const mocks = vi.hoisted(() => ({
     loadAuthConfig: vi.fn(),
     runCustomLoginScript: vi.fn(),
     resolveHandoffBlockers: vi.fn(() => 0),
+    runBoundedDiscover: vi.fn(async () => {}),
+    hasAuthenticatedSiteKnowledge: vi.fn(() => true),
     spinner: {
         start: vi.fn(),
         succeed: vi.fn(),
         fail: vi.fn(),
+        warn: vi.fn(),
         stop: vi.fn(),
         text: "",
     },
@@ -28,6 +31,8 @@ vi.mock("@raiken/core", async (importOriginal) => {
         looksLikeLoginUrl: vi.fn(() => false),
         resolveHandoffBlockers: mocks.resolveHandoffBlockers,
         runCustomLoginScript: mocks.runCustomLoginScript,
+        runBoundedDiscover: mocks.runBoundedDiscover,
+        hasAuthenticatedSiteKnowledge: mocks.hasAuthenticatedSiteKnowledge,
     };
 });
 
@@ -121,6 +126,77 @@ describe("authCommand custom login", () => {
     it("lets --manual override a configured script", () => {
         expect(shouldRunCustomLogin({ manual: true }, "auth/login.ts")).toBe(false);
         expect(shouldRunCustomLogin({}, "auth/login.ts")).toBe(true);
+    });
+});
+
+/**
+ * The session file is not the deliverable — pages captured with it are. Auth
+ * that stops at "saved" leaves the next cover drafting from the signed-out app
+ * while every visible signal says the project is set up.
+ */
+describe("authCommand chains into discovery", () => {
+    let projectPath: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.runBoundedDiscover.mockResolvedValue(undefined);
+        mocks.hasAuthenticatedSiteKnowledge.mockReturnValue(true);
+        projectPath = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cli-auth-")));
+        cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(projectPath);
+        mocks.loadAuthConfig.mockReturnValue({});
+    });
+
+    afterEach(() => {
+        cwdSpy.mockRestore();
+        fs.rmSync(projectPath, { recursive: true, force: true });
+    });
+
+    it("crawls the app with a session imported from flags", async () => {
+        await authCommand({ cookie: "session=abc", domain: "http://127.0.0.1:5180" });
+
+        expect(mocks.runBoundedDiscover).toHaveBeenCalledWith(projectPath, "http://127.0.0.1:5180");
+    });
+
+    it("seeds from the Playwright baseURL rather than the login URL", async () => {
+        fs.writeFileSync(
+            path.join(projectPath, "playwright.config.ts"),
+            `export default { use: { baseURL: "http://127.0.0.1:4200" } };`,
+        );
+
+        await authCommand({ cookie: "session=abc", domain: "http://127.0.0.1:5180" });
+
+        expect(mocks.runBoundedDiscover).toHaveBeenCalledWith(projectPath, "http://127.0.0.1:4200");
+    });
+
+    it("honours --no-discover", async () => {
+        await authCommand({
+            cookie: "session=abc",
+            domain: "http://127.0.0.1:5180",
+            discover: false,
+        });
+
+        expect(mocks.runBoundedDiscover).not.toHaveBeenCalled();
+    });
+
+    // The session is already on disk by this point, so a crawl that cannot run
+    // (app down, wrong port) must not read as "auth failed".
+    it("keeps the saved session when the crawl fails", async () => {
+        mocks.runBoundedDiscover.mockRejectedValue(new Error("connection refused"));
+
+        await authCommand({ cookie: "session=abc", domain: "http://127.0.0.1:5180" });
+
+        expect(mocks.spinner.warn).toHaveBeenCalled();
+        expect(fs.existsSync(path.join(projectPath, ".raiken", "auth-state.json"))).toBe(true);
+    });
+
+    it("says so when the crawl reaches nothing behind the login", async () => {
+        mocks.hasAuthenticatedSiteKnowledge.mockReturnValue(false);
+
+        await authCommand({ cookie: "session=abc", domain: "http://127.0.0.1:5180" });
+
+        expect(mocks.spinner.succeed).not.toHaveBeenCalled();
+        expect(mocks.spinner.warn).toHaveBeenCalled();
     });
 });
 

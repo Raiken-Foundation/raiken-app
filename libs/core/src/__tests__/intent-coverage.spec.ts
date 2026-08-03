@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     assessIntentCoverage,
+    cleanScenarioDescription,
     extractAcs,
     extractIntentCriteria,
     significantTokens,
@@ -21,9 +22,10 @@ describe("extractAcs", () => {
 
 describe("intent criteria splitting", () => {
     it("splits free text on then", () => {
-        expect(
-            splitScenarioClauses("sign in with email then see the dashboard"),
-        ).toEqual(["sign in with email", "see the dashboard"]);
+        expect(splitScenarioClauses("sign in with email then see the dashboard")).toEqual([
+            "sign in with email",
+            "see the dashboard",
+        ]);
     });
 
     it("uses AC lines when present", () => {
@@ -95,5 +97,49 @@ test('x', async ({ page }) => {
         const result = assessIntentCoverage("click Go then see success message", draft);
         expect(result.uncovered.length).toBe(result.criteria.length);
         expect(result.reasons.length).toBeGreaterThan(0);
+    });
+});
+
+describe("imperative wrapper prompts (one-shot style)", () => {
+    it("strips a 'draft a playwright test: …' wrapper before scoring", () => {
+        const draft = `import { test, expect } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('signed-in admin sees the projects list', async ({ page }) => {
+  await page.goto('/projects');
+  await expect(page.getByRole('link', { name: 'helix-redesign' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
+});
+`;
+        const result = assessIntentCoverage(
+            "draft a playwright test: signed-in admin sees the projects list",
+            draft,
+        );
+        expect(result.uncovered).toEqual([]);
+        expect(result.reasons).toEqual([]);
+    });
+
+    it("counts test titles as draft signal for paraphrased scenarios", () => {
+        const draft = `import { test, expect } from '@playwright/test';
+test.use({ storageState: '.raiken/auth-state.json' });
+test('signed-in member opens the activity page and sees recent activity', async ({ page }) => {
+  await page.goto('/activity');
+  await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible();
+  await expect(page.getByTestId('activity-feed').locator('li')).toHaveCount(5);
+});
+`;
+        const result = assessIntentCoverage(
+            "signed-in member opens the activity page and sees recent activity",
+            draft,
+        );
+        expect(result.uncovered).toEqual([]);
+        expect(result.reasons).toEqual([]);
+    });
+
+    it("does not mistake a domain phrase like 'add a test user' for a wrapper", () => {
+        expect(cleanScenarioDescription("add a test user to the team")).toBe(
+            "add a test user to the team",
+        );
+        expect(cleanScenarioDescription("cover the login flow")).toBe("cover the login flow");
+        expect(cleanScenarioDescription("draft a playwright test: sign in")).toBe("sign in");
     });
 });

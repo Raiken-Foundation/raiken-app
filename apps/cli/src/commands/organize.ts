@@ -39,7 +39,7 @@ export async function organizeCommand(options: OrganizeCommandOptions): Promise<
     const hasChanges = hasProposedChanges(result);
 
     if (options.json && !options.yes) {
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify(redactSecrets(result), null, 2)}\n`);
     } else if (!options.json) {
         printReport(result);
     }
@@ -69,7 +69,9 @@ export async function organizeCommand(options: OrganizeCommandOptions): Promise<
     const applyResult = applyOrganizePlan(projectPath, result);
 
     if (options.json) {
-        process.stdout.write(`${JSON.stringify({ plan: result, apply: applyResult }, null, 2)}\n`);
+        process.stdout.write(
+            `${JSON.stringify({ plan: redactSecrets(result), apply: applyResult }, null, 2)}\n`,
+        );
     } else {
         console.log();
         if (applyResult.movedFiles > 0) {
@@ -97,6 +99,33 @@ function hasProposedChanges(result: OrganizeResult): boolean {
     const hasMoves = (result.testPlan?.moves.length ?? 0) > 0;
     const hasConfigChanges = (result.configCleanup?.changes.length ?? 0) > 0;
     return hasMoves || hasConfigChanges;
+}
+
+/**
+ * The organize result embeds a cleaned raiken.config.json, which carries the
+ * plaintext AI API key. JSON is a scripting surface — logs, CI dashboards —
+ * so the key must never be echoed there.
+ */
+function redactSecrets<T>(value: T): T {
+    if (Array.isArray(value)) {
+        return value.map((item) => redactSecrets(item)) as unknown as T;
+    }
+    if (value !== null && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (
+                (key === "apiKey" || key === "api_key" || key.toLowerCase().endsWith("apikey")) &&
+                typeof item === "string" &&
+                item.length > 0
+            ) {
+                out[key] = "sk-…(redacted)";
+            } else {
+                out[key] = redactSecrets(item);
+            }
+        }
+        return out as unknown as T;
+    }
+    return value;
 }
 
 async function confirmApply(): Promise<boolean> {

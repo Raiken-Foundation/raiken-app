@@ -65,9 +65,9 @@ raiken status                 # shows missing site knowledge clearly
 raiken doctor                 # flags narrow testMatch / env footguns
 raiken doctor --fix            # one-shot widen testMatch → **/*.spec.ts
 
-# Optional but required for post-login flows:
+# Required for post-login flows — auth crawls behind the login once saved,
+# so there is no separate discover step to remember:
 raiken auth --url http://127.0.0.1:5180/login
-raiken discover http://127.0.0.1:5180
 
 # 3. Draft, run, repair
 raiken cover "about page shows the heading"
@@ -83,8 +83,10 @@ Notes for first-time users:
 - This playground ships with `testMatch: ["workflows.spec.ts"]`. Prefer
   `raiken doctor --fix` (or `raiken cover … --fix-config`) before expecting
   arbitrary `*.spec.ts` drafts to run.
-- Auth scenarios without `raiken auth` invent what happens after sign-in;
-  cover will say so and name the next commands.
+- Only `/`, `/about`, `/contact` and `/login` are reachable signed out. Draft an
+  auth scenario without running `raiken auth` and cover has never seen
+  `/dashboard`, so it guesses from the signed-out home page — it will say so and
+  name the command that fixes it.
 - `raiken test` on a missing / uncollected file exits non-zero and does **not**
   suggest repair — that is a config problem, not a broken assertion.
 

@@ -18,8 +18,15 @@ import {
 } from "../cover/draft-quality";
 import {
     applyRepairSetupFixes,
+    containsParentTraversal,
+    describeDroppedScenarioExpectation,
+    describeParentTraversal,
+    describeRegressedSelector,
     describeTimeoutFocus,
     extractProvenAbsentLocators,
+    extractProvenPresentSelectors,
+    missingScenarioExpectations,
+    scenarioExpectedTokens,
     stillAssertsAbsentLocators,
 } from "../cover/repair-setup";
 import {
@@ -123,6 +130,136 @@ Error: element(s) not found
 
         const replaced = `await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();`;
         expect(stillAssertsAbsentLocators(replaced, absent)).toEqual([]);
+    });
+});
+
+describe("proven-present locators", () => {
+    const strictMode = `Error: locator.click: Error: strict mode violation: page.getByTestId("stat-active") resolved to 2 elements:
+    1) <div data-testid="stat-active">…</div>
+    2) <div data-testid="stat-active">…</div>
+`;
+
+    it("extracts selectors the run proved present (strict-mode violations)", () => {
+        const selectors = extractProvenPresentSelectors(strictMode);
+        expect(selectors).toHaveLength(1);
+        expect(selectors[0]).toEqual({
+            locator: 'page.getByTestId("stat-active")',
+            value: "stat-active",
+        });
+    });
+
+    it("carries the unambiguous aka alternatives Playwright prints", () => {
+        const selectors = extractProvenPresentSelectors(
+            `Error: strict mode violation: getByText('Onboarding flow redesign') resolved to 2 elements:
+    1) <p class="muted" data-testid="project-description">Onboarding flow redesign</p> aka getByTestId('project-description')
+    2) <p>Onboarding flow redesign</p> aka getByTestId('overview-panel').getByText('Onboarding flow redesign')
+`,
+        );
+        expect(selectors[0]).toMatchObject({
+            value: "Onboarding flow redesign",
+            alternatives: [
+                "getByTestId('project-description')",
+                "getByTestId('overview-panel').getByText('Onboarding flow redesign')",
+            ],
+        });
+    });
+
+    it("treats zero matches as absence, not presence", () => {
+        expect(
+            extractProvenPresentSelectors(
+                "Error: element(s) not found\n  - waiting for getByRole('heading')",
+            ),
+        ).toEqual([]);
+        expect(extractProvenPresentSelectors("resolved to 0 elements")).toEqual([]);
+    });
+
+    it("ignores single-match reports (no strict-mode ambiguity)", () => {
+        expect(
+            extractProvenPresentSelectors(
+                "strict mode violation: getByRole('link') resolved to 1 element",
+            ),
+        ).toEqual([]);
+    });
+
+    it("extracts role-based locators too", () => {
+        const role = `Error: locator.click: Error: strict mode violation: page.getByRole('link', { name: 'Projects' }) resolved to 3 elements:
+    1) <a href="/projects">Projects</a>
+    2) <a href="/projects">Projects</a>
+    3) <a href="/projects">Projects</a>
+`;
+        const selectors = extractProvenPresentSelectors(role);
+        expect(selectors[0]?.value).toBe("link");
+    });
+
+    it("survives ANSI colour codes around the locator", () => {
+        const coloured = strictMode.replace(
+            "resolved to 2 elements",
+            "\u001b[2mresolved to 2 elements\u001b[22m",
+        );
+        expect(extractProvenPresentSelectors(coloured)).toEqual(
+            extractProvenPresentSelectors(strictMode),
+        );
+    });
+
+    it("deduplicates repeated violations of the same selector", () => {
+        expect(extractProvenPresentSelectors(`${strictMode}\n${strictMode}`)).toHaveLength(1);
+    });
+
+    it("escalation guidance names the proven selectors and the fix direction", () => {
+        const guidance = describeRegressedSelector([
+            { locator: 'getByTestId("stat-active")', value: "stat-active" },
+        ]);
+        expect(guidance).toContain("stat-active");
+        expect(guidance).toContain("strict-mode ambiguity");
+        expect(guidance).toContain(".first()");
+    });
+});
+
+describe("parent-traversal rejection", () => {
+    it("detects locator('..') and xpath ancestor climbs", () => {
+        expect(
+            containsParentTraversal("const c = task.locator('..').getByRole('combobox');"),
+        ).toEqual(["locator('..')"]);
+        expect(
+            containsParentTraversal(
+                "await page.locator('xpath=ancestor::*[contains(@class, \"task\")]//select')",
+            ),
+        ).toHaveLength(1);
+        expect(containsParentTraversal("await row.getByRole('combobox')")).toEqual([]);
+    });
+
+    it("escalation names the container-first remedy", () => {
+        const guidance = describeParentTraversal(["locator('..')"]);
+        expect(guidance).toContain("never stable");
+        expect(guidance).toContain("task-row");
+    });
+});
+
+describe("scenario expectation guards (false-green prevention)", () => {
+    const scenario = "verify the price is exactly $59.00 and the cart badge shows 1";
+
+    it("extracts dollar amounts, numbers, and quoted phrases from a scenario", () => {
+        const tokens = scenarioExpectedTokens(scenario);
+        expect(tokens).toContain("$59.00");
+        expect(tokens).toContain("1");
+    });
+
+    it("reports expectations a draft does not assert", () => {
+        const asserting =
+            "await expect(price).toHaveText('$59.00'); await expect(badge).toHaveText('1');";
+        expect(missingScenarioExpectations(asserting, scenario)).toEqual([]);
+        const missing = missingScenarioExpectations(
+            "await expect(price).toHaveText('$49.00');",
+            scenario,
+        );
+        expect(missing).toContain("$59.00");
+        expect(missing).toContain("1");
+    });
+
+    it("escalation names the values and the app-may-be-broken direction", () => {
+        const guidance = describeDroppedScenarioExpectation(["$59.00"]);
+        expect(guidance).toContain("$59.00");
+        expect(guidance).toContain("false green");
     });
 });
 

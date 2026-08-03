@@ -1,15 +1,15 @@
 import { Link } from "react-router-dom";
 
-export default function NotFoundPage() {
+export function NotFoundPage() {
     return (
-        <div className="page not-found-page" data-testid="not-found-page">
-            <h1>Lost in space</h1>
-            <p className="page-subtitle">
-                The page you're looking for doesn't exist (or never did).
+        <main className="page" data-testid="not-found-page">
+            <h1>Page not found</h1>
+            <p className="muted">That route does not exist in Orbit.</p>
+            <p>
+                <Link to="/dashboard" className="link">
+                    Back to the dashboard
+                </Link>
             </p>
-            <Link to="/" className="btn btn-primary" data-testid="not-found-home">
-                Back home
-            </Link>
-        </div>
+        </main>
     );
 }

@@ -4,6 +4,8 @@ import type { AuthBlocker, DiscoveredPage, DiscoverySession } from "./types";
 
 export interface SiteKnowledgeStats {
     pagesCount: number;
+    /** Subset of `pagesCount` captured while a session was loaded. */
+    authenticatedPagesCount: number;
     linksCount: number;
     verifiedLinksCount: number;
     brokenLinksCount: number;

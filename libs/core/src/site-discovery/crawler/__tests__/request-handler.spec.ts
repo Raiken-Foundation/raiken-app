@@ -217,6 +217,37 @@ describe("per-run counter parity with persisted rows", () => {
         expect(stats.pagesDiscovered).toBe(1);
     });
 
+    /**
+     * Provenance follows the *loaded* state, not the configured path: an
+     * expired auth-state.json leaves it null, and pages crawled with it really
+     * are the signed-out app.
+     */
+    it("stamps pages with whether the crawl carried a session", async () => {
+        const signedOut = makeDeps();
+        await createCrawlPageProcessor(signedOut.deps)(contextFor(START_URL, makePage()));
+        expect(signedOut.siteDb.savePage).toHaveBeenCalledWith(
+            expect.objectContaining({ capturedAuthenticated: false }),
+        );
+
+        const signedIn = makeDeps({ playwrightStorageState: STORAGE_STATE });
+        await createCrawlPageProcessor(signedIn.deps)(contextFor(START_URL, makePage()));
+        expect(signedIn.siteDb.savePage).toHaveBeenCalledWith(
+            expect.objectContaining({ capturedAuthenticated: true }),
+        );
+    });
+
+    it("upgrades an already-known page when re-crawled with a session", async () => {
+        const { deps, siteDb } = makeDeps({ playwrightStorageState: STORAGE_STATE });
+        siteDb.getPage.mockReturnValue({ id: 1, url: START_URL } as never);
+
+        await createCrawlPageProcessor(deps)(contextFor(START_URL, makePage()));
+
+        expect(siteDb.updatePageContent).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ capturedAuthenticated: true }),
+        );
+    });
+
     it("counts a re-extracted duplicate link only when the insert lands", async () => {
         mockedExtractLinks.mockResolvedValue([
             { href: "/about", text: "About", dataTestId: null, tagName: "a", role: "link" },

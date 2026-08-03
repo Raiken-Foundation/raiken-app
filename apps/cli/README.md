@@ -144,10 +144,11 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 | `raiken test --watch` | Re-run on every project change until Ctrl+C |
 | `raiken test --only-flaky` | Run only quarantined specs |
 | `raiken test --fix` | After a failure, run the AI repair flow |
+| `raiken test --allow-unverified` | Run specs carrying the `@raiken-unverified` marker (default: refuse, exit 1) |
 | `raiken repair [file]` | AI-repair a failing spec: runs it, shows the fix as a diff, writes after confirmation (`--apply`, `--json`, `--no-interpret`) |
 | `raiken report [file]` | HTML/Markdown/JSON report with screenshots (`--from`, `--format`, `--output`, `--open`) |
 | `raiken show-trace [path]` | Open a Playwright trace.zip in the trace viewer (newest when omitted) |
-| `raiken cover <target>` | Draft a test from an AC reference, symbol, or free text (`-t`, `-o`, `--dir`, `--dry-run`, `--allow-ungrounded`, `--fix-config`, `--json`) |
+| `raiken cover <target>` | Draft a test from an AC reference, symbol, or free text (`-t`, `-o`, `--dir`, `--dry-run`, `--allow-ungrounded`, `--fix-config`, `--force`, `--verify`, `--json`) |
 | `raiken doctor` | Environment checks (Playwright, browsers, webServer script, baseURL) + flake anti-pattern lint (`--dir`, `--fail-on`, `--fix`, `--json`) |
 | `raiken eval <suite> [target]` | Eval harness: `playground`, `benchmark`, `flakiness <spec>` (`--runs`, `--expect-tests`, `--out`) |
 | `raiken organize` | AI-assisted test-dir + config cleanup (`-y`, `--tests-only`, `--config-only`) |
@@ -172,7 +173,7 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 | `raiken discover [url]` | Autonomously discover web application structure (`--max-pages`, `--auth`, `--continue`, `--status`) |
 | `raiken knowledge` (alias `kb`) | Inspect discovered pages, links, and blockers |
 | `raiken memory` | What the agent has learned about this project (`show` / `clear`) |
-| `raiken auth` | Save browser session state for authenticated tests (`--url`, `--script`, `--manual`, `--cookie`, `--write-login-script`) |
+| `raiken auth` | Log in, save the session, then crawl the app behind it (`--url`, `--script`, `--manual`, `--cookie`, `--write-login-script`, `--no-discover`) |
 
 ### The everyday test loop
 
@@ -181,7 +182,7 @@ stdout (diagnostics go to stderr), and exit codes are `0` success, `1` runtime/t
 raiken status                # missing site knowledge → discover hint
 raiken doctor --fix           # widen a restrictive testMatch, etc.
 raiken discover <url>        # or let cover auto-discover when seed URL is known
-raiken auth --url <login>    # before post-login scenarios
+raiken auth --url <login>    # before post-login scenarios (crawls behind the login too)
 
 raiken cover "login as admin and see the dashboard"
 raiken test e2e/<draft>.spec.ts
@@ -194,10 +195,30 @@ raiken show-trace            # open the newest failure trace
 ```
 
 `cover` / `-p` refuse or auto-discover when site knowledge is empty (unless
-`--allow-ungrounded`). Auth scenarios without a saved session are flagged:
-everything after sign-in is unverified until you run `raiken auth` then
-`raiken discover`. A blocked draft (e.g. filename outside `testMatch`) points
-at `raiken doctor --fix` / `--fix-config` instead of suggesting a doomed
+`--allow-ungrounded`).
+
+Post-login scenarios need pages captured *with* a session, which a saved
+`auth-state.json` does not provide on its own. `raiken auth` therefore crawls
+the app once the session is saved (`--no-discover` skips it), and a post-login
+`cover` re-crawls with the session if it finds one but no pages behind the
+login. Until such pages exist, the draft is flagged as unverified after
+sign-in — including when a session file is already present.
+
+Drafts whose review is grounding-driven (locators nothing captured proves, or
+post-login state no session-backed crawl saw) are stamped
+`// @raiken-unverified`. `raiken test` refuses to run them (exit 1) so an
+unverified draft cannot green-light CI — review the spec, remove the marker
+once it is grounded, or pass `--allow-unverified` to run it anyway.
+
+`raiken cover --verify` closes the loop at generation time: it runs the draft
+against the app and drives the same bounded, auto-applied repair loop
+`raiken repair` uses until the draft runs green — or it stops, reverts, and
+reports honestly. Cover drafts are also grounded in the app's actual source
+code (gathered the same way the interactive agent gathers it), so the model
+derives structure from the code rather than guessing it from text snapshots.
+
+A blocked draft (e.g. filename outside `testMatch`) points at
+`raiken doctor --fix` / `--fix-config` instead of suggesting a doomed
 `raiken test`.
 
 Quarantining a flaky spec — add it to `raiken.config.json` and it is skipped by default:

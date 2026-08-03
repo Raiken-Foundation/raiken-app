@@ -36,6 +36,12 @@ describe("getModelCapabilities", () => {
         expect(getModelCapabilities("openai", "o3-mini")).toEqual({
             vision: false,
             structuredOutput: true,
+            reasoning: true,
+        });
+        expect(getModelCapabilities("deepseek", "deepseek-reasoner")).toEqual({
+            vision: false,
+            structuredOutput: false,
+            reasoning: true,
         });
     });
 

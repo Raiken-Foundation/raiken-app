@@ -43,6 +43,13 @@ export function routeAfterGoalClassification(state: GraphStateType): string {
         if (state.nextTool === "domCapture" || state.targetUrl) return "navigate";
         return "gatherContext";
     }
+    // A URL the user mentioned or implied is a live-page target: honor it by
+    // opening the browser even when the classifier picked a code/explain tool.
+    // Weak classifiers routinely label "open the about page" as explain/none
+    // while still setting targetUrl — without this the agent answers from an
+    // unopened (about:blank) browser. Discovery reads stay on the knowledge
+    // path, which answers from crawled pages without a live browser.
+    if (state.targetUrl && state.nextTool !== "discoveryRead") return "navigate";
     if (state.nextTool === "discoveryRead") return "answerQuestions";
     if (
         state.nextTool === "codeSearch" ||

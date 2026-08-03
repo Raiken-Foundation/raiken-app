@@ -131,6 +131,76 @@ describe("SiteKnowledgeDB", () => {
             expect(retrieved?.visitCount).toBe(2);
         });
 
+        /**
+         * Cover needs to tell "we have pages" from "we have pages from behind
+         * the login" — a distinction the count alone cannot make, which is how
+         * a post-login draft ends up written from the signed-out home page.
+         */
+        it("records whether a page was captured with a session", () => {
+            const base = {
+                projectPath: testDir,
+                normalizedUrl: "",
+                title: "Page",
+                snapshotJson: null,
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            };
+            siteDb.savePage({
+                ...base,
+                url: "http://localhost:3000/",
+                normalizedUrl: "http://localhost:3000/",
+            });
+            siteDb.savePage({
+                ...base,
+                url: "http://localhost:3000/dashboard",
+                normalizedUrl: "http://localhost:3000/dashboard",
+                capturedAuthenticated: true,
+            });
+
+            expect(siteDb.getPage("http://localhost:3000/")?.capturedAuthenticated).toBe(false);
+            expect(siteDb.getPage("http://localhost:3000/dashboard")?.capturedAuthenticated).toBe(
+                true,
+            );
+            expect(siteDb.getPagesCount()).toBe(2);
+            expect(siteDb.getAuthenticatedPagesCount()).toBe(1);
+            expect(siteDb.getStats().authenticatedPagesCount).toBe(1);
+        });
+
+        // The flag describes the snapshot currently stored, so re-crawling the
+        // same URL with a session has to upgrade it — otherwise the signed-in
+        // content sits behind a signed-out label and cover keeps re-crawling.
+        it("upgrades provenance when a page is re-crawled with a session", () => {
+            siteDb.savePage({
+                projectPath: testDir,
+                url: "http://localhost:3000/dashboard",
+                normalizedUrl: "http://localhost:3000/dashboard",
+                title: "Sign in",
+                snapshotJson: '{"pre":"login"}',
+                formsJson: null,
+                parentUrl: null,
+                navigationAction: null,
+                depth: 0,
+                discoveredAt: Date.now(),
+                lastVisitedAt: Date.now(),
+                visitCount: 1,
+            });
+            expect(siteDb.getAuthenticatedPagesCount()).toBe(0);
+
+            siteDb.updatePageContent("http://localhost:3000/dashboard", {
+                title: "Dashboard",
+                snapshotJson: '{"post":"login"}',
+                formsJson: null,
+                capturedAuthenticated: true,
+            });
+
+            expect(siteDb.getAuthenticatedPagesCount()).toBe(1);
+        });
+
         it("updatePageVisit only bumps metadata, leaving content untouched", () => {
             siteDb.savePage({
                 projectPath: testDir,

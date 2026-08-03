@@ -27,7 +27,13 @@ vi.mock("@raiken/core", async (importActual) => {
     };
 });
 
-const { missingAiKeyMessage, repairCommand } = await import("../repair");
+const {
+    missingAiKeyMessage,
+    repairCommand,
+    isAttemptOscillation,
+    withRepairDeadline,
+    RepairDeadlineExceededError,
+} = await import("../repair");
 const { withThrowExit } = await import("../../repl/exit");
 
 const AI_ENV_VARS = [
@@ -131,5 +137,60 @@ describe("repairCommand fail-fast order", () => {
         const code = await withThrowExit(() => repairCommand(undefined, {}));
         expect(code).toBe(0);
         expect(runTests).toHaveBeenCalledOnce();
+    });
+});
+
+describe("isAttemptOscillation", () => {
+    const A = "test('a', async ({ page }) => { await page.goto('/'); });\n";
+    const B = "test('b', async ({ page }) => { await page.goto('/b'); });\n";
+
+    it("detects a fix that reverts the previous attempt's change (A→B→A)", () => {
+        // attempt N-1 started from A; attempt N returns A again.
+        expect(isAttemptOscillation(A, A)).toBe(true);
+        expect(isAttemptOscillation(A, B)).toBe(false);
+    });
+
+    it("never fires on the first attempt", () => {
+        expect(isAttemptOscillation(undefined, A)).toBe(false);
+    });
+
+    it("ignores whitespace differences", () => {
+        expect(isAttemptOscillation(`${A}\n`, `  ${A}`)).toBe(true);
+    });
+});
+
+describe("withRepairDeadline", () => {
+    it("resolves with elapsed time when the call finishes first", async () => {
+        const timed = await withRepairDeadline("AI fix", 500, async () => "ok");
+        expect(timed.result).toBe("ok");
+        expect(timed.elapsedMs).toBeLessThan(500);
+    });
+
+    it("rejects with a distinct error when the deadline fires", async () => {
+        await expect(
+            withRepairDeadline("verify run", 40, () => new Promise(() => {})),
+        ).rejects.toThrow(/verify run.*deadline/i);
+    });
+
+    it("aborts the underlying call so a hung request is actually cancelled", async () => {
+        let seen: AbortSignal | undefined;
+        await expect(
+            withRepairDeadline("AI fix", 40, (signal) => {
+                seen = signal;
+                return new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () =>
+                        reject(new DOMException("aborted", "AbortError")),
+                    );
+                });
+            }),
+        ).rejects.toBeInstanceOf(RepairDeadlineExceededError);
+        expect(seen?.aborted).toBe(true);
+    });
+
+    it("does not reject a fast call after the deadline timer was cleared", async () => {
+        const timed = await withRepairDeadline("AI fix", 500, async () => "ok");
+        // The clearTimeout in finally means no stray rejection after resolve.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(timed.result).toBe("ok");
     });
 });

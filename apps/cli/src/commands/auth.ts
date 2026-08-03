@@ -17,17 +17,18 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import {
     acquireProjectOperation,
+    clearAuthLivenessCache,
     HandoffBlockerResolutionError,
     type InteractiveAuthHandoffReason,
     resolveHandoffBlockers,
     runCustomLoginScript,
     runInteractiveAuthHandoff,
     writeValidatedAuthState,
-    clearAuthLivenessCache,
 } from "@raiken/core";
 import { loadAuthConfig, resolveAuthStorageStateDestination } from "@raiken/shared/server";
 import chalk from "chalk";
 import ora from "ora";
+import { dim } from "../agent-stream";
 import { CLI_EXIT, exitUsage, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../repl/exit";
 
@@ -48,6 +49,8 @@ export interface AuthOptions {
     headed?: boolean;
     /** Write .raiken/login.ts from the last observed login form. */
     writeLoginScript?: boolean;
+    /** `--no-discover`: keep the saved session without crawling behind it. */
+    discover?: boolean;
     /**
      * REPL integration hook. Standalone auth creates its own readline watcher;
      * the interactive shell supplies one backed by its existing interface so
@@ -98,9 +101,15 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             );
             cliExit(CLI_EXIT.USAGE);
         }
-        console.log(chalk.green(`\n✓ Wrote login script ${path.relative(projectPath, written.path)}`));
+        console.log(
+            chalk.green(`\n✓ Wrote login script ${path.relative(projectPath, written.path)}`),
+        );
         if (written.patchedConfig) {
-            console.log(chalk.dim("   Set auth.customLoginScript to .raiken/login.ts in raiken.config.json"));
+            console.log(
+                chalk.dim(
+                    "   Set auth.customLoginScript to .raiken/login.ts in raiken.config.json",
+                ),
+            );
         } else {
             console.log(
                 chalk.dim(
@@ -131,11 +140,13 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     // and writes it to the same auth-state.json the discover command reads.
     if (options.fromStateFile) {
         await importFromStateFile(options.fromStateFile, authStatePath, projectPath);
+        await discoverWithSession(projectPath, options, 0);
         return;
     }
 
     if (options.cookie || (options.storage && options.storage.length > 0)) {
         await importFromFlags(options, authStatePath, projectPath);
+        await discoverWithSession(projectPath, options, 0);
         return;
     }
 
@@ -174,6 +185,7 @@ export async function authCommand(options: AuthOptions): Promise<void> {
                 console.log(chalk.dim(`   Blockers cleared: ${resolvedBlockers}`));
             }
             console.log();
+            await discoverWithSession(projectPath, options, resolvedBlockers);
             return;
         } catch (error) {
             scriptSpinner.fail(chalk.red("Custom login failed"));
@@ -188,6 +200,9 @@ export async function authCommand(options: AuthOptions): Promise<void> {
     const spinner = ora({ text: "Launching browser...", spinner: "dots" }).start();
 
     const operation = await acquireProjectOperation(projectPath, "browser");
+    // Set once the session is on disk. The crawl runs after the operation is
+    // released, since it needs the browser slot this block still holds.
+    let savedBlockers: number | null = null;
     try {
         let browserLaunched = false;
         let watchSpinner: ReturnType<typeof ora> | null = null;
@@ -314,14 +329,116 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             );
             cliExit(CLI_EXIT.RUNTIME_FAILURE);
         }
+        savedBlockers = resolvedBlockers;
     } finally {
         await operation.release();
+    }
+
+    if (savedBlockers !== null) {
+        await discoverWithSession(projectPath, options, savedBlockers);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Crawl the app with the session we just saved.
+ *
+ * A session on disk teaches Raiken nothing on its own: cover drafts from
+ * captured pages, so without this step the next `raiken cover "log in and …"`
+ * still only knows the signed-out app — while looking, to the user, completely
+ * set up. Requiring people to know that a second command exists is the trap
+ * this closes.
+ *
+ * Best-effort: the session is already saved, so a crawl failure (app not
+ * running, no baseURL) is a warning with the manual command, never an error.
+ */
+async function discoverWithSession(
+    projectPath: string,
+    options: AuthOptions,
+    resolvedBlockers: number,
+): Promise<void> {
+    if (options.discover === false) return;
+    // Clearing blockers hands a paused crawl back to whoever started it; a
+    // second crawl here would only contend for the discovery lock.
+    if (resolvedBlockers > 0) return;
+
+    const { resolveDiscoverSeedUrl, runBoundedDiscover, hasAuthenticatedSiteKnowledge } =
+        await import("@raiken/core");
+
+    // Playwright's baseURL is the app under test; the login URL and the
+    // imported cookie's domain are fallbacks for projects without one.
+    const seedUrl =
+        (await resolveDiscoverSeedUrl(projectPath)) ??
+        originOf(options.url) ??
+        originOf(options.domain);
+    if (!seedUrl) {
+        console.log(
+            chalk.dim(
+                "Next: raiken discover <url> — cover drafts from crawled pages, so nothing " +
+                    "behind the login is known until the app is crawled with this session.\n",
+            ),
+        );
+        return;
+    }
+
+    const spinner = ora({
+        text: `Discovering ${seedUrl} with the new session...`,
+        spinner: "dots",
+    }).start();
+    // The state just imported is scoped to a specific origin; when the crawl
+    // seed (usually Playwright's baseURL) is a different origin, the session
+    // cannot apply and the crawl is silently signed out. Say so before the
+    // crawl instead of letting the "Crawled, but nothing was captured" branch
+    // deliver the news without the why.
+    try {
+        const { describeStorageStateOriginMismatch } = await import("@raiken/core");
+        const mismatch = describeStorageStateOriginMismatch(projectPath, seedUrl);
+        if (mismatch) {
+            spinner.warn(chalk.yellow(mismatch));
+            console.log(dim(`   Session is saved. Run: raiken discover ${seedUrl}\n`));
+            return;
+        }
+    } catch {
+        /* best-effort warning — never block the crawl on it */
+    }
+    try {
+        await runBoundedDiscover(projectPath, seedUrl);
+    } catch (error) {
+        spinner.warn(chalk.yellow("Could not crawl with the new session"));
+        console.log(chalk.dim(`   ${safeCliErrorMessage(error)}`));
+        console.log(chalk.dim(`   Session is saved. Run: raiken discover ${seedUrl}\n`));
+        return;
+    }
+
+    if (hasAuthenticatedSiteKnowledge(projectPath)) {
+        spinner.succeed(chalk.green("Captured pages behind the login"));
+        console.log(chalk.dim("   Cover can now draft post-login tests from real pages.\n"));
+        return;
+    }
+    spinner.warn(chalk.yellow("Crawled, but nothing behind the login was captured"));
+    console.log(
+        chalk.dim(
+            `   The session may not apply to ${seedUrl}. Post-login drafts stay unverified.\n`,
+        ),
+    );
+}
+
+/**
+ * Origin of a login URL or imported domain, used as a crawl seed when
+ * Playwright has no baseURL. Bare hosts (`app.example.com`) are rejected
+ * rather than guessed at, since the scheme decides which app gets crawled.
+ */
+function originOf(url: string | undefined): string | null {
+    if (!url || url === "about:blank") return null;
+    try {
+        return new URL(url).origin;
+    } catch {
+        return null;
+    }
+}
 
 export function describeUnsavedHandoff(reason: InteractiveAuthHandoffReason): string {
     if (reason === "timeout") return "Timed out before login completed — nothing was saved.";
@@ -441,6 +558,13 @@ async function importFromFlags(
     if (!parsedDomain || !parsedDomain.hostname) {
         console.error(chalk.red(`\n✗ --domain "${options.domain}" is not a valid host or URL.`));
         cliExit(CLI_EXIT.USAGE);
+    }
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawDomain)) {
+        console.log(
+            chalk.dim(
+                `  Assuming https:// for "${rawDomain}" — pass --domain http://<host>:<port> if the app runs over plain http.\n`,
+            ),
+        );
     }
     const scheme = parsedDomain.protocol === "http:" ? "http" : "https";
     const host = parsedDomain.hostname.replace(/^\[|\]$/g, "");

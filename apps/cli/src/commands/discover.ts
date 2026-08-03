@@ -7,6 +7,7 @@
 import type { DiscoveryEvent, DiscoveryUxCallbacks } from "@raiken/core";
 import {
     describeAuthStateProblem,
+    describeStorageStateOriginMismatch,
     getProjectApplication,
     getResumeContext,
     inspectAuthState,
@@ -360,6 +361,20 @@ async function startDiscovery(
     const storageStatePath = resolveUsableDiscoveryAuthState(projectPath);
     if (storageStatePath) {
         console.log(chalk.dim(`  Auth:      ${storageStatePath}\n`));
+    }
+    // The saved session is scoped to specific origins; a crawl at a different
+    // origin runs signed out no matter how fresh the state file looks. Warn
+    // before crawling so the signed-out result doesn't read as post-login
+    // knowledge.
+    if (storageStatePath) {
+        try {
+            const mismatch = describeStorageStateOriginMismatch(projectPath, url);
+            if (mismatch) {
+                console.log(chalk.yellow(`  ⚠ ${mismatch}\n`));
+            }
+        } catch {
+            /* best-effort warning */
+        }
     }
 
     const { ux, progressInterval } = buildForegroundUx({

@@ -151,8 +151,20 @@ export const createNavigateNode =
             /* discovery unavailable — appOrigin stays as rememberedUrl (or null) */
         }
 
+        // Playwright config's baseURL — the project's best-known app origin
+        // (mirror cover). Read once: used as the last-resort target AND as the
+        // stale-memory recovery below.
+        let configBaseURL: string | null = null;
+        try {
+            const { readPlaywrightBaseURL } = await import("../../../testing/playwright-config");
+            configBaseURL = await readPlaywrightBaseURL(projectPath);
+        } catch {
+            /* no playwright config */
+        }
+
         const extractedUrl = extractUrlFromText(`${historyText}\n${state.userPrompt}`);
-        let url = state.targetUrl || extractedUrl || rememberedUrl || appOrigin;
+        const explicitTarget = !!(state.targetUrl || extractedUrl);
+        let url = state.targetUrl || extractedUrl || rememberedUrl || appOrigin || configBaseURL;
 
         // Resolve a relative / bare-path target ("/", "/overview") to an absolute
         // URL against the app origin. Playwright's page.goto rejects relative URLs
@@ -173,7 +185,6 @@ export const createNavigateNode =
         // applies to inferred entry (remembered origin) — an explicit user URL is
         // always respected.
         if (url && state.authPrecondition === "authenticated") {
-            const explicitTarget = !!(state.targetUrl || extractedUrl);
             try {
                 url = await resolveEntryUrl(projectPath, url, explicitTarget);
             } catch {
@@ -216,7 +227,28 @@ export const createNavigateNode =
         }
 
         onProgress?.("Navigating", url);
-        const navResult = await callTool("navigateTo", { url });
+        let navResult = await callTool("navigateTo", { url });
+
+        if (!navResult.success && !explicitTarget && configBaseURL && url !== configBaseURL) {
+            // Stale-memory recovery: the remembered/discovered origin can
+            // outlive the app (e.g. the dev server moved ports while
+            // project_base_url still points at the old one). An INFERRED
+            // target that fails gets one retry against the Playwright
+            // config's baseURL before we pause. Explicit user URLs are never
+            // retried — the user named that URL.
+            const retried = await callTool("navigateTo", { url: configBaseURL });
+            if (retried.success) {
+                navResult = retried;
+                url = configBaseURL;
+            } else {
+                navResult = {
+                    ...navResult,
+                    message:
+                        `${navResult.message ?? "unknown error"}\nAlso tried ${configBaseURL}: ` +
+                        (retried.message ?? "unknown error"),
+                };
+            }
+        }
 
         if (!navResult.success) {
             // Optional grounding (inferred base URL) failed → don't block the

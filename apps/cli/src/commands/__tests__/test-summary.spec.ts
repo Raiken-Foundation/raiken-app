@@ -30,6 +30,7 @@ describe("summarizeRunForCli", () => {
                 file: "/proj/e2e/cart.spec.ts",
                 line: 6,
                 durationMs: 5123,
+                error: 'expect(locator).toHaveText(expected) failed\n\nExpected: "2"',
             },
         ]);
         expect(summary.error).toContain("toHaveText");

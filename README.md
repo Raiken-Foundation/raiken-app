@@ -222,18 +222,26 @@ raiken knowledge|kb [section] [arg] [--limit <n>] [--json] [-f]
 raiken memory [show|clear] [--all] [--json] [-f]  # What the agent has learned about this project
                                # (--all includes run/session state; default is durable only)
 
-raiken auth                    # Save browser session state for authenticated tests
+raiken auth                    # Log in, save the session, and crawl the app behind it
   --url <url>  --script <path>  --manual  --headed  --timeout <ms>
   --cookie <pairs> --domain <host>  --storage <k=v>  --from-state-file <path>
-  --write-login-script
+  --write-login-script  --no-discover
 ```
 
 Cold-start habit for grounded drafts: keep the app running at Playwright
 `baseURL`, run `raiken doctor --fix` if `testMatch` is narrow, then
-`raiken discover` / `raiken auth` before expecting post-login cover drafts to
-assert real UI. `raiken cover` auto-discovers when knowledge is empty and a
-seed URL is known; without a saved session it will still flag auth scenarios
-as unverified after sign-in.
+`raiken discover` (and `raiken auth` for anything behind a login) before
+expecting cover drafts to assert real UI. `raiken cover` auto-discovers when
+knowledge is empty and a seed URL is known.
+
+Drafts are grounded in *crawled pages*, so a saved session teaches Raiken
+nothing until something is crawled with it — which is why `raiken auth` ends by
+crawling the app itself (`--no-discover` opts out). Until pages from behind the
+login exist, cover flags post-login scenarios as unverified after sign-in, and
+says so even when an `auth-state.json` is already on disk. Unverified drafts
+are stamped `// @raiken-unverified`, and `raiken test` refuses to run them
+(exit 1) unless `--allow-unverified` is passed — review the spec and remove
+the marker once it is grounded.
 
 Exit codes are scriptable: `0` success, `1` runtime/test failure, `2` usage error, `3` config/auth error, `4` busy conflict, `130` cancelled.
 

@@ -24,7 +24,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const authFixtureDir = path.join(repoRoot, "tools", "playground-auth");
+const authFixtureDir = path.join(repoRoot, "tools", "playground-tasks");
 const cliBin = path.join(repoRoot, "dist", "apps", "cli", "bin.cjs");
 
 /** Tests in the hand-written golden suite. Ground truth: all of them pass. */

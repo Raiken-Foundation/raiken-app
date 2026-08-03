@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { formatPrice } from "../components/ProductCard";
 import { EmptyState } from "../components/EmptyState";
+import { formatPrice } from "../components/ProductCard";
 import { useCart } from "../contexts/CartContext";
 import { useToast } from "../contexts/ToastContext";
 
@@ -50,12 +50,18 @@ export function CartPage() {
                     {lines.map(({ line, product }) => {
                         if (!product) return null;
                         return (
-                            <li key={line.productId} className="cart-row" data-testid={`cart-${product.slug}`}>
+                            <li
+                                key={line.productId}
+                                className="cart-row"
+                                data-testid={`cart-${product.slug}`}
+                            >
                                 <div className="cart-row-info">
                                     <Link to={`/product/${product.slug}`} className="cart-row-name">
                                         {product.name}
                                     </Link>
-                                    <span className="muted">{formatPrice(product.priceCents)} each</span>
+                                    <span className="muted">
+                                        {formatPrice(product.priceCents)} each
+                                    </span>
                                 </div>
                                 <div className="cart-row-controls">
                                     <label className="sr-only" htmlFor={`qty-${product.id}`}>
@@ -149,7 +155,11 @@ export function CartPage() {
                         <dd data-testid="total">{formatPrice(totals.totalCents)}</dd>
                     </div>
                 </dl>
-                <Link to="/checkout" className="button button-primary button-block" data-testid="checkout-link">
+                <Link
+                    to="/checkout"
+                    className="button button-primary button-block"
+                    data-testid="checkout-link"
+                >
                     Checkout ({itemCount} item{itemCount === 1 ? "" : "s"})
                 </Link>
             </section>

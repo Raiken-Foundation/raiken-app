@@ -1,15 +1,15 @@
 import { Route, Routes } from "react-router-dom";
-import { CartProvider } from "./contexts/CartContext";
-import { ToastProvider } from "./contexts/ToastContext";
 import { Navbar } from "./components/Navbar";
 import { Toasts } from "./components/Toasts";
-import { CatalogPage } from "./pages/CatalogPage";
-import { ProductDetailPage } from "./pages/ProductDetailPage";
+import { CartProvider } from "./contexts/CartContext";
+import { ToastProvider } from "./contexts/ToastContext";
 import { CartPage } from "./pages/CartPage";
+import { CatalogPage } from "./pages/CatalogPage";
 import { CheckoutPage } from "./pages/CheckoutPage";
 import { ConfirmationPage } from "./pages/ConfirmationPage";
-import { OrdersPage } from "./pages/OrdersPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { OrdersPage } from "./pages/OrdersPage";
+import { ProductDetailPage } from "./pages/ProductDetailPage";
 
 export default function App() {
     return (

@@ -61,7 +61,7 @@ export const PRODUCTS: Product[] = [
     {
         id: "p-halo-mon",
         slug: "halo-monitor",
-        name: "Halo 27\" 4K Monitor",
+        name: 'Halo 27" 4K Monitor',
         category: "display",
         priceCents: 34900,
         stock: 5,
@@ -70,7 +70,7 @@ export const PRODUCTS: Product[] = [
     {
         id: "p-arc-display",
         slug: "arc-display",
-        name: "Arc 24\" FHD Monitor",
+        name: 'Arc 24" FHD Monitor',
         category: "display",
         priceCents: 13900,
         stock: 9,

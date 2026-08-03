@@ -6,7 +6,7 @@
  *     (crawler/route discovery, auth-wall detection). No LLM key needed.
  *     Intended to run from the raiken repo root (or pass --dir).
  *   - `benchmark`: accuracy regression gates against the full
- *     `tools/playground-auth` fixture — blocker layering, resumed crawls,
+ *     `tools/playground-tasks` fixture — blocker layering, resumed crawls,
  *     authenticated route recall, modal selector grounding, auth
  *     preconditions. No LLM key needed; also expects the repo root.
  *   - `flakiness <testFile>`: project-agnostic — runs one spec N times against
@@ -74,13 +74,13 @@ export async function evalCommand(
     if (suite === "playground") {
         const root = path.resolve(options.dir ?? path.join(projectPath, "tools"));
         scenarios = buildPlaygroundScenarios({
-            playgroundDir: path.join(root, "playground"),
-            authPlaygroundDir: path.join(root, "playground-auth"),
+            notesDir: path.join(root, "playground-notes"),
+            tasksDir: path.join(root, "playground-tasks"),
         });
     } else if (suite === "benchmark") {
         const root = path.resolve(options.dir ?? path.join(projectPath, "tools"));
         scenarios = buildBenchmarkScenarios({
-            authPlaygroundDir: path.join(root, "playground-auth"),
+            tasksDir: path.join(root, "playground-tasks"),
         });
     } else {
         // Comparing run-to-run stability needs at least two runs. Silently

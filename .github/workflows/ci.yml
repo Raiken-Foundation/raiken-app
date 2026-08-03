@@ -42,7 +42,7 @@ jobs:
                   cache: pnpm
             - run: pnpm install --frozen-lockfile
             - run: pnpm exec playwright install --with-deps chromium
-            - run: pnpm exec nx run @raiken/playground:build
+            - run: pnpm exec nx run @raiken/playground-notes:build
             - run: pnpm exec nx run core:test:integration --skip-nx-cache
 
     accuracy-gates:

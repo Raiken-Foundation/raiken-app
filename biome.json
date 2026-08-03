@@ -16,9 +16,7 @@
             "!**/.raiken",
             "!**/coverage",
             "!**/test-results",
-            "!**/playwright-report",
-            "!tools/playground",
-            "!tools/playground-auth"
+            "!**/playwright-report"
         ]
     },
     "linter": {

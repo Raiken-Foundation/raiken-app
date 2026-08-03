@@ -1,0 +1,45 @@
+{
+    "name": "@raiken/playground-tasks",
+    "$schema": "../../node_modules/nx/schemas/project-schema.json",
+    "sourceRoot": "tools/playground-tasks/src",
+    "projectType": "application",
+    "tags": ["type:fixture", "scope:playground"],
+    "targets": {
+        "serve": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-tasks",
+                "command": "pnpm dev"
+            }
+        },
+        "auth-wall": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-tasks",
+                "command": "pnpm serve"
+            }
+        },
+        "build": {
+            "executor": "nx:run-commands",
+            "outputs": ["{projectRoot}/dist"],
+            "options": {
+                "cwd": "tools/playground-tasks",
+                "command": "pnpm build"
+            }
+        },
+        "typecheck": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-tasks",
+                "command": "pnpm typecheck"
+            }
+        },
+        "test:e2e": {
+            "executor": "nx:run-commands",
+            "options": {
+                "cwd": "tools/playground-tasks",
+                "command": "pnpm test:e2e"
+            }
+        }
+    }
+}

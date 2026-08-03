@@ -14,8 +14,8 @@ import { buildPlaygroundScenarios } from "../scenarios/playground";
 
 const TOOLS_DIR = path.join(__dirname, "..", "..", "..", "..", "..", "tools");
 const HAVE_FIXTURES =
-    fs.existsSync(path.join(TOOLS_DIR, "playground", "dist", "index.html")) &&
-    fs.existsSync(path.join(TOOLS_DIR, "playground-auth", "server.mjs"));
+    fs.existsSync(path.join(TOOLS_DIR, "playground-notes", "dist", "index.html")) &&
+    fs.existsSync(path.join(TOOLS_DIR, "playground-tasks", "server.mjs"));
 
 describe.skipIf(!HAVE_FIXTURES)("playground eval suite (integration)", () => {
     it(
@@ -23,8 +23,8 @@ describe.skipIf(!HAVE_FIXTURES)("playground eval suite (integration)", () => {
         { timeout: 180_000 },
         async () => {
             const scenarios = buildPlaygroundScenarios({
-                playgroundDir: path.join(TOOLS_DIR, "playground"),
-                authPlaygroundDir: path.join(TOOLS_DIR, "playground-auth"),
+                notesDir: path.join(TOOLS_DIR, "playground-notes"),
+                tasksDir: path.join(TOOLS_DIR, "playground-tasks"),
             });
 
             const report = await runEvalScenarios(scenarios);

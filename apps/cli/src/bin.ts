@@ -390,7 +390,7 @@ program
     .command("eval")
     .description(
         "Run agent eval scenarios: 'playground' (fixture ground-truth suite, from the raiken " +
-            "repo), 'benchmark' (accuracy regression gates against the playground-auth " +
+            "repo), 'benchmark' (accuracy regression gates against the playground-tasks " +
             "fixture) or 'flakiness <testFile>' (run a spec N times, score stability)",
     )
     .argument("<suite>", "Eval suite: playground | benchmark | flakiness")

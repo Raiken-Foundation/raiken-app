@@ -20,9 +20,14 @@ export function Navbar() {
                 </NavLink>
             </nav>
             <div className="topbar-right">
-                <Link to="/cart" className="cart-badge" data-testid="cart-badge" aria-label={`Cart, ${itemCount} items`}>
-                    {/* BUG B2: badge shows one more than the actual count. */}
-                    🛒 <span data-testid="cart-count">{itemCount + 1}</span>
+                <Link
+                    to="/cart"
+                    className="cart-badge"
+                    data-testid="cart-badge"
+                    aria-label={`Cart, ${itemCount} items`}
+                >
+                    {/* BUG B2: badge shows one more than the actual count. */}🛒{" "}
+                    <span data-testid="cart-count">{itemCount + 1}</span>
                 </Link>
             </div>
         </header>

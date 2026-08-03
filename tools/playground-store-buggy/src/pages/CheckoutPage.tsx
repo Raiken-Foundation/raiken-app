@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { formatPrice } from "../components/ProductCard";
+import { validatePayment, validateShipping } from "../api/store";
 import { FormField } from "../components/FormField";
+import { formatPrice } from "../components/ProductCard";
 import { Skeleton } from "../components/Skeleton";
 import { useCart } from "../contexts/CartContext";
 import { useToast } from "../contexts/ToastContext";
-import { validatePayment, validateShipping } from "../api/store";
 
 /**
  * Three-step checkout wizard: Shipping → Payment → Review. Each step gates the
@@ -92,7 +92,11 @@ export function CheckoutPage() {
             {step === 1 ? (
                 <section className="card checkout-panel" data-testid="shipping-step">
                     <h2>Shipping details</h2>
-                    <FormField label="Full name" htmlFor="shipping-name" error={shippingErrors.name}>
+                    <FormField
+                        label="Full name"
+                        htmlFor="shipping-name"
+                        error={shippingErrors.name}
+                    >
                         <input
                             id="shipping-name"
                             className="input"
@@ -199,8 +203,12 @@ export function CheckoutPage() {
                                 {lineItems.map(({ line, product }) =>
                                     product ? (
                                         <li key={line.productId}>
-                                            <span>{product.name} × {line.quantity}</span>
-                                            <span>{formatPrice(product.priceCents * line.quantity)}</span>
+                                            <span>
+                                                {product.name} × {line.quantity}
+                                            </span>
+                                            <span>
+                                                {formatPrice(product.priceCents * line.quantity)}
+                                            </span>
                                         </li>
                                     ) : null,
                                 )}
@@ -208,19 +216,26 @@ export function CheckoutPage() {
                             <dl className="totals">
                                 <div className="totals-row">
                                     <dt>Subtotal</dt>
-                                    <dd data-testid="review-subtotal">{formatPrice(totals.subtotalCents)}</dd>
+                                    <dd data-testid="review-subtotal">
+                                        {formatPrice(totals.subtotalCents)}
+                                    </dd>
                                 </div>
                                 {cart.coupon ? (
                                     <div className="totals-row">
                                         <dt>Discount</dt>
-                                        <dd className="totals-discount" data-testid="review-discount">
+                                        <dd
+                                            className="totals-discount"
+                                            data-testid="review-discount"
+                                        >
                                             −{formatPrice(totals.discountCents)}
                                         </dd>
                                     </div>
                                 ) : null}
                                 <div className="totals-row totals-row-grand">
                                     <dt>Total</dt>
-                                    <dd data-testid="review-total">{formatPrice(totals.totalCents)}</dd>
+                                    <dd data-testid="review-total">
+                                        {formatPrice(totals.totalCents)}
+                                    </dd>
                                 </div>
                             </dl>
                             <div className="checkout-actions">

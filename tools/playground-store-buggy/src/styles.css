@@ -129,7 +129,9 @@ a {
     font-weight: 600;
     cursor: pointer;
     background: var(--surface);
-    transition: background 120ms ease, border-color 120ms ease;
+    transition:
+        background 120ms ease,
+        border-color 120ms ease;
 }
 
 .button:disabled {
@@ -266,7 +268,9 @@ a {
     flex-direction: column;
     gap: 8px;
     color: var(--text);
-    transition: border-color 120ms ease, transform 120ms ease;
+    transition:
+        border-color 120ms ease,
+        transform 120ms ease;
 }
 
 .product-card:hover {

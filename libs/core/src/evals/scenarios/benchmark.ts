@@ -1,6 +1,6 @@
 /**
  * Permanent regression gates for the accuracy remediation (batches 1–4),
- * measured against the deterministic `tools/playground-auth` benchmark.
+ * measured against the deterministic `tools/playground-tasks` benchmark.
  *
  * Each fixed failure gets a scenario here so it cannot regress silently. Unit
  * tests already pin the decision functions; what they structurally cannot show
@@ -31,8 +31,8 @@ import { commandTarget } from "../targets";
 import type { EvalAttemptContext, EvalScenario, EvalTarget } from "../types";
 
 export interface BenchmarkEvalOptions {
-    /** Repo-relative or absolute path to `tools/playground-auth`. */
-    authPlaygroundDir: string;
+    /** Repo-relative or absolute path to `tools/playground-tasks`. */
+    tasksDir: string;
 }
 
 /**
@@ -44,11 +44,11 @@ export const PROTECTED_ROUTES = ["/dashboard", "/projects", "/tasks", "/settings
 
 /**
  * The fixture's session cookie is base64 JSON, readable by
- * `tools/playground-auth/auth-server.ts`. Building it here (rather than driving
+ * `tools/playground-tasks/auth-server.ts`. Building it here (rather than driving
  * a login) keeps the authenticated scenarios deterministic and fast: no form
  * interaction, no MFA branch, no dependence on the login page rendering.
  *
- * Mirrors `SessionPayload` in `tools/playground-auth/src/auth/fixture.ts`.
+ * Mirrors `SessionPayload` in `tools/playground-tasks/src/auth/fixture.ts`.
  */
 export function buildFixtureStorageState(baseUrl: string): string {
     const payload = {
@@ -78,7 +78,7 @@ export function buildFixtureStorageState(baseUrl: string): string {
                 // Dismiss the cookie banner. It is a bottom-anchored,
                 // non-blocking notice, but leaving it up puts a fixed element
                 // over controls at the bottom of a page.
-                localStorage: [{ name: "playground-auth-cookie-consent", value: "accepted" }],
+                localStorage: [{ name: "playground-tasks-cookie-consent", value: "accepted" }],
             },
         ],
     });
@@ -99,7 +99,7 @@ function writeStorageState(ctx: EvalAttemptContext, baseUrl: string): string {
  */
 function fixtureTarget(authDir: string): EvalTarget {
     return commandTarget({
-        name: "playground-auth (full fixture)",
+        name: "playground-tasks (full fixture)",
         command: process.execPath,
         args: [
             path.join(authDir, "node_modules", "vite", "bin", "vite.js"),
@@ -568,10 +568,10 @@ export function buildBenchmarkScenarios(
     options: BenchmarkEvalOptions,
     // biome-ignore lint/suspicious/noExplicitAny: heterogeneous scenario outputs; each is internally type-safe
 ): Array<EvalScenario<any>> {
-    const authDir = path.resolve(options.authPlaygroundDir);
+    const authDir = path.resolve(options.tasksDir);
     if (!fs.existsSync(path.join(authDir, "auth-server.ts"))) {
         throw new Error(
-            `Benchmark evals: playground-auth fixture not found at ${authDir}. ` +
+            `Benchmark evals: tasks fixture not found at ${authDir}. ` +
                 "Run from the raiken repo root, or pass --dir.",
         );
     }

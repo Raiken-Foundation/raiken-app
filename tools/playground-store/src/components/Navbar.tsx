@@ -20,7 +20,12 @@ export function Navbar() {
                 </NavLink>
             </nav>
             <div className="topbar-right">
-                <Link to="/cart" className="cart-badge" data-testid="cart-badge" aria-label={`Cart, ${itemCount} items`}>
+                <Link
+                    to="/cart"
+                    className="cart-badge"
+                    data-testid="cart-badge"
+                    aria-label={`Cart, ${itemCount} items`}
+                >
                     🛒 <span data-testid="cart-count">{itemCount}</span>
                 </Link>
             </div>

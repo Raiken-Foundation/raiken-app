@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runCustomLoginScript } from "../custom-login-runner";
 
-const projectPath = path.resolve(__dirname, "../../../../../tools/playground-auth");
+const projectPath = path.resolve(__dirname, "../../../../../tools/playground-tasks");
 const statePath = path.join(projectPath, ".raiken", "auth-state.json");
 
 describe("custom login runner integration", () => {

@@ -157,10 +157,7 @@ export function validatePayment(input: PaymentInput): string | null {
     return null;
 }
 
-export function placeOrder(input: {
-    cart: Cart;
-    shipping: ShippingInput;
-}): Order {
+export function placeOrder(input: { cart: Cart; shipping: ShippingInput }): Order {
     // The catalog is the store's own static source of truth — never take it
     // from caller state, which can race the async load and reject a valid
     // order ("A cart item is no longer available") for a product that exists.

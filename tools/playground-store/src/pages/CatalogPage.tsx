@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import type { ProductCategory } from "../types";
+import { EmptyState } from "../components/EmptyState";
 import { ProductCard } from "../components/ProductCard";
 import { SearchInput } from "../components/SearchInput";
-import { EmptyState } from "../components/EmptyState";
 import { useCart } from "../contexts/CartContext";
+import type { ProductCategory } from "../types";
 
 type SortKey = "featured" | "price-asc" | "price-desc" | "name";
 

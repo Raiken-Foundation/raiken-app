@@ -1,6 +1,9 @@
 {
     "$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
     "root": false,
+    "files": {
+        "includes": ["src/**", "e2e/**", "tests/**", "auth-server.ts"]
+    },
     "formatter": {
         "enabled": true,
         "indentStyle": "space",

@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
-import { formatPrice } from "../components/ProductCard";
-import { EmptyState } from "../components/EmptyState";
 import { readOrders } from "../api/store";
+import { EmptyState } from "../components/EmptyState";
+import { formatPrice } from "../components/ProductCard";
 
 export function OrdersPage() {
     const orders = readOrders();
@@ -22,13 +22,19 @@ export function OrdersPage() {
             ) : (
                 <ul className="orders-list" data-testid="orders-list">
                     {orders.map((order) => (
-                        <li key={order.id} className="card order-card" data-testid={`order-${order.id}`}>
+                        <li
+                            key={order.id}
+                            className="card order-card"
+                            data-testid={`order-${order.id}`}
+                        >
                             <header>
                                 <strong data-testid={`order-id-${order.id}`}>{order.id}</strong>
                                 <span className="muted">{order.lines.length} line(s)</span>
                             </header>
                             <p className="muted">
-                                {order.lines.map((line) => `${line.name} × ${line.quantity}`).join(", ")}
+                                {order.lines
+                                    .map((line) => `${line.name} × ${line.quantity}`)
+                                    .join(", ")}
                             </p>
                             <p data-testid={`order-total-${order.id}`}>
                                 {formatPrice(order.totalCents)}

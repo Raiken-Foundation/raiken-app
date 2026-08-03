@@ -1,6 +1,6 @@
 import { Link, useParams } from "react-router-dom";
-import { formatPrice } from "../components/ProductCard";
 import { readOrders } from "../api/store";
+import { formatPrice } from "../components/ProductCard";
 
 export function ConfirmationPage() {
     const { orderId = "" } = useParams();
@@ -22,9 +22,7 @@ export function ConfirmationPage() {
         <main className="page" data-testid="confirmation-page">
             <section className="card confirmation-card">
                 <h1 data-testid="confirmation-title">Order {order.id} confirmed</h1>
-                <p className="muted">
-                    Thanks {order.shipping.name} — we are packing your order.
-                </p>
+                <p className="muted">Thanks {order.shipping.name} — we are packing your order.</p>
                 <ul className="order-review-list" data-testid="confirmation-lines">
                     {order.lines.map((line) => (
                         <li key={line.productId}>

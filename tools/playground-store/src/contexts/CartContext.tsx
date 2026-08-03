@@ -1,14 +1,14 @@
 import {
     createContext,
+    type ReactNode,
     useCallback,
     useContext,
     useEffect,
     useMemo,
     useState,
-    type ReactNode,
 } from "react";
-import type { Cart, Order, Product } from "../types";
 import * as store from "../api/store";
+import type { Cart, Order, Product } from "../types";
 
 interface CartContextValue {
     cart: Cart;
@@ -49,7 +49,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
     );
 
     const setQuantity = useCallback(
-        (productId: string, quantity: number) => setCart(store.setCartQuantity(cart, productId, quantity)),
+        (productId: string, quantity: number) =>
+            setCart(store.setCartQuantity(cart, productId, quantity)),
         [cart],
     );
 
@@ -87,7 +88,18 @@ export function CartProvider({ children }: { children: ReactNode }) {
             itemCount,
             placeOrder,
         }),
-        [cart, products, add, setQuantity, remove, applyCoupon, clearCoupon, totals, itemCount, placeOrder],
+        [
+            cart,
+            products,
+            add,
+            setQuantity,
+            remove,
+            applyCoupon,
+            clearCoupon,
+            totals,
+            itemCount,
+            placeOrder,
+        ],
     );
 
     return <CartContext.Provider value={value}>{children}</CartContext.Provider>;

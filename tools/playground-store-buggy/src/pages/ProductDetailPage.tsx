@@ -1,9 +1,9 @@
 import { Link, useParams } from "react-router-dom";
+import { cartQuantity } from "../api/store";
 import { formatPrice } from "../components/ProductCard";
 import { Skeleton } from "../components/Skeleton";
 import { useCart } from "../contexts/CartContext";
 import { useToast } from "../contexts/ToastContext";
-import { cartQuantity } from "../api/store";
 
 export function ProductDetailPage() {
     const { slug = "" } = useParams();

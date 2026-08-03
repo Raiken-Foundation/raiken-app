@@ -1,6 +1,6 @@
 /**
  * Ground-truth eval scenarios against the repo's fixture apps
- * (`tools/playground`, `tools/playground-auth`). These are the CI-able
+ * (`tools/playground-notes`, `tools/playground-tasks`). These are the CI-able
  * regression checks for agent-adjacent behavior that unit tests structurally
  * miss — "does discovery actually walk the SPA", "does an auth wall produce
  * a blocker handoff instead of a garbage crawl".
@@ -20,10 +20,10 @@ import { commandTarget, staticSpaTarget } from "../targets";
 import type { EvalAttemptContext, EvalScenario } from "../types";
 
 export interface PlaygroundEvalOptions {
-    /** Repo-relative or absolute path to tools/playground. */
-    playgroundDir: string;
-    /** Repo-relative or absolute path to tools/playground-auth. */
-    authPlaygroundDir: string;
+    /** Repo-relative or absolute path to tools/playground-notes. */
+    notesDir: string;
+    /** Repo-relative or absolute path to tools/playground-tasks. */
+    tasksDir: string;
 }
 
 interface DiscoveryEvalOutput {
@@ -79,15 +79,15 @@ function pagePaths(output: DiscoveryEvalOutput): string[] {
 export function buildPlaygroundScenarios(
     options: PlaygroundEvalOptions,
 ): Array<EvalScenario<DiscoveryEvalOutput>> {
-    const playgroundDist = path.join(path.resolve(options.playgroundDir), "dist");
-    const authDir = path.resolve(options.authPlaygroundDir);
+    const notesDist = path.join(path.resolve(options.notesDir), "dist");
+    const tasksDir = path.resolve(options.tasksDir);
 
     const discoveryScenario: EvalScenario<DiscoveryEvalOutput> = {
         id: "playground-discovery",
         description:
-            "Crawl the SPA playground and verify the link-reachable public route graph is " +
-            "discovered (/, /about, /login — /contact exists as a route but is never linked).",
-        createTarget: () => staticSpaTarget({ name: "playground", distDir: playgroundDist }),
+            "Crawl the notes SPA and verify the link-reachable public route graph is " +
+            "discovered (/, /about, /login — /archive exists as a route but is never linked).",
+        createTarget: () => staticSpaTarget({ name: "playground-notes", distDir: notesDist }),
         // pauseOnAuth false: reaching the login page must not halt a crawl of
         // the PUBLIC graph — that's exactly the behavior the auth-wall
         // scenario below asserts separately.
@@ -133,14 +133,14 @@ export function buildPlaygroundScenarios(
     const authScenario: EvalScenario<DiscoveryEvalOutput> = {
         id: "playground-auth-wall",
         description:
-            "Crawl the NextAuth-middleware fixture and verify the auth wall is detected as " +
-            "an auth_required blocker (handoff) instead of a garbage crawl.",
+            "Crawl the task manager's middleware fixture and verify the auth wall is detected " +
+            "as an auth_required blocker (handoff) instead of a garbage crawl.",
         createTarget: () =>
             commandTarget({
-                name: "playground-auth",
+                name: "playground-tasks",
                 command: process.execPath,
-                args: [path.join(authDir, "server.mjs"), "{port}"],
-                cwd: authDir,
+                args: [path.join(tasksDir, "server.mjs"), "{port}"],
+                cwd: tasksDir,
             }),
         run: (ctx) => crawlAndCollect(ctx, { maxPages: 10, pauseOnAuth: true }),
         scorers: [
@@ -165,8 +165,8 @@ export function buildPlaygroundScenarios(
 
     // Fail fast with a clear message when the fixtures aren't built/present.
     for (const [label, dir] of [
-        ["playground dist", playgroundDist],
-        ["playground-auth", authDir],
+        ["playground-notes dist", notesDist],
+        ["playground-tasks", tasksDir],
     ] as const) {
         if (!fs.existsSync(dir)) {
             throw new Error(

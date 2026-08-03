@@ -21,7 +21,7 @@ import {
 import { buildFlakinessScenario } from "../scenarios/flakiness";
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..", "..", "..");
-const AUTH_DIR = path.join(REPO_ROOT, "tools", "playground-auth");
+const AUTH_DIR = path.join(REPO_ROOT, "tools", "playground-tasks");
 
 describe("benchmark precondition cases", () => {
     it.each(PRECONDITION_CASES)("resolves $prompt to $expected", (testCase) => {
@@ -55,7 +55,7 @@ describe("fixture storage state", () => {
 
         expect(state.origins[0].origin).toBe("http://127.0.0.1:5100");
         expect(state.origins[0].localStorage).toContainEqual({
-            name: "playground-auth-cookie-consent",
+            name: "playground-tasks-cookie-consent",
             value: "accepted",
         });
     });
@@ -65,8 +65,8 @@ describe("buildBenchmarkScenarios", () => {
     it("refuses to build against a directory that isn't the fixture", () => {
         const empty = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-benchmark-"));
         try {
-            expect(() => buildBenchmarkScenarios({ authPlaygroundDir: empty })).toThrow(
-                /playground-auth fixture not found/,
+            expect(() => buildBenchmarkScenarios({ tasksDir: empty })).toThrow(
+                /tasks fixture not found/,
             );
         } finally {
             fs.rmSync(empty, { recursive: true, force: true });
@@ -76,7 +76,7 @@ describe("buildBenchmarkScenarios", () => {
     it.skipIf(!fs.existsSync(path.join(AUTH_DIR, "node_modules", "vite", "bin", "vite.js")))(
         "produces uniquely identified scenarios that can all fail",
         () => {
-            const scenarios = buildBenchmarkScenarios({ authPlaygroundDir: AUTH_DIR });
+            const scenarios = buildBenchmarkScenarios({ tasksDir: AUTH_DIR });
             const ids = scenarios.map((scenario) => scenario.id);
 
             expect(new Set(ids).size).toBe(ids.length);

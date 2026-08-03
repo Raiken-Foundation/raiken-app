@@ -352,12 +352,12 @@ pnpm nx serve dashboard
 ```
 - Dashboard available at `http://localhost:4200`
 
-**Terminal 3 - Playground target app**
+**Terminal 3 - Notes fixture target app**
 ```bash
-cd tools/playground
+cd tools/playground-notes
 npm run dev -- --port 5173
 ```
-- Playground available at `http://localhost:5173`
+- Notes fixture available at `http://localhost:5173`
 
 Quick health check:
 ```bash
@@ -370,23 +370,23 @@ All three should return `200`.
 Smoke-test sequence:
 ```bash
 # From repo root
-cd tools/playground
+cd tools/playground-notes
 raiken init
 
-# Start discovery against the playground
+# Start discovery against the notes fixture
 raiken discover http://localhost:5173 --max-pages 20 --max-depth 5
 ```
 
 If discovery pauses on authentication:
 ```bash
-cd tools/playground
+cd tools/playground-notes
 raiken auth --url http://localhost:5173/login
 raiken discover --continue
 ```
 
 Useful verification commands:
 ```bash
-cd tools/playground
+cd tools/playground-notes
 raiken discover --status
 ```
 
@@ -397,13 +397,13 @@ You can also validate runtime in the dashboard (`http://localhost:4200`) via:
 
 Stop all servers with `Ctrl+C` in each terminal.
 
-#### Integration Test (Playground)
+#### Integration Test (Notes fixture)
 ```bash
 # Build the CLI and install its runtime deps (pnpm)
 pnpm run cli:deploy
 
-# Start the CLI in the playground
-cd tools/playground
+# Start the CLI in the notes fixture
+cd tools/playground-notes
 node ../../dist/apps/cli/bin.cjs start -p 7101
 ```
 
@@ -426,7 +426,7 @@ curl -X POST http://localhost:7101/api/trpc/buildCodeGraph \
   -d '{"path":"."}'
 ```
 
-Run Playwright tests from the playground if needed:
+Run Playwright tests from the notes fixture if needed:
 ```bash
 npx playwright test
 ```

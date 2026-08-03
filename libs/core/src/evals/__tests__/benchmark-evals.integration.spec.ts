@@ -1,6 +1,6 @@
 /**
  * Live run of the accuracy-regression benchmark suite against the full
- * `tools/playground-auth` fixture (real Vite dev server, real Chromium, real
+ * `tools/playground-tasks` fixture (real Vite dev server, real Chromium, real
  * crawls). This is the permanent gate for the batch 1–4 fixes: blocker
  * layering, resumed crawls, authenticated route recall, modal grounding, and
  * auth preconditions.
@@ -17,7 +17,7 @@ import { buildBenchmarkScenarios } from "../scenarios/benchmark";
 import type { ScenarioReport } from "../types";
 
 const TOOLS_DIR = path.join(__dirname, "..", "..", "..", "..", "..", "tools");
-const AUTH_DIR = path.join(TOOLS_DIR, "playground-auth");
+const AUTH_DIR = path.join(TOOLS_DIR, "playground-tasks");
 const HAVE_FIXTURE =
     fs.existsSync(path.join(AUTH_DIR, "auth-server.ts")) &&
     fs.existsSync(path.join(AUTH_DIR, "node_modules", "vite", "bin", "vite.js"));
@@ -33,7 +33,7 @@ function describeFailures(scenario: ScenarioReport): string[] {
 }
 
 describe.skipIf(!HAVE_FIXTURE)("benchmark eval suite (integration)", () => {
-    const scenarios = HAVE_FIXTURE ? buildBenchmarkScenarios({ authPlaygroundDir: AUTH_DIR }) : [];
+    const scenarios = HAVE_FIXTURE ? buildBenchmarkScenarios({ tasksDir: AUTH_DIR }) : [];
 
     for (const scenario of scenarios) {
         it(scenario.description, { timeout: 300_000 }, async () => {

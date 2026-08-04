@@ -15,3 +15,6 @@ playwright-report/
 # they're throwaway exploration. Promote a generated test by moving it
 # into `e2e/` and renaming it.
 e2e/generated/
+
+# Raiken local state and credentials
+raiken.config.json

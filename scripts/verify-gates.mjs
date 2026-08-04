@@ -28,7 +28,7 @@ const authFixtureDir = path.join(repoRoot, "tools", "playground-tasks");
 const cliBin = path.join(repoRoot, "dist", "apps", "cli", "bin.cjs");
 
 /** Tests in the hand-written golden suite. Ground truth: all of them pass. */
-const GOLDEN_SUITE_TESTS = 10;
+const GOLDEN_SUITE_TESTS = 12;
 const GOLDEN_SUITE_FILE = "tests/auth-flow.spec.ts";
 
 function parseArgs(argv) {

@@ -117,6 +117,14 @@ export async function assessGeneratedDraft(
     for (const reason of intent.reasons) {
         reviewReasons.push(reason);
     }
+    // A scenario draft that carries no assertions at all passes vacuously on a
+    // broken app — the "test matches the code" anti-pattern — so it cannot be
+    // verified by any run. Treat vacuity as grounding-driven: stamp the marker
+    // so `raiken test` refuses it until a human makes the draft actually assert
+    // the scenario. (Partial token-miss with assertions present stays soft.)
+    if (intent.vacuous) {
+        groundingDriven = true;
+    }
 
     const { placeholders: todoPlaceholders, notes: todoNotes } = assessTodoMarkers(body);
     if (todoPlaceholders > 0) {

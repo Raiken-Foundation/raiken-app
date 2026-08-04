@@ -156,7 +156,7 @@ export interface CoverResult {
 
 const AC_PATTERN = /^AC-?(\d+)$/i;
 
-const UNVERIFIED_MARKER_LINE =
+export const UNVERIFIED_MARKER_LINE =
     `// ${UNVERIFIED_MARKER} — drafted by raiken cover with unverified steps. ` +
     "Ground it (raiken auth / raiken discover), review, and remove this marker before running.";
 

@@ -85,6 +85,36 @@ export interface GroundingReport {
 const LANDMARK_ROLES = new Set(["dialog", "alertdialog"]);
 
 /**
+ * Roles a locator targets for interaction. A role_mismatch is only sound when
+ * the same-name captured element is the same KIND of thing: a `dialog`
+ * locator is contradicted by an `alertdialog` (both interactive modals), but a
+ * `combobox` locator is NOT contradicted by a table's `columnheader` that
+ * happens to share its label — the two elements can genuinely coexist (a form
+ * select labeled "Project" beside a table column named "Project"), and the
+ * passive element is not what the test meant. Same-kind candidates are
+ * required so a wrong-role finding never suggests replacing an interactive
+ * control with a structural one.
+ */
+const INTERACTIVE_ROLES = new Set([
+    "button",
+    "link",
+    "textbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "switch",
+    "slider",
+    "tab",
+    "dialog",
+    "alertdialog",
+    "searchbox",
+    "spinbutton",
+    "listbox",
+    "menuitem",
+    "option",
+]);
+
+/**
  * Roles that DOM capture enumerates for any visible page state (see
  * `BrowserSession.extractRawFromFrame` and `computeRole`). Only these can be
  * judged: for any other role, absence from the capture proves nothing.
@@ -481,6 +511,11 @@ function checkRoleLocator(
         (el) =>
             el.role !== role &&
             LANDMARK_ROLES.has(el.role) === wantsLandmark &&
+            // Only an interactive candidate can explain a locator that targets
+            // an interactive control. A structural element (columnheader,
+            // heading, cell, …) sharing the name is a different element, not a
+            // wrong-role version of the intended one.
+            INTERACTIVE_ROLES.has(el.role) === INTERACTIVE_ROLES.has(role) &&
             literalMatches(name, el.name, exact),
     );
     const mismatched =

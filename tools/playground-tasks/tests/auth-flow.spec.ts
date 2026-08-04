@@ -64,6 +64,35 @@ test("admin login shows session details, supports navigation, and logout restore
     await expect(page).toHaveURL(/\/auth\/login$/);
 });
 
+test("adding a task persists it to the tasks table", async ({ page }) => {
+    await loginAsAdmin(page);
+
+    await page.getByTestId("nav-tasks").click();
+    await expect(page.getByTestId("tasks-page")).toBeVisible();
+
+    await page.getByTestId("new-task-button").click();
+    await expect(page.getByTestId("new-task-form")).toBeVisible();
+
+    await page.getByTestId("task-title-input").fill("Write the eval report");
+    await page.getByTestId("task-project-select").selectOption("Atlas Migration");
+    await page.getByTestId("task-status-select").selectOption("in_progress");
+    await page.getByTestId("task-submit").click();
+
+    await expect(page.getByTestId("task-table")).toContainText("Write the eval report");
+    await expect(page.getByTestId("task-table")).toContainText("Atlas Migration");
+});
+
+test("task form rejects an empty title", async ({ page }) => {
+    await loginAsAdmin(page);
+
+    await page.getByTestId("nav-tasks").click();
+    await page.getByTestId("new-task-button").click();
+    await page.getByTestId("task-submit").click();
+
+    await expect(page.getByTestId("task-form-error")).toContainText("Title is required.");
+    await expect(page.getByTestId("new-task-form")).toBeVisible();
+});
+
 test("MFA login rejects wrong code then accepts the fixture code", async ({ page }) => {
     await page.goto("/auth/login");
     await dismissCookieConsent(page);

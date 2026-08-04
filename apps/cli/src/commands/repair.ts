@@ -28,6 +28,8 @@ import {
     resolveAIConfig,
     serializeSafeClientError,
     stillAssertsAbsentLocators,
+    UNVERIFIED_MARKER,
+    UNVERIFIED_MARKER_LINE,
     validateSelectorGrounding,
 } from "@raiken/core";
 import chalk from "chalk";
@@ -161,6 +163,57 @@ export function isAttemptOscillation(
     fixedCode: string,
 ): boolean {
     return previousEntryCode !== undefined && fixedCode.trim() === previousEntryCode.trim();
+}
+
+/**
+ * The @raiken-unverified marker is a human-review gate: cover stamps it on a
+ * draft that asserts steps no captured evidence proves, and only a person may
+ * clear it. AI models routinely strip comment lines while rewriting a spec, so
+ * a repair that passes a previously-unverified spec must put the marker back —
+ * otherwise an AI that weakened the test to green would silently inherit the
+ * right to run in CI. Exported for unit tests.
+ */
+export function restampUnverifiedMarker(originalCode: string, fixedCode: string): {
+    code: string;
+    restamped: boolean;
+} {
+    if (!originalCode.includes(UNVERIFIED_MARKER) || fixedCode.includes(UNVERIFIED_MARKER)) {
+        return { code: fixedCode, restamped: false };
+    }
+    return { code: `${UNVERIFIED_MARKER_LINE}\n${fixedCode}`, restamped: true };
+}
+
+/**
+ * Quote style is normalized when matching alternatives: Playwright prints
+ * `aka getByTestId('x')` with single quotes, but the project's biome config
+ * may mandate double quotes, so a fix that switched to the suggested test id
+ * must not be rejected for quote style alone.
+ */
+export function normalizeLocator(code: string): string {
+    return code.replace(/['"`]/g, '"');
+}
+
+/**
+ * Which proven-present selectors a candidate fix dropped. A fix must keep the
+ * literal a strict-mode violation proved present (or one of the unambiguous
+ * alternatives Playwright suggested for the same elements); dropping it means
+ * the model "fixed" the locator by replacing a real element with an invented
+ * one. Exported for unit tests.
+ */
+export function droppedProvenSelectors(
+    fixedCode: string,
+    provenSelectors: Array<{ value: string; alternatives?: string[] }>,
+): string[] {
+    const normalized = normalizeLocator(fixedCode);
+    return provenSelectors
+        .filter(
+            (selector) =>
+                !normalized.includes(selector.value) &&
+                !(selector.alternatives ?? []).some((alt) =>
+                    normalized.includes(normalizeLocator(alt)),
+                ),
+        )
+        .map((selector) => selector.value);
 }
 
 /**
@@ -387,6 +440,7 @@ export async function repairFailedRun(input: {
     let oscillated = false;
     let lastRepair: Awaited<ReturnType<typeof app.testing.repairTestResults>> | undefined;
     let stopReason: string | undefined;
+    let markerRestamped = false;
 
     const revertIfUnattended = async (): Promise<void> => {
         if (applied && unattended) {
@@ -484,7 +538,21 @@ export async function repairFailedRun(input: {
             knownOrigins,
             failureText: [currentRaw, interpretation ?? ""].join("\n"),
         });
-        const fixedCode = normalized.code;
+        let fixedCode = normalized.code;
+
+        // The @raiken-unverified marker is a human-review gate: cover stamps it
+        // when a draft asserts steps no evidence proves, and only a person may
+        // clear it (README: "review, and remove the marker once it is grounded").
+        // Repair proves the FIX passes, but it cannot certify that the assertions
+        // still mean what the scenario asked — an AI that weakens a test to green
+        // must not silently inherit permission to run in CI. If the input spec
+        // carried the marker and the AI draft dropped it, stamp it back.
+        const restamped = restampUnverifiedMarker(
+            repair.originalCode ?? currentCode,
+            fixedCode,
+        );
+        fixedCode = restamped.code;
+        if (restamped.restamped) markerRestamped = true;
 
         // Oscillation: attempt N reverted attempt N−1's only change (A→B→A).
         // The model is cycling, not converging — stop and keep N−1's fix
@@ -551,11 +619,9 @@ export async function repairFailedRun(input: {
         // then reject via the lint gate below. Switching to an unambiguous
         // alternative Playwright itself suggested (`aka getByTestId(...)`) is
         // a valid disambiguation, not a regression.
-        const regressed = provenSelectors.filter(
-            (selector) =>
-                !fixedCode.includes(selector.value) &&
-                !(selector.alternatives ?? []).some((alt) => fixedCode.includes(alt)),
-        );
+        const regressed = droppedProvenSelectors(fixedCode, provenSelectors)
+            .map((value) => provenSelectors.find((selector) => selector.value === value))
+            .filter((selector): selector is NonNullable<typeof selector> => selector !== undefined);
         if (regressed.length > 0 && !provenEscalated && attempt < MAX_FIX_ATTEMPTS) {
             provenEscalated = true;
             timeoutFocus = [timeoutFocus, describeRegressedSelector(regressed)]
@@ -814,6 +880,16 @@ export async function repairFailedRun(input: {
         }
         if (rerun.success === true) {
             restore?.();
+            const markerNote = fixedCode.includes(UNVERIFIED_MARKER)
+                ? chalk.yellow(
+                      `\n  ⚠ ${file} still carries ${UNVERIFIED_MARKER} — review the diff, then remove the marker to unblock "raiken test ${file}" (or pass --allow-unverified).`,
+                  )
+                : undefined;
+            const restampNote = markerRestamped
+                ? chalk.yellow(
+                      `  ✗ The AI draft dropped ${UNVERIFIED_MARKER}; it was re-stamped. Only a human may clear the unverified gate — review, then remove the marker.`,
+                  )
+                : undefined;
             if (options.json) {
                 emit({
                     repaired: true,
@@ -824,6 +900,8 @@ export async function repairFailedRun(input: {
                     matchFailed: repair.matchFailed,
                     verified: true,
                     attempts: attempt,
+                    ...(markerNote ? { unverifiedMarkerRemaining: true } : {}),
+                    ...(markerRestamped ? { unverifiedMarkerRestamped: true } : {}),
                 });
                 cliExit(0);
             }
@@ -832,6 +910,8 @@ export async function repairFailedRun(input: {
                     `  ✓ Updated ${file} — re-run passed${attempt > 1 ? ` (attempt ${attempt})` : ""}.`,
                 ),
             );
+            if (restampNote) console.log(restampNote);
+            if (markerNote) console.log(markerNote);
             cliExit(0);
         }
 

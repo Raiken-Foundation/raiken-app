@@ -47,13 +47,17 @@ export function updateNote(
     slug: string,
     input: { title: string; body: string; tag: Note["tag"] },
 ): Note | undefined {
-    const note = getNote(slug);
-    if (!note) return undefined;
-    note.title = input.title;
-    note.body = input.body;
-    note.tag = input.tag;
-    note.updatedAt = new Date().toISOString();
-    return note;
+    const index = state.notes.findIndex((note) => note.slug === slug);
+    if (index === -1) return undefined;
+    const updated: Note = {
+        ...state.notes[index],
+        title: input.title,
+        body: input.body,
+        tag: input.tag,
+        updatedAt: new Date().toISOString(),
+    };
+    state.notes[index] = updated;
+    return updated;
 }
 
 export function deleteNote(slug: string): boolean {
@@ -64,11 +68,15 @@ export function deleteNote(slug: string): boolean {
 }
 
 export function togglePin(slug: string): Note | undefined {
-    const note = getNote(slug);
-    if (!note) return undefined;
-    note.pinned = !note.pinned;
-    note.updatedAt = new Date().toISOString();
-    return note;
+    const index = state.notes.findIndex((note) => note.slug === slug);
+    if (index === -1) return undefined;
+    const updated = {
+        ...state.notes[index],
+        pinned: !state.notes[index].pinned,
+        updatedAt: new Date().toISOString(),
+    };
+    state.notes[index] = updated;
+    return updated;
 }
 
 export function searchNotes(query: string, tag: Note["tag"] | "all"): Note[] {

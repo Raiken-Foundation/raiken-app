@@ -128,6 +128,45 @@ describe("validateSelectorGrounding — contradictions block", () => {
         expect(report.ok).toBe(true);
         expect(report.contradictions).toEqual([]);
     });
+
+    it("does not treat a structural same-name element as a wrong-role interactive one", () => {
+        // The tasks fixture has a table column "Project" AND a form select
+        // (combobox) labeled "Project" — the select only renders after "New
+        // task" is clicked, so the capture shows the columnheader, not the
+        // combobox. The combobox locator is correct; the columnheader is a
+        // different element, not a wrong-role version of the intended one.
+        const withColumnHeader = summary({
+            interactiveElements: [
+                {
+                    tagName: "th",
+                    role: "columnheader",
+                    name: "Project",
+                    suggestedSelectors: ["getByRole('columnheader', { name: 'Project' })"],
+                },
+            ],
+        });
+        const report = validateSelectorGrounding(
+            testWith(
+                "    await page.getByRole('combobox', { name: 'Project' }).selectOption('Atlas Migration');",
+            ),
+            [withColumnHeader],
+        );
+
+        expect(report.contradictions).toEqual([]);
+    });
+
+    it("still flags a wrong role among interactive controls sharing the name", () => {
+        // The same-name structural element does not excuse a real role error:
+        // claiming the captured alertdialog as a dialog remains a contradiction.
+        const report = validateSelectorGrounding(
+            testWith(
+                "    await expect(page.getByRole('dialog', { name: 'Delete project' })).toBeVisible();",
+            ),
+            [DELETE_DIALOG_SUMMARY],
+        );
+
+        expect(report.contradictions.map((v) => v.kind)).toEqual(["role_mismatch"]);
+    });
 });
 
 describe("validateSelectorGrounding — unverified is reported, not blocked", () => {

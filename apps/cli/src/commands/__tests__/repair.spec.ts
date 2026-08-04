@@ -31,6 +31,8 @@ const {
     missingAiKeyMessage,
     repairCommand,
     isAttemptOscillation,
+    restampUnverifiedMarker,
+    droppedProvenSelectors,
     withRepairDeadline,
     RepairDeadlineExceededError,
 } = await import("../repair");
@@ -156,6 +158,69 @@ describe("isAttemptOscillation", () => {
 
     it("ignores whitespace differences", () => {
         expect(isAttemptOscillation(`${A}\n`, `  ${A}`)).toBe(true);
+    });
+});
+
+describe("restampUnverifiedMarker", () => {
+    const marker = "@raiken-unverified";
+    const original = `// ${marker} — drafted by raiken cover with unverified steps.\n${"import { test } from '@playwright/test';"}`;
+    const fixed = "import { test } from '@playwright/test';";
+
+    it("leaves a fix alone when the original never carried the marker", () => {
+        const result = restampUnverifiedMarker("import { test } from '@playwright/test';", fixed);
+        expect(result.restamped).toBe(false);
+        expect(result.code).toBe(fixed);
+    });
+
+    it("leaves a fix alone when it keeps the marker", () => {
+        const result = restampUnverifiedMarker(original, `${original}\n`);
+        expect(result.restamped).toBe(false);
+        expect(result.code).toBe(`${original}\n`);
+    });
+
+    it("re-stamps the marker when the AI draft dropped it", () => {
+        const result = restampUnverifiedMarker(original, fixed);
+        expect(result.restamped).toBe(true);
+        expect(result.code).toContain(marker);
+        expect(result.code.endsWith(fixed)).toBe(true);
+        expect(result.code).toMatch(/^\/\/ @raiken-unverified/);
+    });
+});
+
+describe("droppedProvenSelectors", () => {
+    const proven = [
+        {
+            locator: "getByRole('link', { name: 'Tasks' })",
+            value: "Tasks",
+            alternatives: ["getByTestId('nav-tasks')", "getByTestId('recent-activity-all')"],
+        },
+    ];
+
+    it("accepts a fix that keeps the proven literal", () => {
+        expect(
+            droppedProvenSelectors("await page.getByRole('link', { name: 'Tasks' }).click();", proven),
+        ).toEqual([]);
+    });
+
+    it("accepts a fix that switches to a suggested aka test id", () => {
+        expect(
+            droppedProvenSelectors("await page.getByTestId('nav-tasks').click();", proven),
+        ).toEqual([]);
+    });
+
+    it("accepts an aka test id written with the project's double-quote style", () => {
+        // Playwright prints `aka getByTestId('nav-tasks')`; a biome config with
+        // double quotes makes the fix write getByTestId("nav-tasks"). Quote
+        // style must not count as dropping the selector.
+        expect(
+            droppedProvenSelectors('await page.getByTestId("nav-tasks").click();', proven),
+        ).toEqual([]);
+    });
+
+    it("flags a fix that replaces the proven element with an invented locator", () => {
+        expect(
+            droppedProvenSelectors("await page.getByTestId('tasks-panel').click();", proven),
+        ).toEqual(["Tasks"]);
     });
 });
 

@@ -98,6 +98,29 @@ test('x', async ({ page }) => {
         expect(result.uncovered.length).toBe(result.criteria.length);
         expect(result.reasons.length).toBeGreaterThan(0);
     });
+
+    it("marks an assertion-less draft as vacuous (passes on broken apps)", () => {
+        const draft = `import { test } from '@playwright/test';
+test('x', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Go' }).click();
+});
+`;
+        const result = assessIntentCoverage("click Go then see success message", draft);
+        expect(result.vacuous).toBe(true);
+    });
+
+    it("does not mark a draft that asserts something as vacuous", () => {
+        const draft = `import { test, expect } from '@playwright/test';
+test('x', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Go' }).click();
+  await expect(page.getByRole('heading', { name: 'Success' })).toBeVisible();
+});
+`;
+        const result = assessIntentCoverage("click Go then see success message", draft);
+        expect(result.vacuous).toBe(false);
+    });
 });
 
 describe("imperative wrapper prompts (one-shot style)", () => {

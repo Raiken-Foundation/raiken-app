@@ -14,6 +14,7 @@ export {
     type CoverTargetKind,
     extractAcs,
     runCover,
+    UNVERIFIED_MARKER_LINE,
 } from "./cover";
 export {
     type AssertionPolarityAssessment,

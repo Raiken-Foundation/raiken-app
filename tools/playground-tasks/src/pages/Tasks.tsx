@@ -1,7 +1,15 @@
 import { useState } from "react";
 import Nav from "../Nav";
 
-const ALL_TASKS = [
+interface Task {
+    id: string;
+    title: string;
+    project: string;
+    status: string;
+    priority: string;
+}
+
+const INITIAL_TASKS: Task[] = [
     {
         id: "t_orion_2",
         title: "Wire production analytics events",
@@ -46,10 +54,46 @@ const ALL_TASKS = [
     },
 ];
 
-export default function Tasks() {
-    const [filter, setFilter] = useState("all");
+const PROJECTS = ["Orion Launch", "Atlas Migration", "Helix Redesign"];
+const STATUSES = ["todo", "in_progress", "done"];
+const PRIORITIES = ["normal", "high", "urgent"];
 
-    const visible = ALL_TASKS.filter((t) => filter === "all" || t.status === filter);
+const STATUS_LABELS: Record<string, string> = {
+    todo: "Todo",
+    in_progress: "In progress",
+    done: "Done",
+};
+
+export default function Tasks() {
+    const [tasks, setTasks] = useState<Task[]>(INITIAL_TASKS);
+    const [filter, setFilter] = useState("all");
+    const [showForm, setShowForm] = useState(false);
+    const [title, setTitle] = useState("");
+    const [project, setProject] = useState(PROJECTS[0]);
+    const [status, setStatus] = useState("todo");
+    const [priority, setPriority] = useState("normal");
+    const [error, setError] = useState<string | null>(null);
+
+    const visible = tasks.filter((t) => filter === "all" || t.status === filter);
+
+    function handleAdd(event: React.FormEvent) {
+        event.preventDefault();
+        if (!title.trim()) {
+            setError("Title is required.");
+            return;
+        }
+        const task: Task = {
+            id: `t_new_${Date.now()}`,
+            title: title.trim(),
+            project,
+            status,
+            priority,
+        };
+        setTasks((current) => [...current, task]);
+        setTitle("");
+        setShowForm(false);
+        setError(null);
+    }
 
     return (
         <div className="app-shell" data-testid="tasks-page">
@@ -58,10 +102,90 @@ export default function Tasks() {
                 <div className="page-header">
                     <h1>Tasks</h1>
                     <p>All open tasks across projects.</p>
+                    <button
+                        type="button"
+                        className="btn-primary"
+                        data-testid="new-task-button"
+                        onClick={() => setShowForm((open) => !open)}
+                    >
+                        {showForm ? "Cancel" : "New task"}
+                    </button>
                 </div>
 
+                {showForm && (
+                    <form
+                        className="card task-form"
+                        data-testid="new-task-form"
+                        onSubmit={handleAdd}
+                    >
+                        <div className="form-row">
+                            <label htmlFor="task-title">Title</label>
+                            <input
+                                id="task-title"
+                                type="text"
+                                data-testid="task-title-input"
+                                value={title}
+                                onChange={(event) => setTitle(event.target.value)}
+                            />
+                        </div>
+                        <div className="form-row">
+                            <label htmlFor="task-project">Project</label>
+                            <select
+                                id="task-project"
+                                data-testid="task-project-select"
+                                value={project}
+                                onChange={(event) => setProject(event.target.value)}
+                            >
+                                {PROJECTS.map((candidate) => (
+                                    <option key={candidate} value={candidate}>
+                                        {candidate}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="form-row">
+                            <label htmlFor="task-status">Status</label>
+                            <select
+                                id="task-status"
+                                data-testid="task-status-select"
+                                value={status}
+                                onChange={(event) => setStatus(event.target.value)}
+                            >
+                                {STATUSES.map((candidate) => (
+                                    <option key={candidate} value={candidate}>
+                                        {STATUS_LABELS[candidate]}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="form-row">
+                            <label htmlFor="task-priority">Priority</label>
+                            <select
+                                id="task-priority"
+                                data-testid="task-priority-select"
+                                value={priority}
+                                onChange={(event) => setPriority(event.target.value)}
+                            >
+                                {PRIORITIES.map((candidate) => (
+                                    <option key={candidate} value={candidate}>
+                                        {candidate}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        {error && (
+                            <p className="form-error" data-testid="task-form-error">
+                                {error}
+                            </p>
+                        )}
+                        <button type="submit" className="btn-primary" data-testid="task-submit">
+                            Add task
+                        </button>
+                    </form>
+                )}
+
                 <div style={{ display: "flex", gap: ".5rem", marginBottom: "1rem" }}>
-                    {["all", "todo", "in_progress", "done"].map((s) => (
+                    {["all", ...STATUSES].map((s) => (
                         <button
                             key={s}
                             data-testid={`filter-${s.replace("_", "-")}`}
@@ -77,7 +201,7 @@ export default function Tasks() {
                                 fontSize: ".8rem",
                             }}
                         >
-                            {s}
+                            {s === "all" ? "All" : STATUS_LABELS[s]}
                         </button>
                     ))}
                 </div>
@@ -101,7 +225,7 @@ export default function Tasks() {
                                         <span
                                             className={`badge badge-${t.status === "in_progress" ? "in-progress" : t.status}`}
                                         >
-                                            {t.status}
+                                            {STATUS_LABELS[t.status] ?? t.status}
                                         </span>
                                     </td>
                                     <td>

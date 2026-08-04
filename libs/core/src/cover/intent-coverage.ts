@@ -128,6 +128,13 @@ export interface IntentCoverageAssessment {
     uncovered: IntentCriterion[];
     /** Soft review reasons — one per uncovered criterion. */
     reasons: string[];
+    /**
+     * True when the draft carries no assertions at all while the scenario
+     * demanded outcomes. Such a draft passes vacuously on a broken app — the
+     * "test matches the code" anti-pattern — so callers may treat it as
+     * stronger than a soft flag.
+     */
+    vacuous: boolean;
 }
 
 /** Tokenize a phrase into significant lowercase words (no stopwords, len≥3). */
@@ -293,7 +300,7 @@ function criterionCovered(criterion: IntentCriterion, draftTokens: Set<string>):
 export function assessIntentCoverage(description: string, body: string): IntentCoverageAssessment {
     const criteria = extractIntentCriteria(cleanScenarioDescription(description));
     if (criteria.length === 0) {
-        return { criteria: [], uncovered: [], reasons: [] };
+        return { criteria: [], uncovered: [], reasons: [], vacuous: false };
     }
 
     const draftTokens = extractDraftSignalTokens(body);
@@ -309,7 +316,7 @@ export function assessIntentCoverage(description: string, body: string): IntentC
             `scenario step "${truncate(criterion.text, 80)}" has no matching assertion or action in the draft`,
     );
 
-    return { criteria, uncovered, reasons };
+    return { criteria, uncovered, reasons, vacuous: !hasAssertion && uncovered.length > 0 };
 }
 
 function truncate(text: string, max: number): string {

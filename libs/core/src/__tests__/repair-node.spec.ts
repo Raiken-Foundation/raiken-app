@@ -107,7 +107,9 @@ describe("createRepairNode — full-file context in the repair prompt", () => {
 
         expect(invoke).toHaveBeenCalledTimes(1);
         const [messages] = invoke.mock.calls[0] as unknown as [Array<{ content: string }>];
-        const systemPromptText = messages[0].content;
+        const systemPromptText = JSON.parse(
+            JSON.parse(String(messages.at(-1)?.content)).untrustedEvidence,
+        ).test;
         // The tail of the file (well past the old 4000-char cutoff) must be present.
         expect(systemPromptText).toContain("test('signs in', async () => {});");
         expect(systemPromptText).not.toContain("[TRUNCATED");
@@ -125,6 +127,8 @@ describe("createRepairNode — full-file context in the repair prompt", () => {
         await node(baseState({ testDraft: hugeTestDraft }));
 
         const [messages] = invoke.mock.calls[0] as unknown as [Array<{ content: string }>];
-        expect(messages[0].content).toContain("[TRUNCATED");
+        expect(
+            JSON.parse(JSON.parse(String(messages.at(-1)?.content)).untrustedEvidence).test,
+        ).toContain("[TRUNCATED");
     });
 });

@@ -26,6 +26,7 @@ import {
     validateSelectorGrounding,
 } from "../../grounding";
 import { AgentMemory } from "../../memory";
+import { buildPromptMessages } from "../../prompt-messages";
 import type { ContextData } from "../../prompts";
 import { NO_CONTEXT_HELP_MESSAGE, NO_EXPLORATION_CONTEXT_MESSAGE } from "../../prompts";
 import type { GraphStateType } from "../state";
@@ -516,6 +517,7 @@ export const createGenerateTestsNode =
         getMemoryContext,
         onProgress,
         onToken,
+        signal,
     }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
         const context =
@@ -531,6 +533,7 @@ export const createGenerateTestsNode =
             (state.pageSummaries?.length ?? 0) > 0;
         if (!hasGrounding) {
             return {
+                failure: NO_CONTEXT_HELP_MESSAGE,
                 summary: NO_CONTEXT_HELP_MESSAGE,
             };
         }
@@ -593,13 +596,6 @@ export const createGenerateTestsNode =
             systemPrompt = `${systemPrompt}\n\n${actionBlock}`;
         }
 
-        if (state.conversationHistory && state.conversationHistory.length > 0) {
-            const historyText = state.conversationHistory
-                .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
-                .join("\n\n");
-            systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
-        }
-
         const groundingSummaries = [state.domSummary, ...(state.pageSummaries || [])].filter(
             (s): s is string => typeof s === "string" && s.length > 0,
         );
@@ -615,7 +611,12 @@ export const createGenerateTestsNode =
             allowStreaming: boolean,
         ): Promise<string> => {
             const prompt = correction ? `${systemPrompt}\n\n${correction}` : systemPrompt;
-            const messages = [new SystemMessage(prompt), new HumanMessage(state.userPrompt)];
+            const messages = buildPromptMessages(
+                buildSystemPrompt({ ...context, files: [], siteKnowledge: null }, "", "golden-v1"),
+                prompt,
+                state.userPrompt,
+                state.conversationHistory,
+            );
 
             // Stream tokens live when the model supports it so the dashboard
             // shows the test being written instead of a long silent wait. Fall
@@ -625,6 +626,7 @@ export const createGenerateTestsNode =
                 try {
                     const stream = await model.stream(messages, {
                         timeout: LLM_REQUEST_TIMEOUT_MS,
+                        signal,
                     });
                     for await (const chunk of stream) {
                         const part = Array.isArray(chunk.content)
@@ -641,6 +643,7 @@ export const createGenerateTestsNode =
                     // Streaming failed. If nothing streamed yet, fall back to a
                     // plain invoke below. If we already streamed a partial draft,
                     // keep it (re-invoking would duplicate the streamed tokens).
+                    if (signal?.aborted) throw streamError;
                     console.warn(
                         "Test generation streaming failed:",
                         streamError instanceof Error ? streamError.message : streamError,
@@ -649,7 +652,10 @@ export const createGenerateTestsNode =
             }
 
             if (!content) {
-                const response = await model.invoke(messages, { timeout: LLM_REQUEST_TIMEOUT_MS });
+                const response = await model.invoke(messages, {
+                    timeout: LLM_REQUEST_TIMEOUT_MS,
+                    signal,
+                });
                 content = Array.isArray(response.content)
                     ? response.content
                           .map((part) => (typeof part === "string" ? part : part?.text || ""))
@@ -705,7 +711,7 @@ export const createGenerateTestsNode =
                 report.contradictions.length * 10 +
                 report.unverified.length +
                 (invertedAssertions ? 5 : 0);
-            let best: { draft: string; grounding: GroundingReport } | null = null;
+            let best: { draft: string; grounding: GroundingReport; score: number } | null = null;
             // Carries the polarity complaint into the next pass's correction.
             let previousPolarityReason: string | null = null;
 
@@ -729,6 +735,7 @@ export const createGenerateTestsNode =
                     console.warn(`Generated test draft rejected: ${validation.reason}`);
                     return {
                         testDraft: "",
+                        failure: `Test generation produced output that wasn't usable (${validation.reason}). This can happen when a streamed response gets interrupted — try again.`,
                         summary: `Test generation produced output that wasn't usable (${validation.reason}). This can happen when a streamed response gets interrupted — try again.`,
                         context,
                         testDirectory: context.testDirectory,
@@ -746,12 +753,12 @@ export const createGenerateTestsNode =
                 // never a hard block, because "the deleted row is gone" is a
                 // legitimate all-negative test.
                 const polarity = assessAssertionPolarity(cleaned);
-                if (
-                    !best ||
-                    violationScore(grounding, polarity.allNegative) <
-                        violationScore(best.grounding, false)
-                ) {
-                    best = { draft: cleaned, grounding };
+                if (!best || violationScore(grounding, polarity.allNegative) < best.score) {
+                    best = {
+                        draft: cleaned,
+                        grounding,
+                        score: violationScore(grounding, polarity.allNegative),
+                    };
                 }
                 const lastPass = pass === MAX_GROUNDING_PASSES;
                 const clean =
@@ -778,6 +785,7 @@ export const createGenerateTestsNode =
                         return {
                             testDraft: "",
                             groundingViolations: chosen.grounding.contradictions,
+                            failure: formatGroundingRejection(chosen.grounding.contradictions),
                             summary: formatGroundingRejection(chosen.grounding.contradictions),
                             context,
                             testDirectory: context.testDirectory,
@@ -826,6 +834,7 @@ export const createGenerateTestsNode =
             console.error("Test generation LLM call failed:", message);
             return {
                 testDraft: "",
+                failure: `Test generation failed: ${message}. Check your API key and network connection.`,
                 summary: `Test generation failed: ${message}. Check your API key and network connection.`,
                 context,
                 testDirectory: context.testDirectory,
@@ -841,6 +850,7 @@ export const createAnswerQuestionsNode =
         model,
         buildExplorationPrompt,
         getMemoryContext,
+        signal,
     }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
         if (state.nextTool === "discoveryRead") {
@@ -1064,13 +1074,6 @@ export const createAnswerQuestionsNode =
             systemPrompt = `${systemPrompt}\n\n${actionBlock}\nWhen the user asked to perform this action, report exactly where it was found and whether it was carried out.`;
         }
 
-        if (state.conversationHistory && state.conversationHistory.length > 0) {
-            const historyText = state.conversationHistory
-                .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
-                .join("\n\n");
-            systemPrompt = `[CONVERSATION CONTEXT]\n${historyText}\n\n---\n\n${systemPrompt}`;
-        }
-
         const extractEvidenceInfo = (
             text: string,
         ): {
@@ -1181,8 +1184,13 @@ export const createAnswerQuestionsNode =
 
         const invokeWithPrompt = async (prompt: string): Promise<string> => {
             const response = await model.invoke(
-                [new SystemMessage(prompt), new HumanMessage(state.userPrompt)],
-                { timeout: LLM_REQUEST_TIMEOUT_MS },
+                buildPromptMessages(
+                    buildExplorationPrompt({ ...context, files: [], siteKnowledge: null }, ""),
+                    prompt,
+                    state.userPrompt,
+                    state.conversationHistory,
+                ),
+                { timeout: LLM_REQUEST_TIMEOUT_MS, signal },
             );
             return Array.isArray(response.content)
                 ? response.content
@@ -1208,6 +1216,7 @@ export const createAnswerQuestionsNode =
             // answer so the user gets a clear message instead of a crash.
             const message = error instanceof Error ? error.message : String(error);
             return {
+                failure: `I couldn't complete the analysis due to an AI provider error: ${message}`,
                 summary: `I couldn't complete the analysis due to an AI provider error: ${message}`,
                 context,
             };

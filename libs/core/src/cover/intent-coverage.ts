@@ -1,3 +1,5 @@
+import { assertedScenarioTokens, inspectTestAssertions } from "../testing/assertion-contract";
+
 /**
  * Cheap "did the draft check what was asked?" gate.
  *
@@ -242,48 +244,7 @@ export function extractIntentCriteria(description: string): IntentCriterion[] {
  * names, goto paths, and fill/click string args.
  */
 export function extractDraftSignalTokens(body: string): Set<string> {
-    const haystack: string[] = [];
-
-    for (const match of body.matchAll(
-        /\b(?:getBy(?:Role|Label|Text|Placeholder|TestId|Title|AltText)|locator)\s*\(\s*(['"`])([^'"`\n]+)\1/g,
-    )) {
-        haystack.push(match[2] ?? "");
-    }
-    // getByRole('button', { name: 'Sign in' })
-    for (const match of body.matchAll(/\bname\s*:\s*(['"`])([^'"`\n]+)\1/g)) {
-        haystack.push(match[2] ?? "");
-    }
-    for (const match of body.matchAll(
-        /\b(?:to(?:HaveText|ContainText|HaveURL|HaveTitle|HaveValue|HaveAttribute)|toBeVisible|toBeEnabled)\s*\(\s*(?:\/([^/\n]+)\/[gimsuy]*|(['"`])([^'"`\n]+)\2)?/g,
-    )) {
-        haystack.push(match[1] ?? match[3] ?? "");
-    }
-    for (const match of body.matchAll(/\bpage\.goto\s*\(\s*(['"`])([^'"`\n]+)\1/g)) {
-        haystack.push(match[2] ?? "");
-    }
-    for (const match of body.matchAll(
-        /\.(?:fill|type|pressSequentially|selectOption)\s*\(\s*(['"`])([^'"`\n]+)\1/g,
-    )) {
-        haystack.push(match[2] ?? "");
-    }
-    // test()/describe() titles are human restatements of the scenario — a
-    // draft whose title names the requested flow covers it even when the
-    // assertion strings paraphrase rather than repeat the exact wording.
-    for (const match of body.matchAll(/\b(?:test|describe)\(\s*(['"`])([^'"`\n]+)\1/g)) {
-        haystack.push(match[2] ?? "");
-    }
-
-    // Also tokenize the whole body lightly so role names in comments/identifiers help.
-    const tokens = new Set<string>();
-    for (const chunk of haystack) {
-        for (const token of significantTokens(chunk)) tokens.add(token);
-    }
-    for (const token of significantTokens(body.slice(0, 8000))) {
-        // Keep body-wide tokens only when they look like domain nouns already
-        // seen in string literals — avoid matching on import paths etc.
-        if (haystack.some((h) => h.toLowerCase().includes(token))) tokens.add(token);
-    }
-    return tokens;
+    return new Set(assertedScenarioTokens(body).flatMap(significantTokens));
 }
 
 function criterionCovered(criterion: IntentCriterion, draftTokens: Set<string>): boolean {
@@ -305,7 +266,7 @@ export function assessIntentCoverage(description: string, body: string): IntentC
 
     const draftTokens = extractDraftSignalTokens(body);
     // A draft with no assertions at all cannot cover outcome criteria.
-    const hasAssertion = /\bexpect\s*\(/.test(body);
+    const hasAssertion = inspectTestAssertions(body).assertions.some((a) => a.meaningful);
     const uncovered = criteria.filter((criterion) => {
         if (!hasAssertion) return true;
         return !criterionCovered(criterion, draftTokens);

@@ -12,6 +12,7 @@ import {
 } from "./draft-quality";
 import { type CoverEvidence, hasAuthGrounding, looksLikeAuthScenario } from "./evidence";
 import { assessIntentCoverage } from "./intent-coverage";
+import { scenarioExpectedTokens } from "./repair-setup";
 
 export interface AssessGeneratedDraftInput {
     body: string;
@@ -29,6 +30,8 @@ export interface AssessGeneratedDraftResult {
     needsReview: boolean;
     reviewReasons: string[];
     todoNotes: number;
+    /** TODOs whose code is commented out — the draft cannot run without them. */
+    blockingTodos: number;
     /**
      * True when a review reason is grounding-driven: the draft asserts
      * locators or post-auth state that no captured page / source markup /
@@ -57,10 +60,45 @@ export function containsUnverifiedMarker(code: string): boolean {
  * execute (`'TODO: Define product page URL'`). A TODO in a comment is the
  * model flagging an optional follow-up on a draft that runs as written.
  */
-export function assessTodoMarkers(body: string): { placeholders: number; notes: number } {
+export interface TodoMarkerAssessment {
+    placeholders: number;
+    blocking: number;
+    notes: number;
+}
+
+export function assessTodoMarkers(body: string): TodoMarkerAssessment {
     const placeholders = (body.match(/(['"`])[^'"`\n]*\bTODO\b[^'"`\n]*\1/g) ?? []).length;
     const total = (body.match(/\bTODO\b/g) ?? []).length;
-    return { placeholders, notes: Math.max(0, total - placeholders) };
+    const blocking = countBlockingTodos(body);
+    return { placeholders, blocking, notes: Math.max(0, total - placeholders - blocking) };
+}
+
+/**
+ * A `// TODO:` that stands in for a required step the model could not ground:
+ * its code is COMMENTED OUT on the line(s) immediately below. Distinct from an
+ * optional note (a TODO whose next line is real, executable code) and from a
+ * string-literal placeholder.
+ */
+function countBlockingTodos(body: string): number {
+    const lines = body.split("\n");
+    let blocking = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        if (!/^\s*\/\/\s*TODO\b/i.test(line)) continue;
+        for (let j = i + 1; j < lines.length; j++) {
+            const next = lines[j] ?? "";
+            if (!next.trim()) continue;
+            if (
+                /^\s*\/\/\s*(await\b|page\.|const\s+\w+\s*=|let\s+\w+\s*=|expect\(|\.(fill|click|goto|selectOption|check|uncheck|press|hover|type|dblclick)\(|test\(|describe\()/.test(
+                    next,
+                )
+            ) {
+                blocking += 1;
+            }
+            break;
+        }
+    }
+    return blocking;
 }
 
 /**
@@ -101,7 +139,12 @@ export async function assessGeneratedDraft(
     const hardBlockReasons: string[] = [];
     let groundingDriven = false;
 
-    const grounding = validateSelectorGrounding(body, evidence.snapshots, evidence.sourceSelectors);
+    const grounding = validateSelectorGrounding(
+        body,
+        evidence.snapshots,
+        evidence.sourceSelectors,
+        scenarioExpectedTokens(description),
+    );
 
     const structure = assessDraftStructure(body);
     if (!structure.ok) {
@@ -126,9 +169,20 @@ export async function assessGeneratedDraft(
         groundingDriven = true;
     }
 
-    const { placeholders: todoPlaceholders, notes: todoNotes } = assessTodoMarkers(body);
+    const {
+        placeholders: todoPlaceholders,
+        blocking: todoBlocking,
+        notes: todoNotes,
+    } = assessTodoMarkers(body);
     if (todoPlaceholders > 0) {
         reviewReasons.push(`${todoPlaceholders} TODO placeholder value(s) must be replaced`);
+    }
+    if (todoBlocking > 0) {
+        groundingDriven = true;
+        reviewReasons.push(
+            `${todoBlocking} step(s) are stubbed as TODO comments with their code commented out — ` +
+                "the draft cannot run until they are filled in",
+        );
     }
 
     if (grounding.contradictions.length > 0) {
@@ -145,9 +199,16 @@ export async function assessGeneratedDraft(
     }
     if (grounding.warnings.length > 0) {
         groundingDriven = true;
-        reviewReasons.push(
-            `${grounding.warnings.length} locator(s) assert text/CSS not seen in captured pages`,
-        );
+        const valueCount = grounding.warnings.filter((w) => w.kind === "unknown_value").length;
+        const locatorCount = grounding.warnings.length - valueCount;
+        const parts: string[] = [];
+        if (locatorCount > 0) {
+            parts.push(`${locatorCount} locator(s) assert text/CSS not seen in captured pages`);
+        }
+        if (valueCount > 0) {
+            parts.push(`${valueCount} value(s) asserted but not seen in captured pages`);
+        }
+        reviewReasons.push(parts.join("; "));
     }
 
     const fit = await assessPlaywrightFit(projectPath, outputPath);
@@ -181,6 +242,7 @@ export async function assessGeneratedDraft(
         needsReview: allReasons.length > 0,
         reviewReasons: allReasons,
         todoNotes,
+        blockingTodos: todoBlocking,
         groundingDriven,
     };
 }

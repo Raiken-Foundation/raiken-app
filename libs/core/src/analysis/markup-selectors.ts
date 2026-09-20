@@ -39,7 +39,7 @@ export const MARKUP_EXTENSIONS: readonly string[] = [
 ];
 
 /** Attributes that yield a Playwright locator, and the locator kind each implies. */
-const SELECTOR_ATTRIBUTES: Record<string, TemplateSelector["kind"]> = {
+export const SELECTOR_ATTRIBUTES: Record<string, TemplateSelector["kind"]> = {
     "data-testid": "testId",
     "data-test-id": "testId",
     "data-test": "testId",
@@ -140,7 +140,6 @@ export function extractTemplateSelectors(markup: string): TemplateSelector[] {
         scannable = maskMatches(scannable, pattern);
     }
 
-    const seen = new Set<string>();
     const found: TemplateSelector[] = [];
     const lineAt = lineCounter(scannable);
 
@@ -155,10 +154,6 @@ export function extractTemplateSelectors(markup: string): TemplateSelector[] {
         if (!value || value.length > 120) continue;
         if (INTERPOLATION.test(value)) continue;
 
-        const dedupeKey = `${kind}\u0000${value}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-
         const selector: TemplateSelector = {
             kind,
             value,
@@ -168,9 +163,27 @@ export function extractTemplateSelectors(markup: string): TemplateSelector[] {
         found.push(selector);
     }
 
-    if (found.length <= MAX_SELECTORS_PER_FILE) return found;
+    return finalizeTemplateSelectors(found);
+}
 
-    return found
+/**
+ * Dedupe, cap, and priority-sort an already-extracted selector list. Shared by
+ * the regex markup scanner and the JSX AST walker so both enforce the same
+ * limits and ordering.
+ */
+export function finalizeTemplateSelectors(found: TemplateSelector[]): TemplateSelector[] {
+    const seen = new Set<string>();
+    const deduped: TemplateSelector[] = [];
+    for (const selector of found) {
+        const key = `${selector.kind}\u0000${selector.value}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(selector);
+    }
+
+    if (deduped.length <= MAX_SELECTORS_PER_FILE) return deduped;
+
+    return deduped
         .map((selector, order) => ({ selector, order }))
         .sort(
             (a, b) =>

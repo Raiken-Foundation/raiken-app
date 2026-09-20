@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AutonomySettings } from "../agent/tools";
+import { conflictError } from "../errors";
 import type { TestRunResult } from "../testing/runner";
+import { lock } from "proper-lockfile";
 
 export type HitlWorkflowStatus =
     | "await_save_approval"
@@ -64,8 +66,13 @@ export class WorkflowStore {
             const raw = await fs.readFile(this.filePath(id), "utf-8");
             const parsed = JSON.parse(raw) as HitlWorkflowRecord;
             return parsed?.version === 1 && parsed.id === id ? parsed : null;
-        } catch {
-            return null;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            // Missing files and unparsable records read as "no record".
+            // Permission/transient errors must NOT masquerade as "missing" —
+            // that silently hides every pending approval (review finding).
+            if (code === "ENOENT" || error instanceof SyntaxError) return null;
+            throw error;
         }
     }
 
@@ -89,16 +96,43 @@ export class WorkflowStore {
     async update(
         id: string,
         patch: Partial<Omit<HitlWorkflowRecord, "id" | "version" | "createdAt">>,
+        options: { expectedUpdatedAt?: number } = {},
     ): Promise<HitlWorkflowRecord | null> {
-        const existing = await this.load(id);
-        if (!existing) return null;
-        const updated = this.finalizeTerminal({
-            ...existing,
-            ...patch,
-            updatedAt: Date.now(),
+        const target = this.filePath(id);
+        await fs.mkdir(this.directory, { recursive: true });
+        // The load→merge→write cycle is a read-modify-write on a file the
+        // dashboard (tRPC) and CLI drive cross-process; ChatHistoryStore
+        // takes proper-lockfile for exactly this reason (review finding).
+        const release = await lock(target, {
+            realpath: false,
+            stale: 10_000,
+            update: 3_000,
+            retries: 3,
         });
-        await this.write(updated);
-        return updated;
+        try {
+            const existing = await this.load(id);
+            if (!existing) return null;
+            if (
+                options.expectedUpdatedAt !== undefined &&
+                existing.updatedAt !== options.expectedUpdatedAt
+            ) {
+                // Compare-and-swap: a decision computed against a stale
+                // snapshot must never be applied over a newer decision.
+                throw conflictError(
+                    "The workflow changed while the decision was in flight — re-check its current state and try again.",
+                    { code: "RESOURCE_CONFLICT" },
+                );
+            }
+            const updated = this.finalizeTerminal({
+                ...existing,
+                ...patch,
+                updatedAt: Date.now(),
+            });
+            await this.write(updated);
+            return updated;
+        } finally {
+            await release().catch(() => undefined);
+        }
     }
 
     private finalizeTerminal(record: HitlWorkflowRecord): HitlWorkflowRecord {

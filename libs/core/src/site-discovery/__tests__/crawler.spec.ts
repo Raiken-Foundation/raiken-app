@@ -39,6 +39,8 @@ import {
 interface FakeLocator {
     count: () => Promise<number>;
     first: () => FakeLocator;
+    isVisible?: () => Promise<boolean>;
+    boundingBox?: () => Promise<{ width: number; height: number; x: number; y: number } | null>;
 }
 
 function makePage(opts: { content?: string; locators?: Record<string, FakeLocator> }) {
@@ -223,6 +225,11 @@ describe("manual-fallback detector", () => {
             first() {
                 return this;
             },
+            // A real challenge iframe is visible and non-zero-sized — the
+            // detector now requires this so background badge/managed-mode
+            // iframes cannot pause healthy pages (review finding).
+            isVisible: async () => true,
+            boundingBox: async () => ({ width: 300, height: 65, x: 0, y: 0 }),
         };
         const page = makePage({
             locators: { 'iframe[src*="challenges.cloudflare.com"]': turnstile },
@@ -230,6 +237,21 @@ describe("manual-fallback detector", () => {
         const blocker = await detector.detect(makeContext({ page }));
         expect(blocker?.category).toBe("captcha");
         expect(blocker?.evidenceJson).toContain("Cloudflare Turnstile");
+    });
+
+    it("ignores an invisible captcha iframe (reCAPTCHA v3 badge / managed mode)", async () => {
+        const badge: FakeLocator = {
+            count: async () => 1,
+            first() {
+                return this;
+            },
+            isVisible: async () => false,
+        };
+        const page = makePage({
+            locators: { 'iframe[src*="recaptcha"]': badge },
+        });
+        const blocker = await detector.detect(makeContext({ page }));
+        expect(blocker).toBeNull();
     });
 
     it("returns null when neither a 5xx nor a captcha iframe is present", async () => {

@@ -138,10 +138,10 @@ describe("CodeGraphDB facade parity", () => {
         const tables = db1.getTables().map((t) => t.name);
         expect(tables).toContain("discovery_blockers");
         expect(tables).not.toContain("auth_blockers");
-        const blockers = db1.executeQuery(
-            "SELECT id, category FROM discovery_blockers WHERE project_path = ?",
-            [testDir],
-        ) as Array<{ id: number; category: string }>;
+        const blockers = db1
+            .getRawDatabase()
+            .prepare("SELECT id, category FROM discovery_blockers WHERE project_path = ?")
+            .all(testDir) as Array<{ id: number; category: string }>;
         expect(blockers[0]?.id).toBe(1);
         expect(blockers[0]?.category).toBe("auth_required");
         expect(db1.getRawDatabase().pragma("user_version", { simple: true })).toBe(7);

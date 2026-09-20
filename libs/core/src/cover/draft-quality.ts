@@ -25,27 +25,89 @@ export function assessDraftStructure(body: string): DraftStructureAssessment {
 
 /**
  * True when `relativePath` (project-relative, forward slashes) matches a
- * Playwright `testMatch` glob. Supports `*`, `**`, and basename-only patterns
- * Playwright accepts (e.g. `workflows.spec.ts`).
+ * Playwright `testMatch` glob. Supports `*`, `**`, basename-only patterns,
+ * `{a,b}` brace expansion, `[abc]` character classes, and `@(a|b)` extglobs
+ * — the micromatch shapes real Playwright configs use (review finding: the
+ * old translation escaped braces and classes, hard-blocking e.g. the
+ * spec-test brace form every draft).
  */
 export function matchesPlaywrightTestPattern(relativePath: string, pattern: string): boolean {
     const file = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
     const base = path.posix.basename(file);
     const pat = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
-    if (!pat.includes("*") && !pat.includes("?") && !pat.includes("/")) {
+    if (!pat.includes("*") && !pat.includes("?") && !pat.includes("/") && !pat.includes("{")) {
         return base === pat || file === pat || file.endsWith(`/${pat}`);
     }
-    const toRegex = (glob: string): RegExp => {
-        const escaped = glob
+    // Expand {a,b,c} alternation one construct at a time, recursively.
+    const expandBraces = (input: string): string[] => {
+        const match = /\{([^{},]*,[^{}]*)\}/.exec(input);
+        if (!match) return [input];
+        return match[1]
+            ?.split(",")
+            .flatMap((variant) => expandBraces(input.replace(match[0] as string, variant))) ?? [
+            input,
+        ];
+    };
+    const escapePlain = (text: string) =>
+        text
             .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-            .replace(/\*\*/g, "§§")
+            .replace(/\*\*/g, "\u0000")
             .replace(/\*/g, "[^/]*")
             .replace(/\?/g, "[^/]")
-            .replace(/§§/g, ".*");
-        return new RegExp(`^${escaped}$`);
+            // biome-ignore lint/suspicious/noControlCharactersInRegex: the NUL sentinel is the whole point — a placeholder that cannot appear in a glob
+            .replace(/\u0000/g, ".*");
+    // Translate one brace-free variant, passing character classes through as
+    // regex classes and `@(...)` extglobs as non-capturing groups.
+    const translate = (variant: string): string => {
+        let out = "";
+        let i = 0;
+        while (i < variant.length) {
+            const ch = variant[i] as string;
+            if (ch === "[") {
+                const end = variant.indexOf("]", i + 1);
+                if (end > i + 1) {
+                    let cls = variant
+                        .slice(i + 1, end)
+                        .replace(/\\/g, "\\\\")
+                        .replace(/]/g, "");
+                    if (cls.startsWith("!")) cls = `^${cls.slice(1)}`;
+                    out += `[${cls}]`;
+                    i = end + 1;
+                    continue;
+                }
+            }
+            if (ch === "@" && variant[i + 1] === "(") {
+                let depth = 0;
+                let j = i + 1;
+                for (; j < variant.length; j++) {
+                    if (variant[j] === "(") depth += 1;
+                    else if (variant[j] === ")") {
+                        depth -= 1;
+                        if (depth === 0) break;
+                    }
+                }
+                if (j < variant.length && depth === 0) {
+                    const inner = variant.slice(i + 2, j);
+                    const alternation = inner
+                        .split("|")
+                        .map((alt) => translate(alt))
+                        .join("|");
+                    out += `(?:${alternation})`;
+                    i = j + 1;
+                    continue;
+                }
+            }
+            const nextSpecial = variant.slice(i + 1).search(/[@[]/);
+            const stop = nextSpecial === -1 ? variant.length : i + 1 + nextSpecial;
+            out += escapePlain(variant.slice(i, stop));
+            i = stop;
+        }
+        return out;
     };
-    const re = toRegex(pat);
-    return re.test(file) || re.test(base);
+    return expandBraces(pat).some((variant) => {
+        const re = new RegExp(`^${translate(variant)}$`);
+        return re.test(file) || re.test(base);
+    });
 }
 
 export interface AssertionPolarityAssessment {

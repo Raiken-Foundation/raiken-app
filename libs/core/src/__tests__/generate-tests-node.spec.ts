@@ -39,7 +39,9 @@ function makeDeps(modelResponseContent: string | string[], overrides: Partial<Ag
     const systemPrompts: string[] = [];
     const model = {
         invoke: vi.fn(async (messages: Array<{ content: unknown }>) => {
-            systemPrompts.push(String(messages[0]?.content ?? ""));
+            systemPrompts.push(
+                JSON.parse(String(messages.at(-1)?.content ?? "{}")).untrustedEvidence,
+            );
             return { content: responses.length > 1 ? (responses.shift() as string) : responses[0] };
         }),
     };
@@ -64,6 +66,14 @@ test('signs in successfully', async ({ page }) => {
 `;
 
 describe("createGenerateTestsNode — save-gate", () => {
+    it("returns a machine-readable failure when the provider rejects generation", async () => {
+        const { deps, model } = makeDeps("");
+        model.invoke.mockRejectedValue(new Error("429 Too Many Requests"));
+        const result = await createGenerateTestsNode(deps)(baseState({ context: baseContext() }));
+        expect(result.failure).toContain("429");
+        expect(result.testDraft).toBe("");
+    });
+
     it("accepts well-formed, non-empty Playwright test code", async () => {
         const { deps } = makeDeps(`\`\`\`typescript\n${VALID_TEST}\`\`\``);
         const node = createGenerateTestsNode(deps);

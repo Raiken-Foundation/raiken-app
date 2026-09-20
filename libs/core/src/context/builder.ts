@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { GraphQueryService } from "../analysis/graph-query";
 import { defaultBaseRef, getChangedFiles, getStagedFiles, resolveRefs } from "../ci/git-diff";
 import { CodeGraphDB } from "../database/db";
+import { redactString } from "../observability/redaction";
 
 export interface ContextOptions {
     projectPath: string;
@@ -60,8 +61,13 @@ export async function writeProjectContext(options: ContextOptions): Promise<Cont
     );
     lines.push("");
     lines.push(`Generated: ${new Date().toISOString()}`);
-    lines.push(`Project:   ${projectName(projectPath)}`);
-    lines.push(`Branch:    ${currentBranch(projectPath) ?? "(unknown)"}`);
+    // Package names and branch names come from the repo but flow into a file
+    // handed to external AI agents — redact + strip newlines so nothing
+    // escapes the header line (review finding: prompt injection surface).
+    lines.push(`Project:   ${redactString(projectName(projectPath), 200).replace(/\r?\n/g, " ")}`);
+    lines.push(
+        `Branch:    ${redactString(currentBranch(projectPath) ?? "(unknown)", 200).replace(/\r?\n/g, " ")}`,
+    );
     lines.push("");
 
     sections.graph = appendGraphSection(lines, projectPath);
@@ -203,12 +209,22 @@ function appendFailuresSection(lines: string[], projectPath: string, maxRows: nu
     lines.push("|---|---|---|");
     for (const f of failures) {
         const when = f.lastRun ? new Date(f.lastRun).toISOString() : "(unknown)";
-        const err = (f.errorMessage ?? "(no message)")
+        // Raw Playwright error text routinely contains URLs with ?token=/
+        // api_key= and auth headers; this file is built to be handed to
+        // external IDE AI agents, so every interpolated field is
+        // secret-redacted and flattened (review finding). Backticks are
+        // stripped so a page-controlled name cannot break out of the code
+        // span and inject markdown structure.
+        const err = redactString(f.errorMessage ?? "(no message)", 200)
+            .replace(/`/g, "'")
             .replace(/\|/g, "\\|")
             .replace(/\r?\n/g, " ")
             .slice(0, 120);
-        const testName = (f.testName ?? "(anonymous)").replace(/\|/g, "\\|");
-        lines.push(`| \`${f.testFile}\`::${testName} | ${err} | ${when} |`);
+        const testName = redactString(f.testName ?? "(anonymous)", 200)
+            .replace(/`/g, "'")
+            .replace(/\|/g, "\\|");
+        const testFile = f.testFile.replace(/`/g, "'");
+        lines.push(`| \`${testFile}\`::${testName} | ${err} | ${when} |`);
     }
     lines.push("");
     return true;
@@ -232,9 +248,7 @@ function appendCoverageSection(lines: string[], projectPath: string, maxRows: nu
     // graph-query for each source file batch — accurate enough for a
     // navigational hint without hammering the DB.
     const query = new GraphQueryService(projectPath);
-    const sourceFiles = files
-        .map((f) => f.relative_path)
-        .filter((p) => isLikelyAppSource(p));
+    const sourceFiles = files.map((f) => f.relative_path).filter((p) => isLikelyAppSource(p));
 
     let evidence: ReturnType<typeof query.getAffectedTests> = [];
     try {

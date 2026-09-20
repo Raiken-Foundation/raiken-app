@@ -15,11 +15,11 @@ import {
     GraphQueryService,
     isLikelyTestPath,
 } from "../analysis/graph-query";
+import { recordRunOutcomes } from "../testing/record-outcomes";
 import { parseCiRunReport } from "../testing/report-parser";
 import { writeTestRunReport } from "../testing/report-writer";
 import { summarizeTestRunCounts } from "../testing/run-outcome";
 import { TestRunner, type TestRunResult } from "../testing/runner";
-import { recordRunOutcomes } from "../testing/record-outcomes";
 import {
     filterSourceFiles,
     GitError,
@@ -117,8 +117,14 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
     // A changed test file is affected BY DEFINITION — the graph only maps
     // source → tests, so editing the suite itself previously produced
     // `affectedTests: []` and CI ran nothing exactly when a test changed.
+    // Guard against duplicates in the ACCEPTED list (not the evidence map):
+    // a changed test with weak graph evidence sits below the confidence
+    // threshold and must still run (review finding: the old
+    // `byTestFile.has()` check silently skipped exactly those).
+    const acceptedTestFiles = new Set(affectedTests.map((t) => t.testFile));
     for (const entry of directlyChangedTestEntries(changedFiles)) {
-        if (byTestFile.has(entry.testFile)) continue;
+        if (acceptedTestFiles.has(entry.testFile)) continue;
+        acceptedTestFiles.add(entry.testFile);
         affectedTests.push(entry);
     }
 
@@ -127,7 +133,12 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
         if (b.confidence !== a.confidence) return b.confidence - a.confidence;
         return a.testFile.localeCompare(b.testFile);
     });
+    // A directly-changed test is never "skipped below threshold" — it runs
+    // at confidence 1.0 via the loop above.
     skippedBelowThreshold.sort((a, b) => a.testFile.localeCompare(b.testFile));
+    const skippedNotRunning = skippedBelowThreshold.filter(
+        (s) => !acceptedTestFiles.has(s.testFile),
+    );
 
     const impact: CiImpactReport = {
         schemaVersion: 1,
@@ -136,7 +147,7 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
         changedFiles,
         consideredSourceFiles,
         affectedTests,
-        skippedBelowThreshold,
+        skippedBelowThreshold: skippedNotRunning,
         confidenceThreshold: threshold,
     };
 

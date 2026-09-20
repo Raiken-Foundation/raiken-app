@@ -29,9 +29,16 @@
 
 import { generateText, streamText } from "ai";
 import { buildAISdkModel, modelSupportsVision } from "../agent/ai-providers";
+import { EVIDENCE_POLICY } from "../agent/prompt-messages";
+import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import type { DOMContext } from "../browser/dom-capture";
 import type { AIProviderId } from "../config/schema";
-import type { ProvenSelector } from "../cover/repair-setup";
+import {
+    changedAssertedValues,
+    describeWeakenedAssertion,
+    type ProvenSelector,
+} from "../cover/repair-setup";
+import type { TemplateSelector } from "../types";
 import { cleanGeneratedTestCode } from "../utils";
 import { applyEditBlocks, parseEditBlocks, stripEditMarkers } from "./edit-blocks";
 import { validateTestCode } from "./test-code-validation";
@@ -407,6 +414,7 @@ async function* streamInterpretation(
     try {
         const result = await streamText({
             model,
+            system: `Explain test results using the supplied evidence. ${EVIDENCE_POLICY}`,
             prompt,
             temperature: 0.3,
             maxOutputTokens: 4096,
@@ -462,6 +470,8 @@ export interface RepairImage {
 }
 
 export interface RepairContext extends InterpretationContext {
+    /** Explicit caller authorization to revise requirements (CLI --allow-weaken). */
+    allowWeaken?: boolean;
     /**
      * The prior AI analysis text (from {@link getQuickInterpretation}), if the
      * user already ran "Analyze with AI". Passing it lets the repair honour the
@@ -484,6 +494,12 @@ export interface RepairContext extends InterpretationContext {
      * they exist — and must never replace them with invented locators.
      */
     provenSelectors?: ProvenSelector[];
+    /**
+     * All indexed selectors from the code graph (data-testid, roles, labels,
+     * placeholders). A fix must prefer these over inventing a new locator — a
+     * failing selector not in this list is often a typo for a nearby entry.
+     */
+    sourceSelectors?: TemplateSelector[];
     /** Aborts the underlying model request (repair deadline). */
     signal?: AbortSignal;
     /**
@@ -536,6 +552,7 @@ export function buildRepairPrompt(
         interpretation,
         images,
         provenSelectors,
+        sourceSelectors,
         scenario,
     } = context;
 
@@ -557,15 +574,14 @@ export function buildRepairPrompt(
         "credentials, or app behaviour, and do NOT assume how this particular app is built —",
         "each project is unique, so fix what the evidence supports and nothing more.",
         "",
-        "Most failures are test-side: a stale or brittle selector, a missing wait, a wrong URL,",
-        "or an assertion that no longer matches what the page renders. Fix these directly using",
-        "the real selectors/URLs/state visible in the evidence and screenshot.",
+        "Most failures are test-side: a stale or brittle selector, a missing wait, or a wrong URL.",
+        "Fix these directly using the real selectors/URLs/state visible in the evidence and screenshot.",
         "",
-        "Only when the evidence clearly shows a genuine APPLICATION regression (the app itself",
-        "is broken and the test correctly caught it) should you keep the meaningful assertion",
-        "intact instead of weakening it. In that single case you MAY add ONE short `// TODO:`",
-        "line naming the suspected app-side issue — but never scatter multiple TODOs, never stub",
-        "out logic with TODOs, and never delete a real assertion just to make the test pass.",
+        "An assertion whose EXPECTED VALUE no longer matches the page is different — the app may",
+        "have regressed, not the test. NEVER change an assertion's expected value to match what the",
+        "page currently renders. If the app contradicts the test, keep the assertion intact and add",
+        "ONE short `// TODO:` naming the suspected app-side issue. Fix only the MECHANICS of the test",
+        "(selectors, waits, navigation, interaction order) — never its expected values.",
         "",
         "Preserve the original intent of the test. Change the minimum needed to make it",
         "correct — do not rewrite unrelated parts or rename things gratuitously.",
@@ -648,6 +664,17 @@ export function buildRepairPrompt(
             "assertion, or one of Playwright's own alternatives listed above) — never",
             "replace them with invented locators and never delete the assertion that",
             "uses them.",
+            "",
+        );
+    }
+
+    if (sourceSelectors && sourceSelectors.length > 0) {
+        lines.push(
+            "# Known selectors in this app (from the code graph)",
+            "Prefer these real selectors when fixing a locator. A failing selector",
+            "that is NOT in this list is usually a typo for a nearby entry below —",
+            "do not invent a new locator.",
+            describeTemplateSelectors(sourceSelectors),
             "",
         );
     }
@@ -800,6 +827,7 @@ export async function getTestRepair(
             try {
                 return await generateText({
                     model,
+                    system: `Repair test mechanics while preserving asserted requirements. ${EVIDENCE_POLICY}`,
                     temperature: 0.2,
                     maxOutputTokens: 8192,
                     abortSignal: context.signal,
@@ -830,6 +858,7 @@ export async function getTestRepair(
         }
         return await generateText({
             model,
+            system: `Repair test mechanics while preserving asserted requirements. ${EVIDENCE_POLICY}`,
             prompt,
             temperature: 0.2,
             maxOutputTokens: 8192,
@@ -843,7 +872,14 @@ export async function getTestRepair(
      */
     const rejectIfInvalid = (code: string): RepairResult | null => {
         const validation = validateTestCode(code);
-        if (validation.ok) return null;
+        if (validation.ok) {
+            const changes = context.allowWeaken
+                ? []
+                : changedAssertedValues(context.testCode, code);
+            return changes.length
+                ? { fixedCode: null, error: describeWeakenedAssertion(changes) }
+                : null;
+        }
         return { fixedCode: null, error: `The model's fix ${validation.reason}.` };
     };
 

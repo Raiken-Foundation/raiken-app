@@ -13,6 +13,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolvePathWithinProject } from "../config/store";
+import { writeFileAtomic } from "../io/atomic-write";
 import type {
     ParsedPlaywrightRun,
     ReportAttachment,
@@ -62,7 +64,7 @@ const isTrace = (att: ReportAttachment): boolean =>
 export async function writeTestRunReport(options: WriteReportOptions): Promise<WrittenReport> {
     const projectPath = path.resolve(options.projectPath);
     const outDirRel = options.outputDir ?? "test-reports";
-    const outDir = path.resolve(projectPath, outDirRel);
+    const outDir = resolvePathWithinProject(projectPath, outDirRel);
     const formats = options.formats?.length ? options.formats : (["html"] as ReportFormat[]);
     const title = options.title ?? "Raiken Test Report";
     const embed = options.embedScreenshots !== false;
@@ -89,11 +91,7 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
                 return body ? `data:${mime};base64,${body}` : null;
             }
             if (!att.path) return null;
-            const resolved = path.resolve(projectPath, att.path);
-            // Path-traversal guard: only read artifacts under the project root.
-            if (resolved !== projectPath && !resolved.startsWith(projectPath + path.sep)) {
-                return null;
-            }
+            const resolved = resolvePathWithinProject(projectPath, att.path);
             const stat = await fs.promises.stat(resolved).catch(() => null);
             if (!stat || !stat.isFile() || stat.size > MAX_EMBED_IMAGE_BYTES) return null;
             if (embeddedTotal + stat.size > MAX_EMBED_TOTAL_BYTES) return null;
@@ -119,8 +117,8 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
         });
         screenshotsEmbedded = embedded;
         const p = path.join(outDir, `report-${stamp}.html`);
-        await fs.promises.writeFile(p, html, "utf-8");
-        await fs.promises.writeFile(path.join(outDir, "latest.html"), html, "utf-8");
+        await writeFileAtomic(p, html);
+        await writeFileAtomic(path.join(outDir, "latest.html"), html);
         files.push(p);
         htmlPath = p;
     }
@@ -134,8 +132,8 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
             projectPath,
         });
         const p = path.join(outDir, `report-${stamp}.md`);
-        await fs.promises.writeFile(p, md, "utf-8");
-        await fs.promises.writeFile(path.join(outDir, "latest.md"), md, "utf-8");
+        await writeFileAtomic(p, md);
+        await writeFileAtomic(path.join(outDir, "latest.md"), md);
         files.push(p);
     }
 
@@ -153,8 +151,8 @@ export async function writeTestRunReport(options: WriteReportOptions): Promise<W
             2,
         );
         const p = path.join(outDir, `report-${stamp}.json`);
-        await fs.promises.writeFile(p, payload, "utf-8");
-        await fs.promises.writeFile(path.join(outDir, "latest.json"), payload, "utf-8");
+        await writeFileAtomic(p, payload);
+        await writeFileAtomic(path.join(outDir, "latest.json"), payload);
         files.push(p);
     }
 

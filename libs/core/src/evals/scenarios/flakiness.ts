@@ -4,7 +4,7 @@
  * works on any repo — the "not only for the playground" half of the harness.
  */
 
-import type { RunOutcomeStatus } from "../../testing/run-outcome";
+import { type RunOutcomeStatus, testResultIdentity } from "../../testing/run-outcome";
 import { TestRunner, type TestRunResult } from "../../testing/runner";
 import { scorer } from "../scorers";
 import type { EvalScenario } from "../types";
@@ -57,15 +57,17 @@ export function buildFlakinessScenario(
             // "not skipped" — so this has to check for a status only a test
             // Playwright actually executed can carry.
             scorer("every-run-executed-tests", (allRuns) => ({
-                passed: allRuns.every((results) =>
-                    results.some((result) => EXECUTED_STATUSES.has(result.status)),
-                ),
+                passed:
+                    allRuns.length === runs &&
+                    allRuns.every((results) =>
+                        results.some((result) => EXECUTED_STATUSES.has(result.status)),
+                    ),
                 detail: allRuns.map((results) => `${results.length} result(s)`).join(", "),
             })),
             scorer("stable-across-runs", (allRuns) => {
                 const signatures = allRuns.map((results) =>
                     results
-                        .map((result) => `${result.testName}=${result.status}`)
+                        .map((result) => `${testResultIdentity(result)}=${result.status}`)
                         .sort()
                         .join("|"),
                 );
@@ -83,7 +85,10 @@ export function buildFlakinessScenario(
                 ? []
                 : [
                       scorer<TestRunResult[][]>("runs-the-whole-suite", (allRuns) => {
-                          const counts = allRuns.map((results) => results.length);
+                          const counts = allRuns.map(
+                              (results) =>
+                                  results.filter((r) => EXECUTED_STATUSES.has(r.status)).length,
+                          );
                           const expected = options.expectedTests;
                           return {
                               passed: counts.every((count) => count === expected),
@@ -93,9 +98,7 @@ export function buildFlakinessScenario(
                       }),
                   ]),
             scorer("suite-green", (allRuns) => {
-                const failing = allRuns
-                    .flat()
-                    .filter((result) => result.status !== "passed" && result.status !== "skipped");
+                const failing = allRuns.flat().filter((result) => result.status !== "passed");
                 return {
                     passed: failing.length === 0,
                     value: failing.length,

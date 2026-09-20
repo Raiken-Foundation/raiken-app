@@ -60,17 +60,13 @@ describe("database repositories", () => {
         fs.rmSync(testDir, { recursive: true, force: true });
     });
 
-    it("AdminRepository lists tables and runs SELECT-only queries", () => {
+    it("AdminRepository lists tables and counts rows", () => {
         const opened = openDatabase(testDir, dbPath);
         const admin = new AdminRepository(opened.adapter);
 
         const tables = admin.getTables();
         expect(tables.some((t) => t.name === "files")).toBe(true);
         expect(admin.getTableCount("files")).toBe(0);
-
-        const rows = admin.executeQuery("SELECT name FROM sqlite_master WHERE type = ?", ["table"]);
-        expect(Array.isArray(rows)).toBe(true);
-        expect(() => admin.executeQuery("DELETE FROM files")).toThrow(/Only SELECT/);
     });
 
     it("CodeGraphRepository persists and loads graph nodes", () => {

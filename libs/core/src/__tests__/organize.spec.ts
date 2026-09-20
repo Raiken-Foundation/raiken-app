@@ -348,7 +348,7 @@ test.describe('Login', () => {
                 configCleanup: await analyzeConfigCleanup(projectPath),
             };
 
-            const applyResult = applyOrganizePlan(projectPath, result);
+            const applyResult = await applyOrganizePlan(projectPath, result);
 
             expect(applyResult.errors).toHaveLength(0);
             expect(applyResult.movedFiles).toBe(1);
@@ -394,7 +394,7 @@ test.describe('Login', () => {
                 },
             };
 
-            const applyResult = applyOrganizePlan(projectPath, result);
+            const applyResult = await applyOrganizePlan(projectPath, result);
 
             expect(applyResult.errors).toHaveLength(0);
             expect(applyResult.movedFiles).toBe(2);
@@ -407,6 +407,47 @@ test.describe('Login', () => {
             expect(fs.existsSync(path.join(projectPath, "e2e", "a.spec.ts"))).toBe(false);
         });
 
+        it("rewrites path-form quarantine entries for moved specs", async () => {
+            writeSpec("e2e/login.spec.ts", "// quarantined flaky spec\n");
+            fs.writeFileSync(
+                path.join(projectPath, "raiken.config.json"),
+                JSON.stringify({
+                    testDirectory: "e2e",
+                    quarantine: { testFiles: ["e2e/login.spec.ts", "e2e/other.spec.ts"] },
+                }),
+            );
+
+            const { applyOrganizePlan } = await import("../organize/apply");
+            const applyResult = await applyOrganizePlan(projectPath, {
+                testDirectory: "e2e",
+                testPlan: {
+                    summary: "x",
+                    moves: [
+                        {
+                            from: path.join("e2e", "login.spec.ts"),
+                            to: path.join("e2e", "auth", "login.spec.ts"),
+                            reason: "x",
+                        },
+                    ],
+                    warnings: [],
+                },
+            });
+
+            expect(applyResult.errors).toHaveLength(0);
+            expect(applyResult.movedFiles).toBe(1);
+            const config = JSON.parse(
+                fs.readFileSync(path.join(projectPath, "raiken.config.json"), "utf-8"),
+            ) as { quarantine: { testFiles: string[] } };
+            // The moved spec STAYS quarantined under its new path (review
+            // finding: it used to silently escape and rejoin normal runs).
+            expect(config.quarantine.testFiles).toContain(
+                path.join("e2e", "auth", "login.spec.ts"),
+            );
+            expect(config.quarantine.testFiles).not.toContain("e2e/login.spec.ts");
+            // Untouched entries are preserved verbatim.
+            expect(config.quarantine.testFiles).toContain("e2e/other.spec.ts");
+        });
+
         it("rewrites relative imports inside moved files and in files that reference them", async () => {
             writeSpec(
                 "e2e/login.spec.ts",
@@ -417,7 +458,7 @@ test.describe('Login', () => {
             writeSpec("e2e/smoke.spec.ts", 'import "./login.spec";\n');
 
             const { applyOrganizePlan } = await import("../organize/apply");
-            const applyResult = applyOrganizePlan(projectPath, {
+            const applyResult = await applyOrganizePlan(projectPath, {
                 testDirectory: "e2e",
                 testPlan: {
                     summary: "x",
@@ -455,7 +496,7 @@ test.describe('Login', () => {
             writeSpec("e2e/b.spec.ts", "// B\n");
 
             const { applyOrganizePlan } = await import("../organize/apply");
-            const applyResult = applyOrganizePlan(projectPath, {
+            const applyResult = await applyOrganizePlan(projectPath, {
                 testDirectory: "e2e",
                 testPlan: {
                     summary: "x",

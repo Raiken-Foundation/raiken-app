@@ -240,6 +240,17 @@ describe("scanEnvironment", () => {
         expect(findings.some((f) => f.rule === "raiken-config-invalid")).toBe(true);
     });
 
+    it("flags an API key committed in raiken.config.json", async () => {
+        installPlaywrightPackage();
+        installChromium();
+        fs.writeFileSync(
+            path.join(projectPath, "raiken.config.json"),
+            JSON.stringify({ ai: { provider: "deepseek", apiKey: "sk-test" } }),
+        );
+        const findings = await scan();
+        expect(findings.some((f) => f.rule === "api-key-in-config")).toBe(true);
+    });
+
     it("reports a fully healthy project with no findings", async () => {
         installPlaywrightPackage();
         installChromium();

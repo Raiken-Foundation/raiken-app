@@ -3,10 +3,10 @@
  * or timeout locators cannot be verified against known captures.
  */
 
+import { validateSelectorGrounding } from "../agent/grounding";
 import { formatDOMContext } from "../browser/dom-capture";
 import { BrowserSession } from "../browser/session";
 import { resolveAuthStorageStatePath } from "../config/auth-state";
-import { validateSelectorGrounding } from "../agent/grounding";
 import type { RepairEvidence } from "./evidence";
 import { describeTimeoutFocus } from "./repair-setup";
 
@@ -104,9 +104,7 @@ export function shouldLiveCaptureRepairPage(
             evidence.sourceSelectors,
         );
         if (grounding.unverified.length > 0 || grounding.contradictions.length > 0) {
-            reasons.push(
-                "timeout locators are unverified or contradicted by discovery snapshots",
-            );
+            reasons.push("timeout locators are unverified or contradicted by discovery snapshots");
         }
     } else if (timeoutFocus && evidence.snapshots.length === 0 && url) {
         reasons.push("timeout failure with no discovery snapshots");
@@ -169,11 +167,7 @@ export async function maybeCaptureMissingRepairPage(input: {
     pageSummaries: string[];
     message: string | null;
 }> {
-    const decision = shouldLiveCaptureRepairPage(
-        input.testCode,
-        input.failureText,
-        input.evidence,
-    );
+    const decision = shouldLiveCaptureRepairPage(input.testCode, input.failureText, input.evidence);
     if (decision.reasons.length === 0 || !decision.url) {
         return {
             liveSummary: null,

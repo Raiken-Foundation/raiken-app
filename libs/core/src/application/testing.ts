@@ -62,13 +62,7 @@ export class TestingApplication implements ProjectApplicationContext {
             : parsePlaywrightReport(reportJson);
 
         const outputDir = input.outputDir ?? "test-reports";
-        const resolvedOut = path.resolve(this.projectPath, outputDir);
-        if (
-            resolvedOut !== this.projectPath &&
-            !resolvedOut.startsWith(this.projectPath + path.sep)
-        ) {
-            throw validationError("Report output directory must be inside the project.");
-        }
+        assertUnderProjectRoot(outputDir, this.projectPath);
 
         const written = await writeTestRunReport({
             projectPath: this.projectPath,
@@ -164,20 +158,11 @@ export class TestingApplication implements ProjectApplicationContext {
             "client-snapshot";
         const rawPath = input.testFilePath;
         if (rawPath && !rawPath.startsWith("scratch:")) {
-            const projectRoot = path.resolve(this.projectPath);
-            const candidate = path.isAbsolute(rawPath)
-                ? path.resolve(rawPath)
-                : path.resolve(this.projectPath, rawPath);
-            const insideProject =
-                candidate === projectRoot || candidate.startsWith(`${projectRoot}${path.sep}`);
-            if (insideProject) {
-                try {
-                    testCode = await fs.readFile(candidate, "utf-8");
-                    testCodeSource = "disk";
-                } catch {
-                    testCodeSource = "client-snapshot-fallback";
-                }
-            } else {
+            try {
+                const candidate = assertUnderProjectRoot(rawPath, this.projectPath);
+                testCode = await fs.readFile(candidate, "utf-8");
+                testCodeSource = "disk";
+            } catch {
                 testCodeSource = "client-snapshot-fallback";
             }
         }
@@ -238,7 +223,9 @@ export class TestingApplication implements ProjectApplicationContext {
         domContext?: Parameters<typeof getTestRepair>[0]["domContext"];
         pageSummaries?: string[];
         provenSelectors?: Parameters<typeof getTestRepair>[0]["provenSelectors"];
+        sourceSelectors?: Parameters<typeof getTestRepair>[0]["sourceSelectors"];
         scenario?: Parameters<typeof getTestRepair>[0]["scenario"];
+        allowWeaken?: boolean;
         signal?: AbortSignal;
     }) {
         const resolved = resolveAIConfig(this.projectPath);
@@ -257,21 +244,14 @@ export class TestingApplication implements ProjectApplicationContext {
             };
         }
 
-        const projectRoot = path.resolve(this.projectPath);
         let testCode = input.testCode;
         const rawPath = input.testFilePath;
         if (rawPath && !rawPath.startsWith("scratch:")) {
-            const candidate = path.isAbsolute(rawPath)
-                ? path.resolve(rawPath)
-                : path.resolve(this.projectPath, rawPath);
-            const insideProject =
-                candidate === projectRoot || candidate.startsWith(`${projectRoot}${path.sep}`);
-            if (insideProject) {
-                try {
-                    testCode = await fs.readFile(candidate, "utf-8");
-                } catch {
-                    // Keep client snapshot.
-                }
+            try {
+                const candidate = assertUnderProjectRoot(rawPath, this.projectPath);
+                testCode = await fs.readFile(candidate, "utf-8");
+            } catch {
+                // A missing or untrusted path never overrides the client snapshot.
             }
         }
 
@@ -289,13 +269,8 @@ export class TestingApplication implements ProjectApplicationContext {
                 if (images.length >= MAX_REPAIR_IMAGES) break;
                 const ct = (att.contentType ?? "").toLowerCase();
                 if (!ct.startsWith("image/") || !att.path) continue;
-                const candidate = path.isAbsolute(att.path)
-                    ? path.resolve(att.path)
-                    : path.resolve(this.projectPath, att.path);
-                const insideProject =
-                    candidate === projectRoot || candidate.startsWith(`${projectRoot}${path.sep}`);
-                if (!insideProject) continue;
                 try {
+                    const candidate = assertUnderProjectRoot(att.path, this.projectPath);
                     const stat = await fs.stat(candidate);
                     if (stat.size > MAX_IMAGE_BYTES) continue;
                     const data = await fs.readFile(candidate);
@@ -319,7 +294,9 @@ export class TestingApplication implements ProjectApplicationContext {
                         domContext: input.domContext,
                         pageSummaries: input.pageSummaries,
                         provenSelectors: input.provenSelectors,
+                        sourceSelectors: input.sourceSelectors,
                         scenario: input.scenario,
+                        allowWeaken: input.allowWeaken,
                         signal: input.signal,
                         images: images.length > 0 ? images : undefined,
                         projectPath: this.projectPath,

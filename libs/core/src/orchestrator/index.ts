@@ -1,3 +1,4 @@
+import { conflictError, normalizeToRaikenError } from "../errors";
 /**
  * Orchestrator - LangGraph Runner
  *
@@ -102,8 +103,7 @@ export async function* runOrchestrator(
         const busyMessage =
             "\n\nAnother agent run is already in progress for this project. " +
             "Please wait for it to finish (or stop it) before sending a new request.";
-        yield busyMessage;
-        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+        throw conflictError(busyMessage.trim(), { code: "OPERATION_BUSY" });
     }
 
     return yield* beginOperationScope({ projectPath: options.projectPath }, () =>
@@ -135,18 +135,14 @@ async function* runOrchestratorInScope(
         operation = await acquireProjectOperation(projectPath, "agent", signal);
     } catch (error) {
         activeAgentRuns.delete(runKey);
-        const busyMessage = `\n\n${error instanceof Error ? error.message : "Project is busy."}`;
-        yield busyMessage;
-        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+        throw normalizeToRaikenError(error);
     }
     try {
         browserLease = acquireBrowserSessionLease(projectPath, signal);
     } catch (error) {
         await operation.release();
         activeAgentRuns.delete(runKey);
-        const busyMessage = `\n\n${error instanceof Error ? error.message : "Project is busy."}`;
-        yield busyMessage;
-        return { text: busyMessage.trim(), hitlActions: [], toolCalls: [] };
+        throw normalizeToRaikenError(error);
     }
 
     const trace =

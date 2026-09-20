@@ -45,7 +45,8 @@ export type SelectorViolationKind =
     | "unknown_label"
     | "unknown_placeholder"
     | "unknown_text"
-    | "unknown_css";
+    | "unknown_css"
+    | "unknown_value";
 
 export interface SelectorViolation {
     /** The locator call as written in the test, e.g. `getByRole('dialog', …)`. */
@@ -602,17 +603,62 @@ function checkAdvisoryLocator(
     });
 }
 
+/** Locator-method calls whose single string literal is a VALUE the test asserts. */
+const ASSERTION_VALUE_METHODS = /\.(?:toHaveText|toContainText|toHaveValue)\s*\(/g;
+
+/** Locator-method calls whose single string literal is a VALUE the test types. */
+const TEST_INPUT_METHODS = /\.(?:fill|type|pressSequentially|selectOption)\s*\(/g;
+
+/** String literals the test asserts (toHaveText/toContainText/toHaveValue). */
+function extractAssertionValueLiterals(code: string): string[] {
+    const values: string[] = [];
+    ASSERTION_VALUE_METHODS.lastIndex = 0;
+    let match = ASSERTION_VALUE_METHODS.exec(code);
+    while (match) {
+        const open = match.index + match[0].length - 1;
+        const close = findClosingParen(code, open);
+        if (close > open) {
+            const lit = readLiteral(code.slice(open + 1, close), 0);
+            if (lit?.kind === "string" && lit.value.trim()) values.push(lit.value);
+        }
+        match = ASSERTION_VALUE_METHODS.exec(code);
+    }
+    return values;
+}
+
+/** String literals the test types (fill/type/pressSequentially/selectOption). */
+function extractTestInputLiterals(code: string): string[] {
+    const values: string[] = [];
+    TEST_INPUT_METHODS.lastIndex = 0;
+    let match = TEST_INPUT_METHODS.exec(code);
+    while (match) {
+        const open = match.index + match[0].length - 1;
+        const close = findClosingParen(code, open);
+        if (close > open) {
+            const lit = readLiteral(code.slice(open + 1, close), 0);
+            if (lit?.kind === "string" && lit.value.trim()) values.push(lit.value);
+        }
+        match = TEST_INPUT_METHODS.exec(code);
+    }
+    return values;
+}
+
 /**
  * Compare every locator in `testCode` against the captured page context
  * (live DOM summary plus every visited page summary). `sourceSelectors` —
  * literal selector facts from indexed markup (see `extractTemplateSelectors`)
  * — act as a second evidence source: a literal absent from capture but present
  * in source is reported under `sourceGrounded` instead of `unverified`.
+ *
+ * Assertion VALUES are also grounded: a `toHaveText('$5.90')` literal that no
+ * captured page, scenario token, or earlier `.fill()` in this test can explain
+ * is reported as an advisory `unknown_value` warning (never a hard block).
  */
 export function validateSelectorGrounding(
     testCode: string,
     summaries: string[],
     sourceSelectors?: readonly TemplateSelector[],
+    allowedValues?: readonly string[],
 ): GroundingReport {
     const index = buildCapturedIndex(
         summaries.filter((s) => typeof s === "string" && s.length > 0),
@@ -693,6 +739,22 @@ export function validateSelectorGrounding(
                 checkAdvisoryLocator(call, index, "unknown_css", "selector", warnings);
                 break;
         }
+    }
+
+    const knownValues = new Set([
+        ...(allowedValues ?? []).map(normalizeText),
+        ...extractTestInputLiterals(testCode).map(normalizeText),
+    ]);
+    for (const value of extractAssertionValueLiterals(testCode)) {
+        const normalized = normalizeText(value);
+        if (normalized.length <= 2) continue;
+        if (index.text.includes(normalized)) continue;
+        if (knownValues.has(normalized)) continue;
+        warnings.push({
+            locator: `toHaveText/toContainText/toHaveValue('${value}')`,
+            kind: "unknown_value",
+            reason: `asserts a value ('${value}') that no captured page, scenario, or typed input explains`,
+        });
     }
 
     return {

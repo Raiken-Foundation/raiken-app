@@ -94,10 +94,6 @@ export class CodeGraphDB {
         return this.codeGraph.getFiles();
     }
 
-    *streamFiles(): Generator<DBFileNode> {
-        yield* this.codeGraph.streamFiles();
-    }
-
     getFile(filePath: string): DBFileNode | null {
         return this.codeGraph.getFile(filePath);
     }
@@ -136,14 +132,6 @@ export class CodeGraphDB {
 
     getTableCount(tableName: string): number {
         return this.admin.getTableCount(tableName);
-    }
-
-    queryTable(tableName: string, limit: number, offset: number): unknown[] {
-        return this.admin.queryTable(tableName, limit, offset);
-    }
-
-    executeQuery(query: string, params: unknown[] = []): unknown[] {
-        return this.admin.executeQuery(query, params);
     }
 
     saveEmbeddings(
@@ -205,14 +193,6 @@ export class CodeGraphDB {
 
     loadKeywordIndex(): Map<string, string[]> | null {
         return this.embeddingsRepo.loadKeywordIndex();
-    }
-
-    getChangedFilesSince(sinceTimestamp: number): Array<{
-        path: string;
-        lastIndexed: number;
-        contentHash: string;
-    }> {
-        return this.codeGraph.getChangedFilesSince(sinceTimestamp);
     }
 
     getLastScanTime(): number {
@@ -382,10 +362,6 @@ export class CodeGraphDB {
 
     replaceFileEdges(sourceFile: string, edges: GraphEdge[], kinds?: EdgeKind[]): void {
         this.symbols.replaceFileEdges(sourceFile, edges, kinds);
-    }
-
-    addEdges(edges: GraphEdge[]): void {
-        this.symbols.addEdges(edges);
     }
 
     getIncomingEdges(targetFiles: string[], opts?: { kinds?: EdgeKind[] }): GraphEdge[] {

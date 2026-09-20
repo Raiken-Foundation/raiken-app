@@ -471,10 +471,17 @@ async function findFirstCaptchaProvider(
 ): Promise<{ provider: string; selector: string } | null> {
     for (const selector of CAPTCHA_IFRAME_SELECTORS) {
         try {
-            const count = await page.locator(selector).count();
-            if (count > 0) {
-                return { provider: providerOf(selector), selector };
-            }
+            const locator = page.locator(selector).first();
+            if (!(await locator.count())) continue;
+            // Presence alone is NOT a challenge: reCAPTCHA v3 badge iframes
+            // and Cloudflare managed-mode background iframes sit on huge
+            // numbers of healthy pages with no challenge shown. Require a
+            // VISIBLE, non-zero-size iframe (the same discipline the consent
+            // path applies) before pausing the whole crawl (review finding).
+            if (!(await locator.isVisible())) continue;
+            const box = await locator.boundingBox();
+            if (!box || box.width <= 0 || box.height <= 0) continue;
+            return { provider: providerOf(selector), selector };
         } catch {
             // Ignore — the iframe might be cross-origin or removed
             // mid-poll. The caller treats null as "no captcha".

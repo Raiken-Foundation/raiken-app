@@ -42,6 +42,7 @@ const ENV_FILE = "(environment)";
 
 /** Rule ids produced by {@link scanEnvironment} — lets UIs section them off. */
 export const ENVIRONMENT_RULES: ReadonlySet<string> = new Set([
+    "api-key-in-config",
     "playwright-package-missing",
     "playwright-browsers-missing",
     "raiken-config-invalid",
@@ -289,6 +290,38 @@ export async function scanEnvironment(options: EnvironmentScanOptions): Promise<
                         message: `${configFileName} failed validation: ${issue ? `${issue.path.join(".")}: ${issue.message}` : "unknown error"}.`,
                         suggestion:
                             "Fix the field above, or regenerate with `raiken init --force`.",
+                    }),
+                );
+            }
+
+            // Committed API keys are a secret leak, not a config choice. Flag
+            // any non-empty key stored in the config file; the supported place
+            // for a key is the environment or a gitignored .env.
+            const rawConfig = parsed as Record<string, unknown>;
+            const aiBlock = (rawConfig["ai"] ?? {}) as Record<string, unknown>;
+            const apiKeysBlock = (rawConfig["apiKeys"] ?? {}) as Record<string, unknown>;
+            const committedKeys: string[] = [];
+            const aiKey = aiBlock["apiKey"];
+            if (typeof aiKey === "string" && aiKey.trim()) {
+                committedKeys.push("ai.apiKey");
+            }
+            if (apiKeysBlock && typeof apiKeysBlock === "object") {
+                for (const [provider, key] of Object.entries(apiKeysBlock)) {
+                    if (typeof key === "string" && key.trim())
+                        committedKeys.push(`apiKeys.${provider}`);
+                }
+            }
+            if (committedKeys.length > 0) {
+                findings.push(
+                    finding({
+                        rule: "api-key-in-config",
+                        severity: "warning",
+                        file: configFileName,
+                        line: 1,
+                        column: 1,
+                        message: `${configFileName} stores an API key (${committedKeys.join(", ")}). A key committed to version control is a secret leak.`,
+                        suggestion:
+                            "Remove the key and set the provider's env var (e.g. DEEPSEEK_API_KEY) or a gitignored .env — and revoke any key that was committed.",
                     }),
                 );
             }

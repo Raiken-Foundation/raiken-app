@@ -7,7 +7,6 @@ import {
     runPlaywrightSubprocess,
 } from "./playwright-subprocess";
 import type { ReportAttachment } from "./report-parser";
-import { TestStorage } from "./storage";
 import type { TestRunResult } from "./test-run-result";
 
 export { extractReporterJson } from "./playwright-json-report";
@@ -37,6 +36,17 @@ export interface TestRunOptions {
      * invocation. Used to prove a repair holds up rather than passing once.
      */
     repeatEach?: number;
+    /**
+     * Wall-clock budget for the WHOLE Playwright subprocess (browser launch,
+     * webServer boot, and every test in the spec — not just one test).
+     *
+     * Defaults to `max(4 × timeout, 5 minutes)` so a multi-test spec or a
+     * slow-booting webServer is not killed by a budget sized for a single
+     * test. The per-test `--timeout` stays what the caller asked for; only
+     * the subprocess kill moves. Pass an explicit value to bound a
+     * verification run more tightly.
+     */
+    runTimeoutMs?: number;
 }
 
 /**
@@ -44,27 +54,17 @@ export interface TestRunOptions {
  */
 export class TestRunner {
     private projectPath: string;
-    private storage: TestStorage;
 
     constructor(projectPath: string) {
         this.projectPath = projectPath;
-        this.storage = new TestStorage(projectPath);
-    }
-
-    async saveTestToTemp(testCode: string, testName?: string): Promise<string> {
-        return this.storage.saveToTemp(testCode, testName);
-    }
-
-    async saveTestToProject(
-        testCode: string,
-        testDirectory: string,
-        fileName: string,
-    ): Promise<string> {
-        return this.storage.saveToProject(testCode, testDirectory, fileName);
     }
 
     async runTest(testFile: string, options: TestRunOptions = {}): Promise<TestRunResult[]> {
         const { timeout = 60000, headed = false, signal, retries, repeatEach } = options;
+        // The per-test timeout must not double as the whole-subprocess kill:
+        // browser launch + webServer boot + N serial tests legitimately take
+        // far longer than one test's budget (review: runner.ts timeoutMs).
+        const runTimeoutMs = options.runTimeoutMs ?? Math.max(timeout * 4, 5 * 60_000);
 
         if (signal?.aborted) {
             return [
@@ -104,7 +104,7 @@ export class TestRunner {
                 args,
                 env: playwrightJsonReporterEnv(),
                 signal,
-                timeoutMs: timeout,
+                timeoutMs: runTimeoutMs,
                 timeoutGraceMs: 5000,
             }),
         );
@@ -129,8 +129,10 @@ export class TestRunner {
                     testFile,
                     testName: "unknown",
                     status: "timeout",
-                    duration: timeout,
-                    error: { message: `Test timed out after ${timeout}ms` },
+                    duration,
+                    error: {
+                        message: `Playwright run exceeded its ${runTimeoutMs}ms wall-clock budget (per-test timeout stays ${timeout}ms)`,
+                    },
                 },
             ];
         }
@@ -203,7 +205,7 @@ export class TestRunner {
         try {
             const json = extractReporterJson(output);
             if (!json) return [];
-            return mapReportToTestRunResults(json, testFile, fallbackDuration);
+            return mapReportToTestRunResults(json, testFile, fallbackDuration, this.projectPath);
         } catch {
             return [];
         }
@@ -240,10 +242,6 @@ export class TestRunner {
     private extractTestName(testFile: string): string {
         const fileName = path.basename(testFile, path.extname(testFile));
         return fileName.replace(/\.spec$/, "").replace(/\.test$/, "");
-    }
-
-    async cleanup(): Promise<void> {
-        await this.storage.cleanupTemp();
     }
 }
 

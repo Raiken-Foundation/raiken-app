@@ -1,4 +1,5 @@
 import { parseSourceFile } from "../analysis/ast-parser";
+import { inspectTestAssertions } from "./assertion-contract";
 
 export interface TestCodeValidation {
     ok: boolean;
@@ -20,7 +21,6 @@ export interface TestCodeValidation {
 const TOOL_TAG_PATTERN = /<\/?(?:function_calls|invoke|parameter|tool_call|antml:[a-z_]+)\b/i;
 
 /** `test(`, `test.describe(`, `test.only(`, `test.skip(`, `test.fixme(`. */
-const TEST_CALL_PATTERN = /\btest(?:\.(?:describe|only|skip|fixme))?\s*\(/;
 
 /**
  * The single gate every path that writes a spec to disk must clear.
@@ -48,7 +48,7 @@ export function validateTestCode(code: string): TestCodeValidation {
         const message = error instanceof Error ? error.message : String(error);
         return { ok: false, reason: `does not parse as valid JS/TS (${message})` };
     }
-    if (!TEST_CALL_PATTERN.test(code)) {
+    if (inspectTestAssertions(code).tests === 0) {
         return { ok: false, reason: "no Playwright test() call found" };
     }
     return { ok: true };

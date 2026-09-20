@@ -147,7 +147,10 @@ describe("executeRepairAttempt", () => {
             },
         );
 
-        const prompt = String(model.invoke.mock.calls[0][0][0].content);
+        const evidence = JSON.parse(
+            JSON.parse(String(model.invoke.mock.calls[0][0].at(-1).content)).untrustedEvidence,
+        );
+        const prompt = Object.values(evidence).join("\n");
         expect(prompt).toContain("Ungrounded selectors");
         expect(prompt).toContain('getByRole("dialog", { name: "Delete project" })');
         expect(prompt).toContain("Use getByRole('alertdialog', { name: 'Delete project' })");

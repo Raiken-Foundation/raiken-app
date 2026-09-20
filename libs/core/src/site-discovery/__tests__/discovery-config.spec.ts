@@ -204,6 +204,34 @@ describe("resolveSiteDiscoveryOptions contract", () => {
         });
     });
 
+    it("settle defaults resolve from config + override", async () => {
+        const defaults = resolveSiteDiscoveryOptions({
+            projectPath: await makeProject({ discovery: {} }),
+            startUrl: "https://app.test/",
+            resolveStorageState: false,
+        });
+        expect(defaults.settleQuietMs).toBe(400);
+        expect(defaults.settleMaxMs).toBe(3000);
+
+        const fromConfig = resolveSiteDiscoveryOptions({
+            projectPath: await makeProject({
+                discovery: { settleQuietMs: 600, settleMaxMs: 5000 },
+            }),
+            startUrl: "https://app.test/",
+            resolveStorageState: false,
+        });
+        expect(fromConfig.settleQuietMs).toBe(600);
+        expect(fromConfig.settleMaxMs).toBe(5000);
+
+        const fromOverride = resolveSiteDiscoveryOptions({
+            projectPath: await makeProject({ discovery: { settleQuietMs: 600 } }),
+            startUrl: "https://app.test/",
+            overrides: { settleQuietMs: "250" },
+            resolveStorageState: false,
+        });
+        expect(fromOverride.settleQuietMs).toBe(250);
+    });
+
     it("REPL fresh path matches CLI when given the same numeric overrides", async () => {
         const projectPath = await makeProject(baseConfig);
 

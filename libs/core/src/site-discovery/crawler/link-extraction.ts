@@ -94,27 +94,49 @@ export async function extractLinksFromPage(page: Page): Promise<ExtractedLink[]>
             const seen = new Set<Element>();
             const seenHrefs = new Set<string>();
 
+            // Pierce shadow DOM (Lit/Stencil/Material web components): a
+            // plain document query misses every link inside a shadow root,
+            // silently dropping whole route subtrees (review finding).
+            // Collect the document plus all OPEN shadow roots once, then run
+            // each selector against every root — still a single evaluate
+            // call with no CDP round-trips.
+            const roots: ParentNode[] = [document];
+            const pending: ParentNode[] = [document];
+            while (pending.length > 0) {
+                const root = pending.pop() as ParentNode;
+                for (const el of Array.from(root.querySelectorAll("*"))) {
+                    const shadow = (el as Element).shadowRoot;
+                    if (shadow) {
+                        roots.push(shadow);
+                        pending.push(shadow);
+                    }
+                }
+            }
+
             for (const sel of selectors) {
                 if (out.length >= MAX) break;
-                const nodes = document.querySelectorAll(sel);
-                for (const node of Array.from(nodes)) {
+                for (const root of roots) {
                     if (out.length >= MAX) break;
-                    if (seen.has(node)) continue;
-                    seen.add(node);
-                    const el = node as HTMLElement;
-                    if (!isVisible(el)) continue;
-                    const href = resolveHref(el);
-                    if (!href) continue;
-                    if (seenHrefs.has(href)) continue;
-                    seenHrefs.add(href);
-                    const text = (el.textContent || "").replace(/\s+/g, " ").trim();
-                    out.push({
-                        href,
-                        text: text.slice(0, 200),
-                        role: el.getAttribute("role"),
-                        dataTestId: el.getAttribute("data-testid"),
-                        tagName: el.tagName ? el.tagName.toLowerCase() : null,
-                    });
+                    const nodes = root.querySelectorAll(sel);
+                    for (const node of Array.from(nodes)) {
+                        if (out.length >= MAX) break;
+                        if (seen.has(node)) continue;
+                        seen.add(node);
+                        const el = node as HTMLElement;
+                        if (!isVisible(el)) continue;
+                        const href = resolveHref(el);
+                        if (!href) continue;
+                        if (seenHrefs.has(href)) continue;
+                        seenHrefs.add(href);
+                        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+                        out.push({
+                            href,
+                            text: text.slice(0, 200),
+                            role: el.getAttribute("role"),
+                            dataTestId: el.getAttribute("data-testid"),
+                            tagName: el.tagName ? el.tagName.toLowerCase() : null,
+                        });
+                    }
                 }
             }
             return out;

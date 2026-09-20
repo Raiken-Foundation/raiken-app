@@ -1,3 +1,4 @@
+import * as path from "node:path";
 /**
  * Single walker/parser for Playwright JSON reporter output.
  *
@@ -145,7 +146,10 @@ export function mapSpecToTestRunResult(
     if (!summary) return null;
 
     const testResult: TestRunResult = {
-        testFile,
+        testFile: entry.spec.file || testFile,
+        ...(entry.spec.tests?.[0]?.projectName
+            ? { projectName: entry.spec.tests[0].projectName }
+            : {}),
         testName: entry.spec.title,
         suite: entry.suitePath || testFile,
         status: summary.status,
@@ -228,11 +232,28 @@ export function mapReportToTestRunResults(
     report: PlaywrightJsonReport,
     testFile: string,
     fallbackDuration = 0,
+    projectPath?: string,
 ): TestRunResult[] {
     const results: TestRunResult[] = [];
     walkPlaywrightReport(report, (entry) => {
-        const mapped = mapSpecToTestRunResult(entry, testFile, fallbackDuration);
-        if (mapped) results.push(mapped);
+        // A spec can contain separate projects and repetitions. Keep projects
+        // separate; the repetition merger handles only identical test identities.
+        for (const test of entry.spec.tests ?? []) {
+            const mapped = mapSpecToTestRunResult(
+                { ...entry, spec: { ...entry.spec, tests: [test] } },
+                testFile,
+                fallbackDuration,
+            );
+            if (mapped) {
+                if (entry.spec.file && report.config?.rootDir) {
+                    const absoluteFile = path.resolve(report.config.rootDir, entry.spec.file);
+                    mapped.testFile = projectPath
+                        ? path.relative(projectPath, absoluteFile)
+                        : absoluteFile;
+                }
+                results.push(mapped);
+            }
+        }
     });
     // Appended after merging so two identical build errors stay two rows.
     return [
@@ -252,6 +273,8 @@ export function mapTestRunResultsToParsedRun(
         const testCase: ReportTestCase = {
             id: `${t.testFile}#${index}`,
             name: t.testName,
+            testFile: t.testFile,
+            ...(t.projectName ? { projectName: t.projectName } : {}),
             suite: t.suite ?? t.testFile,
             status,
             duration: t.duration,
@@ -271,15 +294,20 @@ export function mapTestRunResultsToParsedRun(
         return testCase;
     });
 
-    const suiteNames = new Set(tests.map((t) => t.suite));
+    const suiteKey = (t: ReportTestCase) => JSON.stringify([t.testFile, t.projectName, t.suite]);
+    const suiteNames = new Set(tests.map(suiteKey));
+    const failedSuites = new Set(tests.filter((t) => t.status === "failed").map(suiteKey));
+    const passedSuites = new Set(
+        tests.filter((t) => t.status === "passed" && !failedSuites.has(suiteKey(t))).map(suiteKey),
+    );
     const passed = tests.filter((t) => t.status === "passed").length;
     const failed = tests.filter((t) => t.status === "failed").length;
 
     const summary: ParsedPlaywrightRun["summary"] = {
         suites: {
             total: suiteNames.size,
-            failed: failed > 0 ? 1 : 0,
-            passed: failed > 0 ? Math.max(0, suiteNames.size - 1) : suiteNames.size,
+            failed: failedSuites.size,
+            passed: passedSuites.size,
         },
         tests: {
             passed,

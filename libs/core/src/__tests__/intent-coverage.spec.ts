@@ -137,11 +137,11 @@ test('signed-in admin sees the projects list', async ({ page }) => {
             "draft a playwright test: signed-in admin sees the projects list",
             draft,
         );
-        expect(result.uncovered).toEqual([]);
-        expect(result.reasons).toEqual([]);
+        expect(result.uncovered.length).toBeGreaterThan(0);
+        expect(result.vacuous).toBe(false);
     });
 
-    it("counts test titles as draft signal for paraphrased scenarios", () => {
+    it("does not treat a title as evidence of an authenticated user role", () => {
         const draft = `import { test, expect } from '@playwright/test';
 test.use({ storageState: '.raiken/auth-state.json' });
 test('signed-in member opens the activity page and sees recent activity', async ({ page }) => {
@@ -154,8 +154,8 @@ test('signed-in member opens the activity page and sees recent activity', async 
             "signed-in member opens the activity page and sees recent activity",
             draft,
         );
-        expect(result.uncovered).toEqual([]);
-        expect(result.reasons).toEqual([]);
+        expect(result.uncovered.length).toBeGreaterThan(0);
+        expect(result.vacuous).toBe(false);
     });
 
     it("does not mistake a domain phrase like 'add a test user' for a wrapper", () => {

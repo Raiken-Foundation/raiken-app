@@ -71,7 +71,7 @@ export interface ScenarioReport {
     /** Reason the scenario was skipped (unmet requirements); no attempts ran. */
     skipped?: string;
     attempts: EvalAttemptResult[];
-    /** Fraction of attempts in which every scorer passed. 1 for skipped. */
+    /** Fraction of attempts in which every scorer passed. 0 for skipped. */
     passRate: number;
 }
 
@@ -80,7 +80,7 @@ export interface EvalReport {
     durationMs: number;
     repeat: number;
     scenarios: ScenarioReport[];
-    /** True when every non-skipped scenario passed all attempts. */
+    /** True only when at least one scenario ran and every selected scenario passed all attempts. */
     passed: boolean;
 }
 

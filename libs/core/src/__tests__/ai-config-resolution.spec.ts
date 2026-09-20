@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readApiKeyFromEnv, resolveAIConfig } from "../agent/ai-providers";
 
 const AI_ENV_VARS = [
@@ -65,11 +65,13 @@ describe("provider-scoped saved keys", () => {
     let projectPath: string;
 
     beforeEach(() => {
+        for (const name of AI_ENV_VARS) vi.stubEnv(name, "");
         projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-ai-config-"));
     });
 
     afterEach(() => {
         fs.rmSync(projectPath, { recursive: true, force: true });
+        vi.unstubAllEnvs();
     });
 
     it("selects the saved key that belongs to the resolved provider", () => {

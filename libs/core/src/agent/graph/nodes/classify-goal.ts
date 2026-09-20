@@ -1,6 +1,6 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { LLM_REQUEST_TIMEOUT_MS } from "../../ai-providers";
+import { buildPromptMessages } from "../../prompt-messages";
 import type { GraphStateType } from "../state";
 import { resolveAuthPrecondition } from "../utils";
 import { inferDiscoveryManagementAction } from "./discovery-management";
@@ -119,6 +119,11 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
         pauseReason: state.pauseReason || null,
     });
 
+    const instructions = deps.buildAgentClassifierPrompt({
+        userPrompt: "",
+        conversationHistory: [],
+    });
+
     try {
         const structuredModel = deps.model.withStructuredOutput(classifierSchema, {
             name: "classify_user_intent",
@@ -127,14 +132,19 @@ export const createClassifyGoalNode = (deps: AgentNodeDeps) => async (state: Gra
         let result: ClassifierOutput;
         try {
             const response = await structuredModel.invoke(
-                [new SystemMessage(prompt), new HumanMessage(state.userPrompt)],
+                buildPromptMessages(
+                    instructions,
+                    prompt,
+                    state.userPrompt,
+                    state.conversationHistory,
+                ),
                 { timeout: LLM_REQUEST_TIMEOUT_MS },
             );
             result = response;
         } catch {
             // Structured output failed (model doesn't support it, or schema mismatch).
             // Fall back to raw JSON parsing.
-            result = await fallbackClassify(deps, prompt, state.userPrompt);
+            result = await fallbackClassify(deps, instructions, state.userPrompt, prompt);
         }
 
         const inferredDiscoveryAction = inferDiscoveryManagementAction(state.userPrompt);
@@ -337,11 +347,12 @@ async function fallbackClassify(
     deps: AgentNodeDeps,
     systemPrompt: string,
     userPrompt: string,
+    evidence: string,
 ): Promise<ClassifierOutput> {
     const strictPrompt = `${systemPrompt}\n\nReturn JSON only, no fences:\n${JSON.stringify(classifierSchema.shape)}`;
 
     const response = await deps.model.invoke(
-        [new SystemMessage(strictPrompt), new HumanMessage(userPrompt)],
+        buildPromptMessages(strictPrompt, evidence, userPrompt),
         { timeout: LLM_REQUEST_TIMEOUT_MS },
     );
 

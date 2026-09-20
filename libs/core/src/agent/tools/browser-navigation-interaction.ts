@@ -10,6 +10,7 @@ import {
     resolveHeadless,
 } from "./shared/browser-session";
 import { buildPageSnapshot, formatToolError, snapshotAfterAction } from "./shared/format";
+import { assertHttpUrl } from "./shared/url-guard";
 import { persistLinksDiscovery, persistPageDiscovery } from "./shared/site-db-cache";
 import type { ActionResultData, AgentToolGroupDeps, PageSnapshot, ToolResult } from "./types";
 
@@ -108,6 +109,14 @@ export function createBrowserNavigationInteractionTools(deps: AgentToolGroupDeps
             execute: async (params): Promise<ToolResult<PageSnapshot>> => {
                 const { url } = params as { url: string };
                 try {
+                    // zod's z.string().url() accepts file:, javascript:, and
+                    // data: schemes — and graph-node callers bypass zod
+                    // entirely. Enforce an http/https allowlist inside
+                    // execute so a model-authored file:// URL cannot point
+                    // the browser at local files (whose DOM would flow into
+                    // model context) regardless of the caller (review
+                    // finding).
+                    assertHttpUrl(url);
                     const session = getBoundBrowserSession(projectPath);
                     await ensureBrowserStarted(session, projectPath, getAuthPrecondition);
 

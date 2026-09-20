@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { sortLinksByRelevance } from "../agent/graph/nodes/navigation";
 import {
     buildSummary,
     expandActionSynonyms,
@@ -465,54 +466,98 @@ describe("Goal-directed action helpers", () => {
     });
 });
 
-describe("Explore Link Prioritization", () => {
-    // Import the scoring function indirectly by testing via navigation module
-    // Since scoreLinkRelevance is not exported, we test the observable behavior
-    it("sorts goal-relevant links first", async () => {
-        // We can't import private functions, but we can verify the logic
-        // by testing the same algorithm inline
+describe("sortLinksByRelevance", () => {
+    it("ranks goal-relevant links above irrelevant ones", () => {
         const links = [
             { text: "Blog", href: "/blog" },
             { text: "Dashboard Settings", href: "/dashboard/settings" },
             { text: "About Us", href: "/about" },
             { text: "Dashboard Overview", href: "/dashboard" },
-            { text: "Contact", href: "/contact" },
         ];
 
-        const goal = "test the dashboard";
-        const feature = "dashboard settings";
+        const sorted = sortLinksByRelevance(links, "test the dashboard", "dashboard settings");
 
-        const keywords = `${goal} ${feature}`.toLowerCase().split(/\s+/).filter(Boolean);
-        const scored = links.map((link) => {
-            const linkText = `${link.text} ${link.href}`.toLowerCase();
-            let score = 0;
-            for (const kw of keywords) {
-                if (kw.length < 3) continue;
-                if (linkText.includes(kw)) score += 1;
-            }
-            return { ...link, score };
-        });
-        scored.sort((a, b) => b.score - a.score);
-
-        // Dashboard-related links should be first
-        expect(scored[0].href).toBe("/dashboard/settings");
-        expect(scored[1].href).toBe("/dashboard");
-        // Non-relevant links should be last
-        expect(scored[scored.length - 1].score).toBe(0);
+        expect(sorted[0].href).toBe("/dashboard/settings");
+        expect(sorted[1].href).toBe("/dashboard");
     });
 
-    it("preserves original order when no goal", () => {
+    it("preserves original order when no goal or feature is given", () => {
         const links = [
             { text: "Blog", href: "/blog" },
             { text: "Dashboard", href: "/dashboard" },
             { text: "About", href: "/about" },
         ];
 
-        const scored = links.map((link) => ({ ...link, score: 0 }));
-        scored.sort((a, b) => b.score - a.score);
+        const sorted = sortLinksByRelevance(links, null, null);
 
-        // All scores are 0, so stable sort preserves order
-        expect(scored[0].href).toBe("/blog");
+        // Every link scores 0, so the stable sort preserves insertion order.
+        expect(sorted.map((l) => l.href)).toEqual(["/blog", "/dashboard", "/about"]);
+    });
+
+    it("boosts links that name the target action directly", () => {
+        const links = [
+            { text: "Home", href: "/" },
+            { text: "Sign Out", href: "/logout" },
+            { text: "Account Settings", href: "/account" },
+        ];
+
+        // "sign out" matches the link text → +5 action bonus.
+        const sorted = sortLinksByRelevance(links, "test the app", null, "sign out");
+
+        expect(sorted[0].text).toBe("Sign Out");
+    });
+
+    it("gives menu-hint links a smaller boost when no direct action match", () => {
+        const links = [
+            { text: "Blog", href: "/blog" },
+            { text: "Account", href: "/account" },
+        ];
+
+        // "delete" doesn't match any link text, but "Account" matches MENU_HINT → +2.
+        const sorted = sortLinksByRelevance(links, "test the app", null, "delete account");
+
+        expect(sorted[0].text).toBe("Account");
+    });
+
+    it("de-prioritizes auth-shaped links that tie with content links", () => {
+        const links = [
+            { text: "Login", href: "/login" },
+            { text: "Home", href: "/home" },
+        ];
+
+        // The goal matches neither link, so both score 0 on keywords. The
+        // auth penalty is the ONLY thing that should push /login below /home.
+        const sorted = sortLinksByRelevance(links, "explore", null);
+
+        expect(sorted[0].href).toBe("/home");
+        expect(sorted[1].href).toBe("/login");
+    });
+
+    it("suppresses the auth penalty when the goal is itself about auth", () => {
+        const links = [
+            { text: "Login", href: "/login" },
+            { text: "Home", href: "/home" },
+        ];
+
+        // Goal is auth-shaped ("auth") but shares no keyword with "/login",
+        // so both links tie at 0. The penalty must be suppressed, leaving
+        // /login in its original first position.
+        const sorted = sortLinksByRelevance(links, "test auth", null);
+
+        expect(sorted[0].href).toBe("/login");
+        expect(sorted[1].href).toBe("/home");
+    });
+
+    it("does not mutate the input array", () => {
+        const links = [
+            { text: "Blog", href: "/blog" },
+            { text: "Dashboard", href: "/dashboard" },
+        ];
+        const original = [...links];
+
+        sortLinksByRelevance(links, "dashboard", null);
+
+        expect(links).toEqual(original);
     });
 });
 

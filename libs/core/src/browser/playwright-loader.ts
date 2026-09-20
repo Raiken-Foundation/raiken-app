@@ -20,15 +20,3 @@ export function loadPlaywrightChromium(): typeof import("playwright").chromium {
         }
     }
 }
-
-/**
- * Best-effort loader for integration specs — returns null when Playwright
- * is unavailable instead of throwing.
- */
-export function tryLoadPlaywrightChromium(): typeof import("playwright").chromium | null {
-    try {
-        return loadPlaywrightChromium();
-    } catch {
-        return null;
-    }
-}

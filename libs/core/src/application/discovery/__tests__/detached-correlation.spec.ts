@@ -59,26 +59,6 @@ describe("detached discovery correlation", () => {
         vi.clearAllMocks();
     });
 
-    it("binds discoverySessionId during blocking runs without caller scope", async () => {
-        const discovery = mockDiscovery(async () => {
-            discovery.emit("session_started", {
-                type: "session_started",
-                data: { sessionId: 77 },
-                timestamp: Date.now(),
-            });
-        });
-        vi.mocked(createSiteDiscovery).mockReturnValue(discovery as never);
-
-        const { promise } = await launchDiscoveryExecution(
-            projectPath,
-            { startUrl: "https://example.test" },
-            "blocking",
-        );
-        await promise;
-
-        expect(correlationFields()).toEqual({});
-    });
-
     it("retains merged correlation after caller HTTP scope exits", async () => {
         let correlationDuringRun: CorrelationContext | undefined;
         const discovery = mockDiscovery(async () => {

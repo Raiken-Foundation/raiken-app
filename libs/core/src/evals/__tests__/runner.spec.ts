@@ -74,7 +74,7 @@ describe("runEvalScenarios", () => {
         expect(report.passed).toBe(false);
     });
 
-    it("skips scenarios with unmet env requirements without failing the suite", async () => {
+    it("reports incomplete evaluation when requirements are missing", async () => {
         const scenario: EvalScenario<void> = {
             id: "needs-llm",
             description: "requires an API key",
@@ -88,7 +88,7 @@ describe("runEvalScenarios", () => {
         const report = await runEvalScenarios([scenario]);
         expect(report.scenarios[0].skipped).toContain("RAIKEN_EVAL_SPEC_DEFINITELY_UNSET_VAR");
         expect(report.scenarios[0].attempts).toHaveLength(0);
-        expect(report.passed).toBe(true);
+        expect(report.passed).toBe(false);
     });
 
     it("a scorer that throws marks the attempt failed instead of aborting the run", async () => {
@@ -123,4 +123,11 @@ describe("runEvalScenarios", () => {
         });
         expect(report.scenarios.map((s) => s.id)).toEqual(["beta-two"]);
     });
+});
+
+it("does not report success for an empty evaluation selection", async () => {
+    expect((await runEvalScenarios([])).passed).toBe(false);
+});
+it.each([0, -1, 1.5, Number.NaN])("rejects invalid repeat count %s", async (repeat) => {
+    await expect(runEvalScenarios([], { repeat })).rejects.toThrow(/positive integer/);
 });

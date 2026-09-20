@@ -3,11 +3,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentMemory } from "../agent/memory";
 import { loadAutonomyConfig, loadTestDirectory, resolvePathWithinProject } from "../config";
+import { validationError } from "../errors";
 import { writeFileAtomic } from "../io/atomic-write";
 import { mergeCorrelationContext, obs, runDetachedOperation } from "../observability";
 import { acquireProjectOperation, type ProjectOperationLease } from "../operations";
 import { RunTraceRecorder } from "../run-traces";
-import { recordRunOutcomes } from "./record-outcomes";
 import { WorkflowStore } from "../workflows/workflow-store";
 import { findPlaywrightConfigPath, writePlaywrightConfig } from "./playwright-config";
 import {
@@ -23,9 +23,11 @@ import {
     runPlaywrightSubprocess,
 } from "./playwright-subprocess";
 import { sweepStaleRunSpecs } from "./raiken-temp-specs";
+import { recordRunOutcomes } from "./record-outcomes";
 import type { ParsedPlaywrightRun } from "./report-parser";
 import { isTestRunSuccessful, summarizeParsedPlaywrightRun } from "./run-outcome";
 import { prepareTestArtifactContent } from "./save-test-artifact";
+import { validateTestCode } from "./test-code-validation";
 
 export interface TestExecutionInput {
     testFile?: string;
@@ -157,6 +159,17 @@ export class TestExecutionService {
                     const cleaned = prepareTestArtifactContent(input.inlineContent);
                     const scratch = !input.testFile || input.testFile.startsWith("scratch:");
                     if (!scratch && input.testFile) {
+                        // Overwriting a real spec must clear the same gate as
+                        // every other spec-writing path (review finding: the
+                        // dashboard run path could clobber a working spec with
+                        // non-parsing content). Scratch buffers stay exempt.
+                        const validation = validateTestCode(cleaned);
+                        if (!validation.ok) {
+                            throw validationError(
+                                `Refusing to overwrite ${input.testFile}: the content ${validation.reason}.`,
+                                { code: "INVALID_INPUT" },
+                            );
+                        }
                         const resolved = resolvePathWithinProject(projectPath, input.testFile);
                         await writeFileAtomic(resolved, cleaned);
                     } else {
@@ -197,7 +210,7 @@ export class TestExecutionService {
                         result.parsedRun.tests
                             .filter((test) => test.status !== "skipped")
                             .map((test) => ({
-                                testFile: target ?? test.suite ?? "unknown",
+                                testFile: test.testFile ?? target ?? "unknown",
                                 testName: test.name,
                                 status: test.status === "passed" ? "passed" : "failed",
                                 ...(typeof test.duration === "number"
@@ -285,7 +298,7 @@ export class TestExecutionService {
             const raw = extractReporterJson(subprocess.stdout);
             if (!raw) return { results: null, parsedRun: null };
             const testFile = target ?? "unknown";
-            const runResults = mapReportToTestRunResults(raw, testFile);
+            const runResults = mapReportToTestRunResults(raw, testFile, 0, projectPath);
             return {
                 results: raw,
                 parsedRun: mapTestRunResultsToParsedRun(runResults, raw),
@@ -345,7 +358,9 @@ export class TestExecutionService {
 
         const parsed = parse();
         const raw = extractReporterJson(subprocess.stdout);
-        const runResults = raw ? mapReportToTestRunResults(raw, target ?? "unknown") : [];
+        const runResults = raw
+            ? mapReportToTestRunResults(raw, target ?? "unknown", 0, projectPath)
+            : [];
         // A non-zero exit with an all-green report means Playwright failed
         // outside the specs (global teardown, worker crash after flush). Keeping
         // `success` tied to `exitCode` stops those from being reported as a pass.

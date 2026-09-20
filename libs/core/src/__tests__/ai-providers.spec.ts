@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
     callWithTokenBudget,
     isEmptyLengthResponse,
+    listProviderModels,
     listProviders,
     modelSupportsReasoning,
     type ResolvedAIConfig,
@@ -48,15 +49,29 @@ describe("AI providers", () => {
     });
 });
 
+describe("listProviderModels", () => {
+    it("lists DeepSeek models at the root, not under /v1", async () => {
+        const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+            new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+            }),
+        );
+        await listProviderModels({ provider: "deepseek", apiKey: "test-key" });
+        expect(fetchSpy).toHaveBeenCalledWith("https://api.deepseek.com/models", expect.anything());
+        fetchSpy.mockRestore();
+    });
+});
+
 describe("reasoning capability", () => {
     it("marks known reasoning models", () => {
         expect(modelSupportsReasoning("openai", "o3-mini")).toBe(true);
-        expect(modelSupportsReasoning("deepseek", "deepseek-reasoner")).toBe(true);
+        expect(modelSupportsReasoning("deepseek", "deepseek-v4-pro")).toBe(true);
+        expect(modelSupportsReasoning("deepseek", "deepseek-v4-flash")).toBe(true);
         expect(modelSupportsReasoning("google", "gemini-2.5-pro")).toBe(true);
     });
 
     it("leaves chat models and unknown models non-reasoning", () => {
-        expect(modelSupportsReasoning("deepseek", "deepseek-chat")).toBe(false);
         expect(modelSupportsReasoning("openrouter", "deepseek/deepseek-chat")).toBe(false);
         expect(modelSupportsReasoning("openrouter", "deepseek/deepseek-v4-pro")).toBe(false);
         expect(modelSupportsReasoning("ollama", "llama3.2")).toBe(false);
@@ -72,15 +87,20 @@ describe("resolveTokenBudget", () => {
     it("gives reasoning models a higher floor", () => {
         expect(
             resolveTokenBudget(aiConfig({ provider: "openai", model: "o3-mini", maxTokens: 1500 })),
-        ).toBe(4000);
+        ).toBe(8000);
         expect(
             resolveTokenBudget(aiConfig({ provider: "openai", model: "o3-mini", maxTokens: 8000 })),
         ).toBe(8000);
+        expect(
+            resolveTokenBudget(
+                aiConfig({ provider: "openai", model: "o3-mini", maxTokens: 12000 }),
+            ),
+        ).toBe(12000);
     });
 });
 
 describe("callWithTokenBudget", () => {
-    it("retries once at 2x budget on the empty-length signature", async () => {
+    it("escalates the budget on the empty-length signature", async () => {
         let calls = 0;
         const result = await callWithTokenBudget({
             ai: aiConfig({ maxTokens: 2000 }),
@@ -95,14 +115,14 @@ describe("callWithTokenBudget", () => {
         expect(extractText(result)).toBe("ok");
     });
 
-    it("throws a distinct error (naming the doubled budget) when the retry also exhausts", async () => {
+    it("throws a distinct error (naming the final budget) when escalation also exhausts", async () => {
         await expect(
             callWithTokenBudget({
                 ai: aiConfig({ model: "deepseek/deepseek-v4-pro", maxTokens: 2000 }),
                 invoke: async () => emptyLengthResponse,
                 isExhausted: isEmptyLengthResponse,
             }),
-        ).rejects.toThrow(/exhausted its reasoning budget.*\(4000\)/);
+        ).rejects.toThrow(/exhausted its reasoning budget.*32000 output tokens/);
     });
 
     it("does not retry a normal response", async () => {

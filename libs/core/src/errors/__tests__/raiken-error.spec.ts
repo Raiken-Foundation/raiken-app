@@ -4,13 +4,19 @@ import { DatabaseError } from "../../database/errors";
 import {
     authError,
     cancelledError,
+    configError,
     conflictError,
+    externalError,
+    internalError,
     isRaikenError,
     normalizeToRaikenError,
+    notFoundError,
+    persistenceError,
     RaikenError,
     redactSecrets,
     serializeSafeClientError,
     timeoutError,
+    unknownError,
     validationError,
 } from "../index";
 
@@ -120,8 +126,123 @@ describe("serializeSafeClientError", () => {
 });
 
 describe("factory defaults", () => {
-    it("timeout and conflict are retryable by default", () => {
+    it("defaults retryable by category", () => {
+        // retryable categories: conflict, timeout, external, persistence
+        expect(conflictError("x").retryable).toBe(true);
         expect(timeoutError().retryable).toBe(true);
-        expect(conflictError("busy").retryable).toBe(true);
+        expect(externalError("x").retryable).toBe(true);
+        expect(persistenceError("x").retryable).toBe(true);
+
+        // non-retryable categories
+        expect(validationError("x").retryable).toBe(false);
+        expect(configError("x").retryable).toBe(false);
+        expect(authError("x").retryable).toBe(false);
+        expect(notFoundError("x").retryable).toBe(false);
+        expect(cancelledError().retryable).toBe(false);
+        expect(internalError().retryable).toBe(false);
+    });
+
+    it("each factory sets its stable code/category/message defaults", () => {
+        expect(validationError("x")).toMatchObject({
+            code: "VALIDATION_FAILED",
+            category: "validation",
+        });
+        expect(configError("x")).toMatchObject({ code: "CONFIG_INVALID", category: "config" });
+        expect(authError("x")).toMatchObject({ code: "AUTH_REQUIRED", category: "auth" });
+        expect(notFoundError("x")).toMatchObject({ code: "NOT_FOUND", category: "not_found" });
+        expect(conflictError("x")).toMatchObject({
+            code: "RESOURCE_CONFLICT",
+            category: "conflict",
+        });
+        expect(externalError("x")).toMatchObject({
+            code: "EXTERNAL_SERVICE",
+            category: "external",
+        });
+        expect(persistenceError("x")).toMatchObject({
+            code: "PERSISTENCE_FAILED",
+            category: "persistence",
+        });
+
+        // Factories with message defaults
+        expect(cancelledError()).toMatchObject({
+            code: "CANCELLED",
+            category: "cancelled",
+            message: "Operation was cancelled.",
+        });
+        expect(timeoutError()).toMatchObject({
+            code: "TIMEOUT",
+            category: "timeout",
+            message: "Operation timed out.",
+        });
+        expect(internalError()).toMatchObject({
+            code: "INTERNAL_ERROR",
+            category: "internal",
+            message: "An unexpected error occurred.",
+        });
+        expect(unknownError()).toMatchObject({
+            code: "UNKNOWN",
+            category: "internal",
+            message: "An unexpected error occurred.",
+        });
+    });
+
+    it("accepts code overrides without changing category", () => {
+        expect(validationError("x", { code: "INVALID_INPUT" }).code).toBe("INVALID_INPUT");
+        expect(validationError("x", { code: "PATH_OUTSIDE_PROJECT" }).code).toBe(
+            "PATH_OUTSIDE_PROJECT",
+        );
+        expect(authError("x", { code: "AUTH_INVALID" }).code).toBe("AUTH_INVALID");
+        expect(conflictError("x", { code: "OPERATION_BUSY" }).code).toBe("OPERATION_BUSY");
+        expect(notFoundError("x", { code: "FILE_NOT_FOUND" }).code).toBe("FILE_NOT_FOUND");
+    });
+
+    it("honours explicit retryable overrides", () => {
+        expect(validationError("x", { retryable: true }).retryable).toBe(true);
+        expect(conflictError("x", { retryable: false }).retryable).toBe(false);
+        expect(authError("x", { retryable: true }).retryable).toBe(true);
+        expect(internalError("x", { retryable: true }).retryable).toBe(true);
+    });
+
+    it("carries details, operationId, and correlationId through to the error", () => {
+        const err = persistenceError("db down", {
+            details: { table: "sessions" },
+            operationId: "op-9",
+            correlationId: "cid-9",
+        });
+        expect(err.details).toEqual({ table: "sessions" });
+        expect(err.operationId).toBe("op-9");
+        expect(err.correlationId).toBe("cid-9");
+    });
+});
+
+describe("withMetadata", () => {
+    it("overrides operationId/details and preserves the rest", () => {
+        const err = conflictError("x", {
+            operationId: "op-1",
+            correlationId: "cid-1",
+            details: { a: 1 },
+        });
+        const next = err.withMetadata({ operationId: "op-2", details: { b: 2 } });
+
+        expect(next.operationId).toBe("op-2");
+        expect(next.correlationId).toBe("cid-1"); // preserved
+        expect(next.details).toEqual({ b: 2 }); // overridden
+        expect(next.code).toBe("RESOURCE_CONFLICT"); // preserved
+        expect(next.category).toBe("conflict"); // preserved
+        expect(next.retryable).toBe(true); // preserved
+        expect(next.message).toBe("x"); // preserved
+    });
+
+    it("preserves details when not overridden", () => {
+        const err = conflictError("x", { details: { a: 1 } });
+        expect(err.withMetadata({}).details).toEqual({ a: 1 });
+    });
+});
+
+describe("RaikenError constructor", () => {
+    it("preserves the cause chain", () => {
+        const cause = new Error("root cause");
+        const err = unknownError(cause);
+        expect((err as Error & { cause?: unknown }).cause).toBe(cause);
     });
 });

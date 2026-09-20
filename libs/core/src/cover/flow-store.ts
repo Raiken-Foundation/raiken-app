@@ -6,8 +6,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { CodeGraphDB } from "../database/db";
 import { SiteKnowledgeDB } from "../site-discovery/db";
+import { type AuthLoginEvidence, readAuthLoginEvidence } from "./evidence";
 import type { CoverFlow, CoverFlowStep } from "./flows";
-import { readAuthLoginEvidence, type AuthLoginEvidence } from "./evidence";
 
 function openSiteDb(projectPath: string): { codeDb: CodeGraphDB; siteDb: SiteKnowledgeDB } {
     const codeDb = new CodeGraphDB(projectPath);
@@ -127,8 +127,7 @@ export function writeLoginScriptFromEvidence(
 
     const fills = evidence.fields
         .map((field) => {
-            const selector =
-                field.selector ?? `page.getByLabel(${JSON.stringify(field.label)})`;
+            const selector = field.selector ?? `page.getByLabel(${JSON.stringify(field.label)})`;
             const valueExpr =
                 field.type === "password"
                     ? "credentials?.password ?? ''"

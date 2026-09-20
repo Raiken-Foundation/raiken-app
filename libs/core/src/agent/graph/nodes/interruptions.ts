@@ -272,17 +272,18 @@ export const createDetectInterruptionNode =
             }
         }
 
-        try {
-            const memory = AgentMemory.getInstance(projectPath);
-            const pauseReason = memory.getPreference("paused_reason");
-            if (pauseReason) {
-                memory.setPreference("paused_reason", "");
-                if (!interruption && AUTH_INTERRUPTION_TYPES.has(pauseReason)) {
-                    await callTool("saveAuthState", {});
-                }
+        // Manual-login resume: runToolAgent moves `paused_reason` from memory
+        // into `state.pauseReason` (and clears the memory key) BEFORE the
+        // graph runs, so the memory read the old code did here was always
+        // empty and the manual-login session was never saved (review finding).
+        const pauseReason = state.pauseReason ?? "";
+        if (pauseReason && !interruption && AUTH_INTERRUPTION_TYPES.has(pauseReason)) {
+            try {
+                await callTool("saveAuthState", {});
+            } catch {
+                // The tool contract returns failures in its result; a throw
+                // here must not abort the rest of interruption detection.
             }
-        } catch {
-            // Memory not available
         }
 
         // Remember a good authenticated entry route when the page is clean, so the

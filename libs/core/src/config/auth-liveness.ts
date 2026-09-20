@@ -11,14 +11,11 @@ import { AgentMemory } from "../agent/memory";
 import { BrowserSession } from "../browser/session";
 import { looksLikeLoginUrl } from "../site-discovery/detectors/auth";
 import { DiscoveryQueryService } from "../site-discovery/query-service";
+import { readPlaywrightBaseURL, readPlaywrightWebServerUrl } from "../testing/playwright-config";
 import {
-    readPlaywrightBaseURL,
-    readPlaywrightWebServerUrl,
-} from "../testing/playwright-config";
-import {
+    type AuthStateInspection,
     inspectAuthState,
     resolveAuthStorageStatePath,
-    type AuthStateInspection,
 } from "./auth-state";
 
 const CACHE_KEY = "auth_liveness";
@@ -162,9 +159,7 @@ async function defaultNavigate(
  * Probe whether the project's storageState still authenticates against the app.
  * Soft for cover (returns a result); callers decide whether to refuse or warn.
  */
-export async function probeAuthState(
-    options: ProbeAuthStateOptions,
-): Promise<AuthLivenessResult> {
+export async function probeAuthState(options: ProbeAuthStateOptions): Promise<AuthLivenessResult> {
     const { projectPath } = options;
     const statePath = resolveAuthStorageStatePath(projectPath);
     if (!statePath) {
@@ -225,12 +220,7 @@ export async function probeAuthState(
         if (options.navigate) {
             landedUrl = await options.navigate(probeUrl, statePath);
         } else {
-            const result = await defaultNavigate(
-                projectPath,
-                probeUrl,
-                statePath,
-                options.headed,
-            );
+            const result = await defaultNavigate(projectPath, probeUrl, statePath, options.headed);
             landedUrl = result.landedUrl;
             title = result.title;
         }

@@ -8,6 +8,7 @@ import { validationError } from "../errors";
 import { writeFileAtomic } from "../io/atomic-write";
 import { cleanGeneratedTestCode } from "../utils";
 import { stripEditMarkers } from "./edit-blocks";
+import { validateTestCode } from "./test-code-validation";
 
 const TEST_FILE_NAME = /^[a-zA-Z0-9_-]+\.(spec|test)\.(ts|tsx|js|jsx)$/;
 
@@ -28,6 +29,13 @@ export interface SaveTestArtifactInput {
     avoidOverwrite?: boolean;
     sourceFiles?: string[];
     learn?: SaveTestArtifactLearnOptions;
+    /**
+     * Skip {@link validateTestCode}. Intended ONLY for explicit user-authored
+     * buffers saved verbatim; every generated/repaired/client-supplied spec
+     * must clear the gate. Validation is on by default (review finding: the
+     * gate previously lived at call sites only, so any new caller bypassed it).
+     */
+    skipValidation?: boolean;
 }
 
 export interface SaveTestArtifactResult {
@@ -140,12 +148,35 @@ export async function saveTestArtifact(
         stripEditMarkersFromRaw: input.stripEditMarkersFromRaw,
     });
 
+    if (!input.skipValidation) {
+        const validation = validateTestCode(content);
+        if (!validation.ok) {
+            return {
+                success: false,
+                message: `Refusing to save: the test code ${validation.reason}.`,
+            };
+        }
+    }
+
     try {
         let relativePath = input.relativePath;
         let fileName = input.fileName;
 
         if (relativePath) {
             assertRelativePath(relativePath);
+            // The agent's saveFile auto-approves under autoSaveTests and must
+            // never be able to overwrite arbitrary project files (package.json,
+            // .env.local, workflows) with model content (review finding).
+            // Every legitimate relativePath caller writes a spec; explicit
+            // user-authored buffers bypass this pipeline entirely.
+            const basename = path.basename(relativePath.replace(/\\/g, "/"));
+            if (!TEST_FILE_NAME.test(basename)) {
+                return {
+                    success: false,
+                    message:
+                        "Refusing to save: only test files (*.spec.ts, *.test.tsx, …) can be written through this pipeline.",
+                };
+            }
         } else if (fileName) {
             validateTestFileName(fileName);
             const testDirectory = input.testDir || loadTestDirectory(input.projectPath);

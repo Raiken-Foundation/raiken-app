@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
         getTicket: vi.fn(),
         getMyTickets: vi.fn(),
         getChangedFiles: vi.fn(),
+        findPRForBranch: vi.fn(),
         isConfigured: vi.fn(),
         hasToken: vi.fn(),
         setRepo: vi.fn(),
@@ -154,7 +155,7 @@ describe("syncCurrentTicket — happy paths", () => {
         const { syncCurrentTicket } = await import("../sync");
         // Branch parsing finds nothing.
         branchParserMocks.parseTicketFromBranch.mockReturnValue(null);
-        // But the user has an open PR — getMyTickets returns one.
+        // The branch HAS an open PR — matched via its head ref.
         const prTicket = {
             ...STUB_TICKET,
             id: "77",
@@ -162,15 +163,66 @@ describe("syncCurrentTicket — happy paths", () => {
                 { path: "src/x.ts", status: "modified" as const, additions: 1, deletions: 0 },
             ],
         };
-        ghMethods.getMyTickets.mockResolvedValue([prTicket]);
+        ghMethods.findPRForBranch.mockResolvedValue(prTicket);
 
         const result = await syncCurrentTicket({
             projectPath: "/fake/project",
             config: { provider: "github", github: { token: "t", owner: "o", repo: "r" } },
         });
 
+        expect(ghMethods.findPRForBranch).toHaveBeenCalledWith("feat/RAI-123-thing");
         expect(result.source).toBe("pr");
         expect(result.ticket?.id).toBe("77");
+    });
+
+    it("attributes NOTHING when no PR matches the branch — never an arbitrary assigned ticket", async () => {
+        const { syncCurrentTicket } = await import("../sync");
+        // Review finding: the old heuristic returned the first assigned
+        // ticket with changed files (else myTickets[0]), attaching an
+        // unrelated ticket to this branch's impact analysis.
+        branchParserMocks.parseTicketFromBranch.mockReturnValue(null);
+        ghMethods.findPRForBranch.mockResolvedValue(null);
+        const unrelated = {
+            ...STUB_TICKET,
+            id: "999",
+            changedFiles: [
+                { path: "src/y.ts", status: "modified" as const, additions: 1, deletions: 0 },
+            ],
+        };
+        ghMethods.getMyTickets.mockResolvedValue([unrelated]);
+
+        const result = await syncCurrentTicket({
+            projectPath: "/fake/project",
+            config: { provider: "github", github: { token: "t", owner: "o", repo: "r" } },
+        });
+
+        expect(result.ticket).toBeNull();
+        expect(result.source).toBe("branch");
+        expect(ghMethods.getMyTickets).not.toHaveBeenCalled();
+    });
+
+    it("uses the parsed ticket's provider when none is configured", async () => {
+        const { syncCurrentTicket } = await import("../sync");
+        // A Linear-shaped branch ID with NO integrations.provider set — the
+        // provider must come from the parse, not the GitHub default.
+        branchParserMocks.parseTicketFromBranch.mockReturnValue({
+            ticketId: "ENG-89",
+            provider: "linear",
+        });
+        linearMethods.isConfigured.mockReturnValue(true);
+        linearMethods.getTicket.mockResolvedValue({
+            ...STUB_TICKET,
+            id: "ENG-89",
+            provider: "linear" as const,
+        });
+
+        const result = await syncCurrentTicket({
+            projectPath: "/fake/project",
+            config: undefined,
+        });
+
+        expect(linearMethods.getTicket).toHaveBeenCalledWith("ENG-89");
+        expect(result.ticket?.id).toBe("ENG-89");
     });
 });
 

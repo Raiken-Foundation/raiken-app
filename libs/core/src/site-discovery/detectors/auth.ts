@@ -218,10 +218,27 @@ export async function detectAuth(ctx: BlockerDetectorContext): Promise<AuthBlock
     const loginForm = await checkLoginForm(page);
     if (loginForm) {
         const matchedUrlPattern = checkUrlPatterns(url);
-        return makeAuthBlocker(ctx, matchedUrlPattern ? "url_pattern" : "login_form", {
-            ...loginForm,
-            matchedUrlPattern,
-        });
+        // A password field alone is NOT a login wall on a non-login URL —
+        // signed-in crawls of settings/change-password pages (and public
+        // pages with any password input) used to be misfiled as auth routes
+        // or pause the whole crawl (review finding). Off login-shaped URLs,
+        // require corroboration: a known submit control (not the
+        // "unknown" fallback) or an explicit auth-error message.
+        if (matchedUrlPattern || loginForm.submitButton !== "unknown") {
+            return makeAuthBlocker(ctx, matchedUrlPattern ? "url_pattern" : "login_form", {
+                ...loginForm,
+                matchedUrlPattern,
+            });
+        }
+        const corroboratingError = await checkErrorMessages(page);
+        if (corroboratingError) {
+            return makeAuthBlocker(ctx, "login_form", {
+                ...loginForm,
+                matchedUrlPattern,
+                errorMessage: corroboratingError.message,
+            });
+        }
+        return null;
     }
 
     // OAuth-only landing pages: only treat as blockers if the URL also

@@ -1,6 +1,6 @@
 /**
  * Capability metadata exists so call sites can skip requests a model is known
- * to reject (vision on deepseek-chat, response_format on DeepSeek) instead of
+ * to reject (vision on deepseek-v4-flash, response_format on DeepSeek) instead of
  * paying the round-trip and leaking a raw provider error. `undefined` must
  * stay permissive — an unknown model keeps today's try-and-fall-back path.
  */
@@ -12,17 +12,18 @@ import {
 } from "../agent/ai-providers";
 
 describe("getModelCapabilities", () => {
-    it("marks deepseek-chat as text-only with no structured output", () => {
-        expect(getModelCapabilities("deepseek", "deepseek-chat")).toEqual({
+    it("marks deepseek-v4-flash as a reasoning text-only model", () => {
+        expect(getModelCapabilities("deepseek", "deepseek-v4-flash")).toEqual({
             vision: false,
             structuredOutput: false,
+            reasoning: true,
         });
-        expect(modelSupportsVision("deepseek", "deepseek-chat")).toBe(false);
-        expect(modelSupportsStructuredOutput("deepseek", "deepseek-chat")).toBe(false);
+        expect(modelSupportsVision("deepseek", "deepseek-v4-flash")).toBe(false);
+        expect(modelSupportsStructuredOutput("deepseek", "deepseek-v4-flash")).toBe(false);
     });
 
     it("falls back to provider defaults for unlisted models of a known provider", () => {
-        expect(getModelCapabilities("deepseek", "deepseek-v4-pro")).toEqual({
+        expect(getModelCapabilities("deepseek", "deepseek-future-model")).toEqual({
             vision: false,
             structuredOutput: false,
         });
@@ -38,7 +39,7 @@ describe("getModelCapabilities", () => {
             structuredOutput: true,
             reasoning: true,
         });
-        expect(getModelCapabilities("deepseek", "deepseek-reasoner")).toEqual({
+        expect(getModelCapabilities("deepseek", "deepseek-v4-pro")).toEqual({
             vision: false,
             structuredOutput: false,
             reasoning: true,

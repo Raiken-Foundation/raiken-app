@@ -31,7 +31,15 @@ export function recordRunOutcomes(
     try {
         const db = new CodeGraphDB(projectPath);
         try {
+            const grouped = new Map<string, RunOutcomeRecord>();
             for (const outcome of recordable) {
+                const key = JSON.stringify([outcome.testFile, outcome.testName]);
+                const previous = grouped.get(key);
+                if (!previous || previous.status === "passed") grouped.set(key, outcome);
+            }
+            // The legacy memory key is file/title: a passing browser or describe
+            // must never erase a failure from another identity in the same run.
+            for (const outcome of grouped.values()) {
                 db.upsertRunOutcome({
                     testFile: outcome.testFile,
                     testName: outcome.testName,
@@ -42,7 +50,9 @@ export function recordRunOutcomes(
                     ...(outcome.errorMessage
                         ? { errorMessage: outcome.errorMessage.slice(0, ERROR_MESSAGE_CAP) }
                         : {}),
-                    ...(outcome.failingSelector ? { failingSelector: outcome.failingSelector } : {}),
+                    ...(outcome.failingSelector
+                        ? { failingSelector: outcome.failingSelector }
+                        : {}),
                 });
             }
         } finally {

@@ -444,9 +444,14 @@ function modalGroundingScenario(authDir: string): EvalScenario<GroundingOutput> 
 
             const mismatch = validateSelectorGrounding(WRONG_MODAL_LOCATOR, [summary]);
             const correct = validateSelectorGrounding(CORRECT_MODAL_LOCATOR, [summary]);
-            const golden = fs.existsSync(goldenSuitePath)
-                ? validateSelectorGrounding(fs.readFileSync(goldenSuitePath, "utf-8"), [summary])
-                : null;
+            // A missing golden file must NOT pass the gate vacuously — a
+            // rename/move of the fixture silently disabled the false-positive
+            // gate while the eval stayed green (review finding). Fail loudly
+            // so the gate can never pretend it validated something.
+            const goldenMissing = !fs.existsSync(goldenSuitePath);
+            const golden = goldenMissing
+                ? null
+                : validateSelectorGrounding(fs.readFileSync(goldenSuitePath, "utf-8"), [summary]);
 
             return {
                 landmarks,
@@ -455,6 +460,7 @@ function modalGroundingScenario(authDir: string): EvalScenario<GroundingOutput> 
                 correctLocatorIsClean: correct.contradictions.length === 0,
                 goldenContradictions:
                     golden?.contradictions.map((violation) => violation.locator) ?? [],
+                goldenMissing,
             };
         },
         scorers: [
@@ -485,9 +491,11 @@ function modalGroundingScenario(authDir: string): EvalScenario<GroundingOutput> 
                     : "the grounded alertdialog locator was reported as a contradiction",
             })),
             scorer("golden-suite-has-no-false-contradictions", (output) => ({
-                passed: output.goldenContradictions.length === 0,
+                passed: !output.goldenMissing && output.goldenContradictions.length === 0,
                 value: output.goldenContradictions.length,
-                detail: output.goldenContradictions.join("; ") || "none",
+                detail: output.goldenMissing
+                    ? `golden suite not found at ${"tools/playground-tasks/tests/auth-flow.spec.ts"} — rebuild the fixture (nx run @raiken/playground-tasks:build); refusing to pass without it`
+                    : output.goldenContradictions.join("; ") || "none",
             })),
         ],
     };

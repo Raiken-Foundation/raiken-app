@@ -76,12 +76,23 @@ export function summarizeSpecAttempts(spec: PlaywrightJsonSpec): SpecAttemptSumm
  * `--repeat-each` reports each repetition as its own spec entry sharing a
  * title; without merging, callers see "1 passed, 1 failed" for one test.
  */
+export function testResultIdentity(
+    result: Pick<TestRunResult, "testFile" | "testName" | "suite" | "projectName">,
+): string {
+    return JSON.stringify([
+        result.testFile,
+        result.projectName ?? "",
+        result.suite ?? "",
+        result.testName,
+    ]);
+}
+
 export function mergeRepetitionResults(results: TestRunResult[]): TestRunResult[] {
     const order: string[] = [];
     const groups = new Map<string, TestRunResult[]>();
 
     for (const result of results) {
-        const key = `${result.testFile}\u0000${result.testName}`;
+        const key = testResultIdentity(result);
         const group = groups.get(key);
         if (group) group.push(result);
         else {

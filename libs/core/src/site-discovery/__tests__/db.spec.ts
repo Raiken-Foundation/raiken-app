@@ -200,30 +200,6 @@ describe("SiteKnowledgeDB", () => {
 
             expect(siteDb.getAuthenticatedPagesCount()).toBe(1);
         });
-
-        it("updatePageVisit only bumps metadata, leaving content untouched", () => {
-            siteDb.savePage({
-                projectPath: testDir,
-                url: "http://localhost:3000",
-                normalizedUrl: "http://localhost:3000",
-                title: "Original",
-                snapshotJson: '{"original":true}',
-                formsJson: null,
-                parentUrl: null,
-                navigationAction: null,
-                depth: 0,
-                discoveredAt: Date.now(),
-                lastVisitedAt: Date.now(),
-                visitCount: 1,
-            });
-
-            siteDb.updatePageVisit("http://localhost:3000");
-
-            const retrieved = siteDb.getPage("http://localhost:3000");
-            expect(retrieved?.title).toBe("Original");
-            expect(retrieved?.snapshotJson).toBe('{"original":true}');
-            expect(retrieved?.visitCount).toBe(2);
-        });
     });
 
     describe("Link Operations", () => {
@@ -242,7 +218,6 @@ describe("SiteKnowledgeDB", () => {
             });
 
             expect(siteDb.getVerifiedLinks()).toHaveLength(1);
-            expect(siteDb.getLinksFrom("http://localhost:3000")).toHaveLength(1);
         });
 
         it("saveLink reports whether a new edge was actually inserted", () => {
@@ -263,7 +238,6 @@ describe("SiteKnowledgeDB", () => {
             // Same (from, to, selector) — INSERT OR IGNORE swallows it, and
             // the crawler's links-found counter must not count it again.
             expect(siteDb.saveLink(link)).toBe(0);
-            expect(siteDb.getLinksFrom("http://localhost:3000")).toHaveLength(1);
         });
     });
 

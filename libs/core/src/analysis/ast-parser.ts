@@ -2,8 +2,9 @@ import type { ParserPlugin } from "@babel/parser";
 import * as parser from "@babel/parser";
 import traverse from "@babel/traverse";
 import * as t from "@babel/types";
-import type { CodeChunk, ParsedClass, ParsedFile, ParsedFunction, ParsedType } from "../types";
+import type { ParsedFile, TemplateSelector } from "../types";
 import { getParamName, isExportedNode } from "../utils";
+import { finalizeTemplateSelectors, SELECTOR_ATTRIBUTES } from "./markup-selectors";
 
 /**
  * Determine if file is TypeScript based on extension.
@@ -73,6 +74,8 @@ export function parseSourceFile(
     };
 
     let astTree: unknown;
+    const jsxSelectors: TemplateSelector[] = [];
+    const jsxRoutes: string[] = [];
 
     try {
         // Parse the code into an AST with appropriate plugins
@@ -87,6 +90,62 @@ export function parseSourceFile(
 
         // Traverse the AST
         traverse(ast, {
+            // Selectors written as JSX attributes (data-testid, aria-label,
+            // placeholder, role). These are the React/Svelte-in-JSX equivalent of
+            // the markup template selectors, and they feed the same grounding
+            // evidence: a test id in a component is real even when no crawl
+            // reached the state that renders it (dialogs, validation, filled
+            // carts). Literal values only — a computed attribute is a guess.
+            JSXAttribute(path) {
+                const node = path.node;
+                if (!t.isJSXIdentifier(node.name)) return;
+
+                const rawName = node.name.name;
+                const kind = SELECTOR_ATTRIBUTES[rawName.toLowerCase()];
+                if (!kind) return;
+
+                let value: string | null = null;
+                if (t.isStringLiteral(node.value)) {
+                    value = node.value.value;
+                } else if (t.isJSXExpressionContainer(node.value)) {
+                    const expression = node.value.expression;
+                    if (t.isStringLiteral(expression)) value = expression.value;
+                }
+                if (value === null) return;
+                value = value.trim();
+                if (!value || value.length > 120) return;
+
+                const selector: TemplateSelector = {
+                    kind,
+                    value,
+                    line: node.loc?.start.line ?? 0,
+                };
+                if (kind === "testId") selector.attribute = rawName.toLowerCase();
+                jsxSelectors.push(selector);
+            },
+
+            // React Router <Route path="..."> — the client-side route table.
+            // cover needs these so a draft navigates to a real route instead of
+            // guessing (e.g. /product/:slug, not /products/<made-up-slug>).
+            JSXOpeningElement(path) {
+                const node = path.node;
+                if (!t.isJSXIdentifier(node.name) || node.name.name !== "Route") return;
+                for (const attr of node.attributes) {
+                    if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) continue;
+                    if (attr.name.name !== "path") continue;
+                    let value: string | null = null;
+                    if (t.isStringLiteral(attr.value)) {
+                        value = attr.value.value;
+                    } else if (
+                        t.isJSXExpressionContainer(attr.value) &&
+                        t.isStringLiteral(attr.value.expression)
+                    ) {
+                        value = attr.value.expression.value;
+                    }
+                    if (value?.trim()) jsxRoutes.push(value.trim());
+                }
+            },
+
             // Function declarations: function foo() {}
             FunctionDeclaration(path) {
                 const node = path.node;
@@ -191,7 +250,14 @@ export function parseSourceFile(
                         ? (namespaceSpec as t.ImportNamespaceSpecifier).local.name
                         : undefined,
                     namedImports: namedSpecs.map((s) => (s as t.ImportSpecifier).local.name),
-                    isTypeOnly: node.importKind === "type",
+                    // Declaration-level `import type` OR every specifier
+                    // inline-marked `import { type Foo }` (TS 4.5+).
+                    isTypeOnly:
+                        node.importKind === "type" ||
+                        (namedSpecs.length > 0 &&
+                            namedSpecs.every(
+                                (s) => (s as t.ImportSpecifier).importKind === "type",
+                            )),
                 });
             },
 
@@ -202,6 +268,24 @@ export function parseSourceFile(
                 // Handle re-exports: export { foo, bar } from './module'
                 // or local exports: export { foo, bar }
                 if (node.specifiers && node.specifiers.length > 0) {
+                    // A re-export IS a dependency edge: record the source so
+                    // code-graph resolves imports for barrel files (review
+                    // finding: the source was discarded, leaving `export *`
+                    // and `export { x } from` files with empty edge sets).
+                    if (node.source) {
+                        result.imports.push({
+                            source: node.source.value,
+                            namedImports: node.specifiers
+                                .filter((spec) => t.isExportSpecifier(spec))
+                                .map(
+                                    (spec) =>
+                                        (t.isIdentifier(spec.local)
+                                            ? spec.local.name
+                                            : String(spec.local.value)),
+                                ),
+                            isTypeOnly: node.exportKind === "type",
+                        });
+                    }
                     node.specifiers.forEach((spec) => {
                         if (t.isExportSpecifier(spec)) {
                             const exportedName = t.isIdentifier(spec.exported)
@@ -255,6 +339,43 @@ export function parseSourceFile(
                 result.exports.push(exportName);
             },
 
+            // Export-all re-exports: export * from './module' — the standard
+            // barrel-file pattern. Without this visitor the dependency edge
+            // was never recorded at all (review finding).
+            ExportAllDeclaration(path) {
+                const node = path.node;
+                if (node.source) {
+                    result.imports.push({
+                        source: node.source.value,
+                        namedImports: [],
+                        isTypeOnly: node.exportKind === "type",
+                    });
+                }
+            },
+
+            // Dynamic imports (import('./m')) and CJS requires — the other
+            // dependency edges a plain ImportDeclaration-only pass misses.
+            CallExpression(path) {
+                const node = path.node;
+                const arg = node.arguments[0];
+                if (!arg || !t.isStringLiteral(arg)) return;
+                if (node.callee.type === "Import") {
+                    result.imports.push({
+                        source: arg.value,
+                        namedImports: [],
+                    });
+                } else if (
+                    t.isIdentifier(node.callee) &&
+                    node.callee.name === "require" &&
+                    !path.scope.hasBinding("require")
+                ) {
+                    result.imports.push({
+                        source: arg.value,
+                        namedImports: [],
+                    });
+                }
+            },
+
             // TypeScript type alias: type Foo = ...
             TSTypeAliasDeclaration(path) {
                 const node = path.node;
@@ -304,91 +425,16 @@ export function parseSourceFile(
         throw new Error(`Parse error in ${sanitizedFilename}${line ? `:${line}` : ""}: ${message}`);
     }
 
+    if (jsxSelectors.length > 0) {
+        result.templateSelectors = finalizeTemplateSelectors(jsxSelectors);
+    }
+
+    if (jsxRoutes.length > 0) {
+        result.routes = [...new Set(jsxRoutes)];
+    }
+
     // Always return both parsed structure (for embeddings) and complete AST (for test generation)
     return { parsed: result, ast: astTree };
-}
-
-/**
- * Generate human-readable summary of parsed file.
- * Useful for debugging and logging.
- */
-export function summarizeParsedFile(parsed: ParsedFile): string {
-    const lines: string[] = [];
-
-    if (parsed.imports.length > 0) {
-        lines.push(`Imports: ${parsed.imports.length}`);
-        parsed.imports.forEach((imp) => {
-            const parts: string[] = [];
-            if (imp.defaultImport) parts.push(imp.defaultImport);
-            if (imp.namespaceImport) parts.push(`* as ${imp.namespaceImport}`);
-            if (imp.namedImports.length > 0) parts.push(`{ ${imp.namedImports.join(", ")} }`);
-
-            const typeOnly = imp.isTypeOnly ? " (type-only)" : "";
-            lines.push(`  - from "${imp.source}": ${parts.join(", ")}${typeOnly}`);
-        });
-    }
-
-    if (parsed.functions.length > 0) {
-        lines.push(`\nFunctions: ${parsed.functions.length}`);
-        parsed.functions.forEach((fn) => {
-            const exported = fn.isExported ? "export " : "";
-            const async = fn.isAsync ? "async " : "";
-            lines.push(`  - ${exported}${async}${fn.name}(${fn.params.join(", ")})`);
-        });
-    }
-
-    if (parsed.classes.length > 0) {
-        lines.push(`\nClasses: ${parsed.classes.length}`);
-        parsed.classes.forEach((cls) => {
-            const exported = cls.isExported ? "export " : "";
-            lines.push(`  - ${exported}class ${cls.name}`);
-            if (cls.methods.length > 0) {
-                lines.push(`    Methods: ${cls.methods.join(", ")}`);
-            }
-            if (cls.properties.length > 0) {
-                lines.push(`    Properties: ${cls.properties.join(", ")}`);
-            }
-        });
-    }
-
-    if (parsed.types.length > 0) {
-        lines.push(`\nTypes: ${parsed.types.length}`);
-        parsed.types.forEach((type) => {
-            const exported = type.isExported ? "export " : "";
-            lines.push(`  - ${exported}${type.kind} ${type.name}`);
-        });
-    }
-
-    if (parsed.exports.length > 0) {
-        lines.push(`\nExports: ${parsed.exports.join(", ")}`);
-    }
-
-    return lines.join("\n");
-}
-
-/**
- * Convert parsed AST to searchable text format for embeddings.
- * This creates a human-readable representation of the code structure.
- *
- * @param parsed - The parsed file structure
- * @param filePath - The file path (for context)
- * @returns Searchable text representation
- */
-export function astToSearchableText(parsed: ParsedFile, filePath: string): string {
-    const chunks = generateCodeChunks(parsed, filePath);
-
-    // Add file header
-    const lines = [`File: ${filePath}`];
-
-    // Convert each chunk to text
-    for (const chunk of chunks) {
-        const text = chunkToSearchableText(chunk);
-        // Remove file path from individual lines (redundant)
-        const simplifiedText = text.replace(` in ${filePath}`, "");
-        lines.push(simplifiedText);
-    }
-
-    return lines.join("\n");
 }
 
 /**
@@ -587,113 +633,4 @@ export function fullAstToSearchableText(
     }
 
     return lines.join("\n");
-}
-
-/**
- * Generate individual code chunks from parsed AST.
- * Each chunk represents a searchable unit (function, class, type).
- *
- * @param parsed - The parsed file structure
- * @param filePath - The file path for context
- * @returns Array of code chunks ready for embedding generation
- */
-export function generateCodeChunks(parsed: ParsedFile, filePath: string): CodeChunk[] {
-    const chunks: CodeChunk[] = [];
-
-    // Function chunks
-    for (const func of parsed.functions) {
-        chunks.push({
-            type: "function",
-            name: func.name,
-            filePath,
-            data: func,
-            line: func.line,
-            isExported: func.isExported,
-            isAsync: func.isAsync,
-        });
-    }
-
-    // Class chunks (class itself + individual methods)
-    for (const cls of parsed.classes) {
-        // Class chunk
-        chunks.push({
-            type: "class",
-            name: cls.name,
-            filePath,
-            data: cls,
-            line: cls.line,
-            isExported: cls.isExported,
-        });
-
-        // Method chunks (as separate searchable units)
-        for (const method of cls.methods) {
-            chunks.push({
-                type: "function",
-                name: `${cls.name}.${method}`,
-                filePath,
-                data: null, // Methods are strings, no full data
-                line: cls.line,
-                isExported: cls.isExported,
-            });
-        }
-    }
-
-    // Type chunks
-    for (const type of parsed.types) {
-        chunks.push({
-            type: "type",
-            name: type.name,
-            filePath,
-            data: type,
-            line: type.line,
-            isExported: type.isExported,
-        });
-    }
-
-    return chunks;
-}
-
-/**
- * Convert a single code chunk to searchable text format.
- * This creates the embedding-friendly representation.
- *
- * @param chunk - The code chunk to convert
- * @returns Human-readable text representation
- */
-export function chunkToSearchableText(chunk: CodeChunk): string {
-    const relativePath = chunk.filePath;
-
-    switch (chunk.type) {
-        case "function":
-            if (chunk.data && "params" in chunk.data) {
-                const func = chunk.data as ParsedFunction;
-                const asyncPrefix = func.isAsync ? "async " : "";
-                const params = func.params.join(", ");
-                return `${asyncPrefix}function ${chunk.name}(${params}) in ${relativePath}`;
-            }
-            // Method case (no full data)
-            return `method ${chunk.name}() in ${relativePath}`;
-
-        case "class":
-            if (chunk.data && "methods" in chunk.data) {
-                const cls = chunk.data as ParsedClass;
-                const methodsInfo =
-                    cls.methods.length > 0 ? ` with ${cls.methods.length} methods` : "";
-                return `class ${chunk.name}${methodsInfo} in ${relativePath}`;
-            }
-            return `class ${chunk.name} in ${relativePath}`;
-
-        case "type":
-            if (chunk.data && "kind" in chunk.data) {
-                const type = chunk.data as ParsedType;
-                return `${type.kind} ${chunk.name} in ${relativePath}`;
-            }
-            return `type ${chunk.name} in ${relativePath}`;
-
-        case "file":
-            return `File: ${relativePath}`;
-
-        default:
-            return `${chunk.name} in ${relativePath}`;
-    }
 }

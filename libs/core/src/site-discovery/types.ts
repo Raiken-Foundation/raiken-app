@@ -282,6 +282,15 @@ export interface DiscoveryOptions {
      * pages. Fragments and trailing slashes are still normalized.
      */
     preserveQueryParams?: boolean;
+    /**
+     * The DOM must be unchanged for this long (ms) before the page is captured.
+     * `networkidle` only waits for fetch/XHR; a DOM-quiet probe also waits for
+     * client-side `setTimeout`-driven loading (skeleton states, debounced
+     * search, mock data). Default 400.
+     */
+    settleQuietMs?: number;
+    /** Hard cap on the DOM-quiet wait, in ms. Default 3000. */
+    settleMaxMs?: number;
 }
 
 /**

@@ -135,6 +135,10 @@ export const GraphState = Annotation.Root({
         value: (_left, right) => right,
         default: () => null,
     }),
+    failure: Annotation<string | null>({
+        value: (_left, right) => right,
+        default: () => null,
+    }),
     summary: Annotation<string | null>({
         value: (_left, right) => right,
         default: () => null,

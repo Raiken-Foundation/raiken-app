@@ -1,3 +1,7 @@
+import {
+    assertedScenarioTokens,
+    changedAssertionRequirements,
+} from "../testing/assertion-contract";
 /**
  * Deterministic setup fixes applied before (and between) AI repair attempts.
  *
@@ -179,18 +183,81 @@ export function scenarioExpectedTokens(scenario: string): string[] {
     return [...tokens];
 }
 
-/**
- * Code without comments. A comment saying "$59.00" does not assert anything —
- * expectation checks must never be satisfied by prose that isn't executed.
- */
-function stripComments(code: string): string {
-    return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])[ \t]*\/\/[^\n]*/g, "$1");
+/** Require expected scenario tokens in actual assertions, never in titles or setup. */
+export function missingScenarioExpectations(code: string, scenario: string): string[] {
+    const evidence = assertedScenarioTokens(code, { expectedValuesOnly: true });
+    return scenarioExpectedTokens(scenario).filter(
+        (token) =>
+            !evidence.some((value) => {
+                const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "u").test(
+                    value,
+                );
+            }),
+    );
 }
 
-/** Scenario expectations a body of test code does NOT assert. */
-export function missingScenarioExpectations(code: string, scenario: string): string[] {
-    const executable = stripComments(code);
-    return scenarioExpectedTokens(scenario).filter((token) => !executable.includes(token));
+/** Shared repair contract used by both standalone and graph callers. */
+export function changedAssertedValues(originalCode: string, fixedCode: string): string[] {
+    return changedAssertionRequirements(originalCode, fixedCode);
+}
+
+/**
+ * Guidance when a repair dropped/changed an asserted value: the app may be the
+ * broken side, so the test must keep asserting the original expectation.
+ */
+export function describeWeakenedAssertion(values: string[]): string {
+    return [
+        "[REPAIR REJECTED — the fix changed an asserted expectation]",
+        `The corrected file no longer asserts: ${values.map((v) => `\`${v}\``).join(", ")}.`,
+        "These values were the test's expectations, not page state. If the app",
+        "renders something different, the APP is the likely bug — changing the",
+        "assertion to match it turns a bug-catching test into a false green.",
+        "Keep the original expectations. Fix only the test's mechanics (selectors,",
+        "waits, navigation, interaction order). If you are certain the expectation",
+        "itself is wrong, re-run with --allow-weaken.",
+    ].join("\n");
+}
+
+/** The expected vs. actual values in an assertion-value failure. */
+export interface ValueMismatch {
+    expected: string;
+    received: string;
+}
+
+/**
+ * Pull an assertion-value mismatch out of a Playwright failure: the test
+ * asserts one literal and the page renders another ("Expected: X / Received:
+ * Y"). This is the signature of an app-side behavior difference — a
+ * bug-catcher firing — not a locator or test-logic error a repair can patch,
+ * because a "fix" that changes the assertion to match the page would be a
+ * false green. Returns null when the failure is not a value mismatch.
+ */
+export function extractValueMismatch(failureText: string): ValueMismatch | null {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escapes by construction
+    const plain = failureText.replace(/\u001b?\[\d{1,2}m/g, "");
+    const expected = /Expected:\s*"?([^"\n]+)"?/i.exec(plain)?.[1]?.trim();
+    const received = /Received:\s*"?([^"\n]+)"?/i.exec(plain)?.[1]?.trim();
+    if (!expected || !received) return null;
+    if (expected === received) return null;
+    return { expected, received };
+}
+
+/**
+ * Honest explanation for a repair that cannot fix an assertion-value failure:
+ * the test asserts the correct value and the app renders something else, so no
+ * test-side edit is correct. Used when the model returns no usable code for
+ * such a failure, so the user sees the real reason instead of an opaque
+ * "empty response".
+ */
+export function describeAssertionValueMismatch(mismatch: ValueMismatch): string {
+    return (
+        `The test asserts \`${mismatch.expected}\` but the app renders \`${mismatch.received}\` — ` +
+        "an application-side behavior mismatch, not a locator or test-logic error. " +
+        "The assertion was preserved: changing it to match the app would turn a " +
+        "bug-catching test into a false green. Fix the app, or re-run with " +
+        "--allow-weaken only if the expectation itself is wrong."
+    );
 }
 
 /**

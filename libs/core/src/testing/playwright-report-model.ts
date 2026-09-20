@@ -31,6 +31,8 @@ export interface ReportError {
 export interface ReportTestCase {
     id: string;
     name: string;
+    testFile?: string;
+    projectName?: string;
     suite: string;
     status: "passed" | "failed" | "skipped";
     /** Milliseconds. */

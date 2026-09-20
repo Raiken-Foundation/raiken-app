@@ -120,6 +120,21 @@ export class GitHubProvider implements TicketProvider {
         }
     }
 
+    /**
+     * Find the open PR whose HEAD ref is `branchName` on this repo — the only
+     * sound way to attribute a PR to the current branch (GitHub returns at
+     * most one match for a head filter).
+     */
+    async findPRForBranch(branchName: string): Promise<TicketInfo | null> {
+        const head = `${this.owner}:${branchName}`;
+        const results = await this.apiFetch<GitHubPR[]>(
+            `/repos/${this.owner}/${this.repo}/pulls?head=${encodeURIComponent(head)}&state=open`,
+        );
+        const pr = results[0];
+        if (!pr) return null;
+        return this.fetchPR(pr.number);
+    }
+
     // =========================================================================
     // Internals
     // =========================================================================

@@ -73,12 +73,14 @@ describe("recorded flows + login script", () => {
         fs.writeFileSync(path.join(projectDir, "raiken.config.json"), "{}\n");
         const written = writeLoginScriptFromEvidence(projectDir);
         expect(written?.path).toContain(`${path.sep}.raiken${path.sep}login.ts`);
-        expect(fs.existsSync(written!.path)).toBe(true);
-        const script = fs.readFileSync(written!.path, "utf-8");
+        expect(fs.existsSync(written?.path ?? "")).toBe(true);
+        const script = fs.readFileSync(written?.path ?? "", "utf-8");
         expect(script).toContain("getByLabel");
         expect(script).toContain("credentials?.password");
         expect(written?.patchedConfig).toBe(true);
-        const config = JSON.parse(fs.readFileSync(path.join(projectDir, "raiken.config.json"), "utf-8"));
+        const config = JSON.parse(
+            fs.readFileSync(path.join(projectDir, "raiken.config.json"), "utf-8"),
+        );
         expect(config.auth.customLoginScript).toBe(".raiken/login.ts");
     });
 });

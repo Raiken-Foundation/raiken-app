@@ -28,15 +28,43 @@ export function sanitizeStorageState(state: StorageStateInput): PlaywrightStorag
             typeof sameSiteRaw === "string" && validSameSite.has(sameSiteRaw)
                 ? (sameSiteRaw as "Strict" | "Lax" | "None")
                 : "Lax";
+        // Playwright's context creation HARD-REJECTS cookie shapes the old
+        // sanitizer passed through (verified against playwright-core 1.57
+        // rewriteCookies asserts): a cookie with neither `url` nor `domain`,
+        // `domain` without `path`, or `expires < -1`. With a storageState
+        // loaded, every newPage() then throws and the whole authenticated
+        // crawl produces zero pages (review finding).
+        const hasDomain = typeof r["domain"] === "string" && (r["domain"] as string) !== "";
+        if (!hasDomain && typeof r["url"] !== "string") {
+            continue;
+        }
+        const pathValue =
+            typeof r["path"] === "string"
+                ? (r["path"] as string)
+                : hasDomain
+                  ? "/"
+                  : undefined;
+        let expires: number | undefined =
+            typeof r["expires"] === "number" ? (r["expires"] as number) : undefined;
+        if (expires !== undefined && expires < -1) {
+            expires = -1;
+        }
+        let secure: boolean | undefined =
+            typeof r["secure"] === "boolean" ? (r["secure"] as boolean) : undefined;
+        if (sameSite === "None" && !secure) {
+            // Chromium silently drops None-without-secure cookies, partially
+            // loading the session — force the flag the cookie implies.
+            secure = true;
+        }
         cookies.push({
             name: r["name"] as string,
             value: r["value"] as string,
-            domain: typeof r["domain"] === "string" ? (r["domain"] as string) : undefined,
-            path: typeof r["path"] === "string" ? (r["path"] as string) : undefined,
+            domain: hasDomain ? (r["domain"] as string) : undefined,
+            path: pathValue,
             url: typeof r["url"] === "string" ? (r["url"] as string) : undefined,
-            expires: typeof r["expires"] === "number" ? (r["expires"] as number) : undefined,
+            expires,
             httpOnly: typeof r["httpOnly"] === "boolean" ? (r["httpOnly"] as boolean) : undefined,
-            secure: typeof r["secure"] === "boolean" ? (r["secure"] as boolean) : undefined,
+            secure,
             sameSite,
         });
     }

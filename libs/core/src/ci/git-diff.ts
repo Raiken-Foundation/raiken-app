@@ -112,7 +112,18 @@ export function getChangedFiles(projectPath: string, refs: ResolvedRefs): CiChan
     const raw = runGit(
         // `-M` already enables rename detection (renames show as `R<score>`).
         // Don't add `--no-renames=false` — git rejects it (the flag takes no value).
-        ["diff", "--name-status", "-M", `${quote(refs.base)}...${quote(refs.head)}`],
+        // `--relative` + the `-- .` pathspec scope the diff to the raiken
+        // PROJECT (the cwd) rather than the whole containing git repo, and emit
+        // paths relative to that project so they match the code-graph keys.
+        [
+            "diff",
+            "--name-status",
+            "-M",
+            "--relative",
+            `${quote(refs.base)}...${quote(refs.head)}`,
+            "--",
+            ".",
+        ],
         projectPath,
     );
 
@@ -144,7 +155,10 @@ export function getChangedFiles(projectPath: string, refs: ResolvedRefs): CiChan
  * without requiring a base ref.
  */
 export function getStagedFiles(projectPath: string): CiChangedFile[] {
-    const raw = runGit(["diff", "--cached", "--name-status", "-M"], projectPath);
+    const raw = runGit(
+        ["diff", "--cached", "--name-status", "-M", "--relative", "--", "."],
+        projectPath,
+    );
     if (!raw) return [];
 
     const files: CiChangedFile[] = [];

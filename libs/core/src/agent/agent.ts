@@ -8,11 +8,22 @@ import { loadAutonomyConfig, loadTestDirectory } from "../config";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
 import { EmbeddingsGenerator } from "../database/embeddings";
-import { persistenceError } from "../errors";
+import {
+    authError,
+    cancelledError,
+    externalError,
+    normalizeToRaikenError,
+    persistenceError,
+} from "../errors";
 import { mergeCorrelationContext } from "../observability";
 import type { ParsedFile, TemplateSelector } from "../types";
 import { persistHitlPauseWorkflow } from "../workflows";
-import { createLangChainModel, getProvider, resolveAIConfig } from "./ai-providers";
+import {
+    createLangChainModel,
+    getProvider,
+    resolveAIConfig,
+    resolveTokenBudget,
+} from "./ai-providers";
 import { createAgentGraph } from "./graph/graph";
 import { explicitlyRequestsDiscoveryClear } from "./graph/nodes/discovery-management";
 import {
@@ -559,7 +570,6 @@ export function humanizeToolCall(toolName: string): string {
         saveAuthState: "Saving login state",
         discoverLinks: "Discovering links",
         done: "Finishing up",
-        respond: "Responding",
         awaitUser: "Waiting for your input",
     };
     return labels[toolName] ?? `Running ${toolName}...`;
@@ -656,16 +666,11 @@ export async function* runToolAgent(
             "(or `/config` in this session) to pick a provider and save a key — same settings as " +
             "the dashboard's Settings → AI Provider panel, so it only needs to be set once.\n\n" +
             `You can also set ${envHint} in your environment.\n\n`;
-        return {
-            text: "",
-            toolCalls: [],
-            hitlActions: [],
-        };
+        throw authError("No API key configured for the selected provider.");
     }
 
     const toolCallsLog: Array<{ name: string; args: unknown; result: unknown }> = [];
     const hitlActions: HITLAction[] = [];
-    const respondMessages: string[] = [];
     let fullText = "";
 
     // Bridges live node activity (tool calls, phase progress, streamed test
@@ -722,15 +727,21 @@ export async function* runToolAgent(
             if (result?.hitlRequired && result.hitlAction) {
                 hitlActions.push(result.hitlAction);
             }
-            if (toolName === "respond" && result?.message) {
-                respondMessages.push(result.message);
-            }
             onToolResult?.(toolName, result);
             return result;
         };
 
         const resolved = resolveAIConfig(projectPath, config);
-        const model = createLangChainModel(resolved);
+        // Reasoning models (e.g. DeepSeek's default) must not draft at the
+        // raw configured maxTokens (default 4000) — that is below the
+        // empirical floor for a draft and reliably truncates the output.
+        // cover and ticket-analyzer already route through
+        // resolveTokenBudget; the interactive graph must too (review
+        // finding). createLangChainModel reads maxTokens off the config.
+        const model = createLangChainModel({
+            ...resolved,
+            maxTokens: resolveTokenBudget(resolved),
+        });
 
         const getMemoryContext = () => {
             try {
@@ -904,11 +915,8 @@ export async function* runToolAgent(
         }
 
         const finalState = await invokePromise;
-
-        for (const msg of respondMessages) {
-            yield `${msg}\n`;
-            fullText += `${msg}\n`;
-        }
+        if (signal?.aborted) throw cancelledError();
+        if (finalState.failure) throw externalError(finalState.failure);
 
         if (finalState.awaitUserMessage) {
             const userMessage = finalState.awaitUserMessage;
@@ -1058,12 +1066,11 @@ export async function* runToolAgent(
             ? "The agent hit its step limit without finishing (likely a navigation/interruption loop). Try a more specific instruction, or a concrete URL to test."
             : `Error: ${rawMsg}`;
         console.error("Tool agent error:", rawMsg);
-        yield `\n\n${errorMsg}`;
-
-        return {
-            text: `${fullText}\n\n${errorMsg}`,
-            toolCalls: toolCallsLog,
-            hitlActions,
-        };
+        // Callers render typed errors. Returning prose here used to turn failed
+        // generation, cancellation and provider failures into successful runs.
+        if (signal?.aborted) throw cancelledError();
+        throw isRecursion
+            ? externalError(errorMsg, { cause: error })
+            : normalizeToRaikenError(error);
     }
 }

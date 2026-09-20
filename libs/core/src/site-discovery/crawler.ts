@@ -85,6 +85,8 @@ export class SiteDiscovery extends EventEmitter {
             purgeQueueOnResume: options.purgeQueueOnResume ?? false,
             maxRunTimeMs: options.maxRunTimeMs ?? 30 * 60 * 1000,
             preserveQueryParams: options.preserveQueryParams ?? false,
+            settleQuietMs: options.settleQuietMs ?? 400,
+            settleMaxMs: options.settleMaxMs ?? 3000,
         };
 
         this.compiledExcludeMatchers = this.options.excludePatterns.map(compileExcludeMatcher);

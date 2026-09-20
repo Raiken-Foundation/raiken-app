@@ -45,7 +45,7 @@ export class IndexingApplication implements ProjectApplicationContext {
         useGitignore?: boolean;
         persist?: boolean;
     }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const detector = new EntryPointDetector(projectPath);
         const entryPoints = await detector.detectEntryPoints();
         const graph = new CodeGraph(projectPath, {
@@ -108,7 +108,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getGraphStats(input: { path?: string } = {}) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const stats = db.getStats();
         db.close();
@@ -132,7 +132,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getGraphFiles(input: { path?: string; limit?: number; offset?: number } = {}) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const limit = input.limit ?? 1000;
         const offset = input.offset ?? 0;
         const db = new CodeGraphDB(projectPath);
@@ -164,7 +164,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getFileDependencies(input: { path?: string; filePath: string }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const dependencies = db.getDependencies(path.join(projectPath, input.filePath));
         const dependents = db.getDependents(path.join(projectPath, input.filePath));
@@ -198,7 +198,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     async generateEmbeddings(input: { path?: string; forceRegenerate?: boolean } = {}) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const embGen = EmbeddingsGenerator.getInstance();
         let totalChunks = 0;
@@ -289,7 +289,7 @@ export class IndexingApplication implements ProjectApplicationContext {
         limit?: number;
         chunkTypes?: Array<"function" | "class" | "file" | "type">;
     }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const embGen = EmbeddingsGenerator.getInstance();
         try {
@@ -337,7 +337,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getEmbeddingsStats(input: { path?: string } = {}) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const totalEmbeddings = db.getEmbeddingsCount();
         const totalFiles = db.getStats()?.total_files || 0;
@@ -353,7 +353,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getAffectedTests(input: { changedFiles: string[]; path?: string }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const db = new CodeGraphDB(projectPath);
         const results = db.getAffectedTests(input.changedFiles);
         db.close();
@@ -361,12 +361,13 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     async reindexFiles(input: { files: string[]; path?: string }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
+        const files = input.files.map((file) => assertUnderProjectRoot(file, projectPath));
         const ctx = ProjectContext.getInstance(projectPath);
         if (!ctx.isInitialized()) {
             await ctx.initialize();
         }
-        await ctx.refresh(input.files);
+        await ctx.refresh(files);
         return {
             success: true,
             filesRefreshed: input.files.length,
@@ -375,7 +376,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     async syncTicket(input: { ticketId?: string; path?: string }) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const integrationConfig = loadIntegrationsConfig(projectPath);
         const resolved = resolveAIConfig(projectPath);
         return syncCurrentTicket({
@@ -387,7 +388,7 @@ export class IndexingApplication implements ProjectApplicationContext {
     }
 
     getTicketStatus(input: { path?: string } = {}) {
-        const projectPath = input.path || this.projectPath;
+        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
         const branch = getCurrentBranch(projectPath);
         if (!branch) {
             return { branch: null, ticket: null };

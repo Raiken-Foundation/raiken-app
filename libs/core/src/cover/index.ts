@@ -85,18 +85,23 @@ export {
 } from "./repair-capture";
 export {
     applyRepairSetupFixes,
+    changedAssertedValues,
     containsParentTraversal,
+    describeAssertionValueMismatch,
     describeDroppedScenarioExpectation,
     describeParentTraversal,
     describeReassertedAbsence,
     describeRegressedSelector,
     describeTimeoutFocus,
+    describeWeakenedAssertion,
     extractPendingLocators,
     extractProvenAbsentLocators,
     extractProvenPresentSelectors,
+    extractValueMismatch,
     missingScenarioExpectations,
     type ProvenSelector,
     type SetupFixResult,
     scenarioExpectedTokens,
     stillAssertsAbsentLocators,
+    type ValueMismatch,
 } from "./repair-setup";

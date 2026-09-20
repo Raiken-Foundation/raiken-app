@@ -581,13 +581,41 @@ export class BrowserSession {
             await this.context.close();
         }
 
-        this.context = await this.browser.newContext({
-            viewport: { width: this.options.viewportWidth, height: this.options.viewportHeight },
-            storageState: path,
-        });
+        // If the swap fails after the old context is closed, null out the
+        // stale references so isActive() is honest — a closed page still
+        // answers page.url(), which used to make the session look healthy
+        // while every action failed "Target closed" (review finding).
+        this.context = undefined;
+        this.page = undefined;
+        try {
+            this.context = await this.browser.newContext({
+                viewport: {
+                    width: this.options.viewportWidth,
+                    height: this.options.viewportHeight,
+                },
+                storageState: path,
+            });
 
-        this.page = await this.context.newPage();
-        this.page.setDefaultTimeout(this.options.timeout);
+            this.page = await this.context.newPage();
+            this.page.setDefaultTimeout(this.options.timeout);
+        } catch (error) {
+            // Best effort: restore a working (unauthenticated) context so
+            // callers get a clean "start signed out" failure instead of a
+            // zombie session; the original error is the useful one.
+            try {
+                this.context = await this.browser.newContext({
+                    viewport: {
+                        width: this.options.viewportWidth,
+                        height: this.options.viewportHeight,
+                    },
+                });
+                this.page = await this.context.newPage();
+                this.page.setDefaultTimeout(this.options.timeout);
+            } catch {
+                /* rethrow the original error below */
+            }
+            throw error;
+        }
     }
 
     async hasBlockingOverlay(): Promise<boolean> {

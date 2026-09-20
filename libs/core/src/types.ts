@@ -62,6 +62,11 @@ export interface ParsedFile {
      * Optional because the field post-dates persisted indexes.
      */
     templateSelectors?: TemplateSelector[];
+    /**
+     * Client-side route paths found in this file (React Router `<Route path>`,
+     * string literals only). Optional because the field post-dates persisted indexes.
+     */
+    routes?: string[];
 }
 
 export interface ParsedFileWithAst {

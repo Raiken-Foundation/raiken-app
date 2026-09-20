@@ -118,7 +118,9 @@ export class LocatorResolver {
     ): Promise<void> {
         const list = Array.isArray(selectors) ? selectors : [selectors];
         const element = list[0] || "unknown";
-        console.log(
+        // stderr, not stdout: this is a diagnostic, and `--json` modes promise
+        // that stdout is machine-clean JSON and nothing else.
+        console.error(
             `  ${action}: ${element}${list.length > 1 ? ` (+${list.length - 1} alternatives)` : ""}`,
         );
         const scopes = this.scopes();

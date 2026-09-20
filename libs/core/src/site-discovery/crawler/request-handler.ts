@@ -53,6 +53,31 @@ export type CrawlPageProcessorDeps = {
     recordFailure: (url: string, reason: string, status: number | null) => void;
 };
 
+/**
+ * Wait until the DOM stops changing for `quietMs`, bounded by `maxMs`.
+ * `networkidle` only observes network; this probes the live DOM so timer-driven
+ * loading (skeleton states, debounced search, mock data) settles before
+ * capture. Returns early once the page is static — no fixed delay for pages
+ * that render immediately.
+ */
+async function waitForDomQuiet(page: Page, quietMs: number, maxMs: number): Promise<void> {
+    const deadline = Date.now() + maxMs;
+    let lastSize = -1;
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+        const size = await page
+            .evaluate(() => document.body?.innerHTML.length ?? -1)
+            .catch(() => -1);
+        if (size !== lastSize) {
+            lastSize = size;
+            stableSince = Date.now();
+        } else if (Date.now() - stableSince >= quietMs) {
+            return;
+        }
+        await page.waitForTimeout(100);
+    }
+}
+
 export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
     return async function handleRequest(context: PlaywrightCrawlingContext): Promise<void> {
         const { page, request, response } = context;
@@ -116,6 +141,13 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                 await page.waitForLoadState("networkidle", { timeout: settleTimeout });
             } catch {
                 // Page may have constant background activity; proceed anyway.
+            }
+
+            // `networkidle` only observes network. A DOM-quiet probe also waits
+            // for timer-driven loading (skeleton states, debounced search, mock
+            // data) by polling until the DOM stops changing, bounded by a cap.
+            if (deps.options.settleQuietMs > 0) {
+                await waitForDomQuiet(page, deps.options.settleQuietMs, deps.options.settleMaxMs);
             }
 
             if (deps.skippedUrls.has(normalizedUrl) || deps.skippedUrls.has(url)) {

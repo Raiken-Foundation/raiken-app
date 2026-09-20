@@ -114,6 +114,27 @@ describe("locator-resolver golden parity", () => {
         warnSpy.mockRestore();
     }, 15000);
 
+    it("logs actions to stderr, not stdout (keeps --json stdout clean)", async () => {
+        const resolver = new LocatorResolver({
+            getPage: () => page,
+            getDefaultTimeout: () => 5000,
+            selectorMemory: null,
+        });
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+        const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+        await resolver.runWithSelectors("click", ["getByTestId('go-btn')"], (loc) =>
+            loc.click({ timeout: 3000 }),
+        );
+
+        expect(logSpy).not.toHaveBeenCalled();
+        expect(errorSpy).toHaveBeenCalledWith(
+            expect.stringContaining("click: getByTestId('go-btn')"),
+        );
+        logSpy.mockRestore();
+        errorSpy.mockRestore();
+    }, 15000);
+
     it("finds elements inside child frames after main-frame miss", async () => {
         const resolver = new LocatorResolver({
             getPage: () => page,

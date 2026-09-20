@@ -205,6 +205,16 @@ export class CodeGraphRepository {
                         totalClasses += node.parsed.classes.length;
                         totalTypes += node.parsed.types.length;
                     } catch (fileError) {
+                        // A transient lock is NOT a per-file defect: in scan
+                        // mode clearProject() already wiped the old graph, so
+                        // swallowing SQLITE_BUSY here commits a partial/empty
+                        // graph with misleading skip reasons. Rethrow so
+                        // runWithRetry can retry the whole transaction
+                        // (review finding).
+                        const code = (fileError as { code?: string })?.code;
+                        if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") {
+                            throw fileError;
+                        }
                         const reason =
                             fileError instanceof Error ? fileError.message : String(fileError);
                         skippedFiles.push({ path: node.relativePath, reason });
@@ -369,6 +379,12 @@ export class CodeGraphRepository {
 
                 this.adapter.db
                     .prepare(`DELETE FROM files WHERE project_path = ? AND file_path = ?`)
+                    .run(this.adapter.projectPath, filePath);
+                // Keyword rows must follow the file or search keeps returning
+                // paths to deleted files — the exact failure clearProject
+                // guards against with its own comment (review finding).
+                this.adapter.db
+                    .prepare(`DELETE FROM keyword_index WHERE project_path = ? AND file_path = ?`)
                     .run(this.adapter.projectPath, filePath);
                 this.adapter.db
                     .prepare(
@@ -563,20 +579,6 @@ export class CodeGraphRepository {
     }
 
     /**
-     * ✅ Stream files for large datasets (memory efficient)
-     */
-    *streamFiles(): Generator<DBFileNode> {
-        const stmt = this.adapter.db.prepare(`
-    SELECT * FROM files WHERE project_path = ?
-    ORDER BY relative_path
-  `);
-
-        for (const row of stmt.iterate(this.adapter.projectPath)) {
-            yield row as DBFileNode;
-        }
-    }
-
-    /**
      * Get a single file by path.
      */
     getFile(filePath: string): DBFileNode | null {
@@ -709,36 +711,6 @@ export class CodeGraphRepository {
 
             transaction();
         });
-    }
-
-    /**
-     * Files re-indexed since `sinceTimestamp`, with the hash recorded at that
-     * point. Re-indexing bumps `last_indexed` whether or not the bytes changed,
-     * so compare `contentHash` against the current file to detect a real edit.
-     */
-    getChangedFilesSince(sinceTimestamp: number): Array<{
-        path: string;
-        lastIndexed: number;
-        contentHash: string;
-    }> {
-        const rows = this.adapter.db
-            .prepare(`
-    SELECT relative_path, last_indexed, content_hash
-    FROM files 
-    WHERE project_path = ? AND last_indexed > ?
-    ORDER BY last_indexed DESC
-  `)
-            .all(this.adapter.projectPath, sinceTimestamp) as Array<{
-            relative_path: string;
-            last_indexed: number;
-            content_hash: string;
-        }>;
-
-        return rows.map((row) => ({
-            path: row.relative_path,
-            lastIndexed: row.last_indexed,
-            contentHash: row.content_hash,
-        }));
     }
 
     /**

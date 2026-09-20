@@ -33,7 +33,18 @@ export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResul
     const { projectPath, config, ai } = options;
     const branchName = getCurrentBranch(projectPath) || "unknown";
 
-    const provider = createProvider(config, projectPath);
+    // Parse the branch FIRST: when the user hasn't pinned a provider, the
+    // detected ticket ID's shape (ENG-123 vs #123) says which provider to
+    // use. The old code always defaulted to GitHub, so a Jira/Linear shop
+    // got "Invalid GitHub ticket ID" and cascaded into the broken PR
+    // fallback (review finding).
+    const parsedFromBranch = parseTicketFromBranch(branchName, config);
+    const provider = createProvider(
+        parsedFromBranch && !config?.provider
+            ? { ...config, provider: parsedFromBranch.provider }
+            : config,
+        projectPath,
+    );
     if (!provider) {
         return {
             ticket: null,
@@ -61,22 +72,24 @@ export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResul
         }
     } else {
         // Try branch name first
-        const parsed = parseTicketFromBranch(branchName, config);
-        if (parsed) {
+        if (parsedFromBranch) {
             source = "branch";
             try {
-                ticket = await provider.getTicket(parsed.ticketId);
+                ticket = await provider.getTicket(parsedFromBranch.ticketId);
             } catch (err) {
                 console.warn(
-                    `Branch "${branchName}" suggests ticket ${parsed.ticketId}, but fetch failed:`,
+                    `Branch "${branchName}" suggests ticket ${parsedFromBranch.ticketId}, but fetch failed:`,
                     err instanceof Error ? err.message : err,
                 );
             }
         }
 
-        // Fallback: check if current branch has an open PR with linked issues
+        // Fallback: an open PR whose HEAD matches the current branch.
         if (!ticket && provider.name === "github") {
-            const prTicket = await tryFindPRForBranch(provider as GitHubProvider);
+            const prTicket = await tryFindPRForBranch(
+                provider as GitHubProvider,
+                branchName,
+            );
             if (prTicket) {
                 ticket = prTicket;
                 source = "pr";
@@ -179,20 +192,22 @@ function createProvider(
 // PR Fallback
 // =========================================================================
 
-async function tryFindPRForBranch(provider: GitHubProvider): Promise<TicketInfo | null> {
+async function tryFindPRForBranch(
+    provider: GitHubProvider,
+    branchName: string,
+): Promise<TicketInfo | null> {
+    // Match the PR to the branch via GitHub's head filter — the ONLY correct
+    // attribution. The old fallback returned the first assigned ticket with
+    // changed files (else myTickets[0]), attributing an arbitrary unrelated
+    // ticket to this branch and persisting wrong impact analysis (review
+    // finding). No match → null, clearly.
     try {
-        const myTickets = await provider.getMyTickets();
-        // Best-effort only: GitHub issues/PRs returned by getMyTickets() carry no
-        // head-branch info, so we can't actually match against the current branch
-        // name. Fall back to the caller's own open items, preferring one with
-        // changed files (i.e. a PR, not a plain issue).
-        for (const t of myTickets) {
-            if (t.changedFiles && t.changedFiles.length > 0) {
-                return t;
-            }
-        }
-        return myTickets.length > 0 ? myTickets[0] : null;
-    } catch {
+        return await provider.findPRForBranch(branchName);
+    } catch (err) {
+        console.warn(
+            `PR lookup for branch "${branchName}" failed:`,
+            err instanceof Error ? err.message : err,
+        );
         return null;
     }
 }

@@ -18,6 +18,8 @@ import { repairLoopService } from "../testing/repair-loop-service";
 import { parsedRunToTestRunResults } from "../testing/run-outcome";
 import { testExecutionService } from "../testing/test-execution-service";
 import { type HitlWorkflowRecord, WorkflowStore } from "./workflow-store";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export type ContinueHitlWorkflowInput =
     | {
@@ -237,11 +239,14 @@ export async function advanceHitlWorkflow(
                 projectPath: input.projectPath,
             });
             const store = new WorkflowStore(input.projectPath);
-            const workflow = await store.load(input.workflowId);
-            if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
-            if (workflow.status !== "repairing") return workflow;
+            const initial = await store.load(input.workflowId);
+            if (!initial) throw new Error("The requested HITL workflow no longer exists.");
+            // Validate status under the lease against the CURRENT record, not
+            // a pre-lease snapshot (review finding: same race as decisions).
             const lease = await acquireProjectOperation(input.projectPath, "test");
             try {
+                const workflow = (await store.load(input.workflowId)) ?? initial;
+                if (workflow.status !== "repairing") return workflow;
                 return await driveRepairLoop(
                     store,
                     workflow,
@@ -268,26 +273,33 @@ export async function continueHitlWorkflow(
                 projectPath: input.projectPath,
             });
             const store = new WorkflowStore(input.projectPath);
-            const workflow = await store.load(input.workflowId);
-            if (!workflow) throw new Error("The requested HITL workflow no longer exists.");
+            const initial = await store.load(input.workflowId);
+            if (!initial) throw new Error("The requested HITL workflow no longer exists.");
 
-            if (input.action === "save") {
-                if (workflow.status !== "await_save_approval") {
-                    throw new Error("This workflow is not awaiting a save decision.");
-                }
-                if (input.decision === "reject") {
-                    const cancelled = await store.update(workflow.id, {
-                        status: "cancelled",
-                        pendingAction: undefined,
-                    });
-                    return { workflow: cancelled ?? workflow };
-                }
+            // Every decision — approve or reject — mutates durable state, so
+            // all of them hold the project-operation lease and re-validate
+            // against the CURRENT record under it. The old pre-lease status
+            // check let a concurrent approve+reject resurrect a cancelled
+            // workflow, and rejects took no lease at all (review finding).
+            const lease = await acquireProjectOperation(input.projectPath, "test");
+            try {
+                const workflow = (await store.load(input.workflowId)) ?? initial;
+                if (input.action === "save") {
+                    if (workflow.status !== "await_save_approval") {
+                        throw new Error("This workflow is not awaiting a save decision.");
+                    }
+                    if (input.decision === "reject") {
+                        const cancelled = await store.update(
+                            workflow.id,
+                            { status: "cancelled", pendingAction: undefined },
+                            { expectedUpdatedAt: workflow.updatedAt },
+                        );
+                        return { workflow: cancelled ?? workflow };
+                    }
 
-                const filePath = input.filePath?.trim() || workflow.savedTestPath;
-                if (!filePath || !workflow.testDraft)
-                    throw new Error("The saved test draft is unavailable.");
-                const lease = await acquireProjectOperation(input.projectPath, "test");
-                try {
+                    const filePath = input.filePath?.trim() || workflow.savedTestPath;
+                    if (!filePath || !workflow.testDraft)
+                        throw new Error("The saved test draft is unavailable.");
                     const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
                     const saved = await writeTestFile(
                         input.projectPath,
@@ -298,37 +310,52 @@ export async function continueHitlWorkflow(
                         { avoidOverwrite: input.avoidOverwrite },
                     );
                     if (!saved.success) {
-                        const failed = await store.update(workflow.id, {
-                            status: "failed",
-                            pendingAction: undefined,
-                        });
+                        const failed = await store.update(
+                            workflow.id,
+                            { status: "failed", pendingAction: undefined },
+                            { expectedUpdatedAt: workflow.updatedAt },
+                        );
                         return { workflow: failed ?? workflow };
                     }
-                    const updated = await store.update(workflow.id, {
-                        savedTestPath: filePath,
-                        status: workflow.shouldRunTests ? "await_run_approval" : "completed",
-                        pendingAction: workflow.shouldRunTests ? "run" : undefined,
-                    });
+                    const updated = await store.update(
+                        workflow.id,
+                        {
+                            savedTestPath: filePath,
+                            status: workflow.shouldRunTests ? "await_run_approval" : "completed",
+                            pendingAction: workflow.shouldRunTests ? "run" : undefined,
+                        },
+                        { expectedUpdatedAt: workflow.updatedAt },
+                    );
                     return { workflow: updated ?? workflow, savedPath: filePath };
-                } finally {
-                    await lease.release();
                 }
-            }
 
-            if (workflow.status !== "await_run_approval") {
-                throw new Error("This workflow is not awaiting a run decision.");
-            }
-            if (input.decision === "reject") {
-                const cancelled = await store.update(workflow.id, {
-                    status: "cancelled",
-                    pendingAction: undefined,
-                });
-                return { workflow: cancelled ?? workflow };
-            }
-            if (!workflow.savedTestPath) throw new Error("The saved test path is unavailable.");
+                if (workflow.status !== "await_run_approval") {
+                    throw new Error("This workflow is not awaiting a run decision.");
+                }
+                if (input.decision === "reject") {
+                    const cancelled = await store.update(
+                        workflow.id,
+                        { status: "cancelled", pendingAction: undefined },
+                        { expectedUpdatedAt: workflow.updatedAt },
+                    );
+                    return { workflow: cancelled ?? workflow };
+                }
+                if (!workflow.savedTestPath) throw new Error("The saved test path is unavailable.");
+                // A stale approval for a file deleted after the pause must
+                // fail loudly, not "complete" an empty run (review finding).
+                if (!fs.existsSync(path.join(input.projectPath, workflow.savedTestPath))) {
+                    const failed = await store.update(
+                        workflow.id,
+                        {
+                            status: "failed",
+                            pendingAction: undefined,
+                            statusMessage: `The saved test file "${workflow.savedTestPath}" no longer exists — regenerate or restore it, then start a new run.`,
+                        },
+                        { expectedUpdatedAt: workflow.updatedAt },
+                    );
+                    return { workflow: failed ?? workflow };
+                }
 
-            const lease = await acquireProjectOperation(input.projectPath, "test");
-            try {
                 const autonomy = resolveWorkflowAutonomy(input.projectPath, workflow);
                 const run = dependencies.executeRun
                     ? await dependencies.executeRun(
@@ -341,20 +368,42 @@ export async function continueHitlWorkflow(
                       )
                     : await executeApprovedUserRun(input.projectPath, workflow.savedTestPath);
                 const results = run.results ?? [];
+                if (results.length === 0) {
+                    // "No tests executed" is inconclusive, never completed —
+                    // nextStatus([]) used to report a green completion for a
+                    // run that never ran (review finding). The generic
+                    // run.message ("Test failed") would mislabel this.
+                    const failed = await store.update(
+                        workflow.id,
+                        {
+                            status: "failed",
+                            pendingAction: undefined,
+                            runSummary: { passed: false, failureCount: 0 },
+                            statusMessage: `The run executed no tests — treat the outcome as inconclusive. (${run.message ?? "no diagnostics"})`,
+                        },
+                        { expectedUpdatedAt: workflow.updatedAt },
+                    );
+                    return { workflow: failed ?? workflow, run };
+                }
                 const next = repairLoopService.nextStatus(
                     { testRunResult: results, repairAttempts: workflow.repairAttempts },
                     autonomy,
                 );
-                const updated = await store.update(workflow.id, {
-                    status: next,
-                    pendingAction: undefined,
-                    runSummary: {
-                        passed: run.success,
-                        failureCount: results.filter((result) => result.status !== "passed").length,
+                const updated = await store.update(
+                    workflow.id,
+                    {
+                        status: next,
+                        pendingAction: undefined,
+                        runSummary: {
+                            passed: run.success,
+                            failureCount: results.filter((result) => result.status !== "passed")
+                                .length,
+                        },
+                        lastRunResults: results,
+                        statusMessage: run.message,
                     },
-                    lastRunResults: results,
-                    statusMessage: run.message,
-                });
+                    { expectedUpdatedAt: workflow.updatedAt },
+                );
                 const nextWorkflow =
                     updated?.status === "repairing"
                         ? await driveRepairLoop(

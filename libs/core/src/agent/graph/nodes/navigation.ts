@@ -120,7 +120,14 @@ async function checkForInterruption(
 export const createNavigateNode =
     ({ callTool, projectPath, onProgress }: AgentNodeDeps) =>
     async (state: GraphStateType) => {
-        const historyText = state.conversationHistory.map((msg) => msg.content).join("\n");
+        // The CURRENT prompt wins: in a multi-turn chat that mentioned two
+        // URLs, a stale URL from an old message must not beat the URL the
+        // user just typed (review finding). History is only a fallback,
+        // bounded to recent turns so ancient URLs cannot resurface.
+        const historyText = state.conversationHistory
+            .slice(-6)
+            .map((msg) => msg.content)
+            .join("\n");
 
         let rememberedUrl: string | null = null;
         try {
@@ -162,7 +169,8 @@ export const createNavigateNode =
             /* no playwright config */
         }
 
-        const extractedUrl = extractUrlFromText(`${historyText}\n${state.userPrompt}`);
+        const extractedUrl =
+            extractUrlFromText(state.userPrompt) ?? extractUrlFromText(historyText);
         const explicitTarget = !!(state.targetUrl || extractedUrl);
         let url = state.targetUrl || extractedUrl || rememberedUrl || appOrigin || configBaseURL;
 
@@ -348,7 +356,7 @@ function scoreLinkRelevance(
     return score;
 }
 
-function sortLinksByRelevance(
+export function sortLinksByRelevance(
     links: Array<{ text: string; href: string }>,
     goal: string | null,
     feature: string | null,

@@ -197,27 +197,9 @@ export class SiteKnowledgeDB {
     }
 
     /**
-     * Update page visit information.
-     */
-    updatePageVisit(url: string): void {
-        const normalizedUrl = this.normalizeUrl(url);
-        this.db
-            .prepare(
-                `
-            UPDATE discovered_pages
-            SET last_visited_at = ?, visit_count = visit_count + 1
-            WHERE project_path = ? AND normalized_url = ?
-        `,
-            )
-            .run(Date.now(), this.projectPath, normalizedUrl);
-    }
-
-    /**
      * Refresh a re-visited page's captured content (title/snapshot/forms)
      * alongside its visit metadata. Without this, a page crawled again after
-     * e.g. an auth handoff keeps its pre-login DOM forever — `updatePageVisit`
-     * alone only bumps `last_visited_at`/`visit_count` and never touches the
-     * captured content columns.
+     * e.g. an auth handoff keeps its pre-login DOM forever.
      */
     updatePageContent(
         url: string,
@@ -330,6 +312,9 @@ export class SiteKnowledgeDB {
 
     /**
      * Get all links from a specific page.
+     *
+     * @internal Test-only surface: the link-verification contract specs
+     * assert link statuses through this query. No production caller.
      */
     getLinksFrom(url: string): DiscoveredLink[] {
         const rows = this.db

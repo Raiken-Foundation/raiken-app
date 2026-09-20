@@ -41,6 +41,15 @@ describe("buildAiConfigPatch", () => {
     it("returns an empty patch when no relevant flags are set", () => {
         expect(buildAiConfigPatch({})).toEqual({ patch: {} });
     });
+
+    it("unset with an explicit provider clears the legacy key AND the provider map entry", () => {
+        // Review finding: the old builder only cleared ai.apiKey, leaving the
+        // modern ai.apiKeys.<provider> entry live after a reported unset.
+        const unset = buildAiConfigPatch({ provider: "openai", unsetKey: true });
+        expect("error" in unset).toBe(false);
+        if ("error" in unset) return;
+        expect(unset.clearSecrets).toEqual(["ai.apiKey", "ai.apiKeys.openai"]);
+    });
 });
 
 describe("config patch contract", () => {

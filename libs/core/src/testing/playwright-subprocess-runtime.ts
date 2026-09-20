@@ -24,7 +24,7 @@ export function createPlaywrightSubprocessRuntime(
             // Without a shell on Windows, Node requires the `.cmd` shim for `npx`.
             if (isWin && !shell) return "npx.cmd";
             // With `shell: true`, `npx` resolves via cmd.exe on Windows and sh on POSIX.
-            return isWin ? "npx" : "npx";
+            return "npx";
         },
         spawnDetached: !isWin,
     };
@@ -67,11 +67,8 @@ export function customLoginPlaywrightSpawnOptions(base: {
     timeoutGraceMs?: number;
     runtime?: PlaywrightSubprocessRuntime;
 }) {
-    const runtime = base.runtime ?? defaultPlaywrightSubprocessRuntime();
-    return {
-        ...base,
-        runtime,
-        shell: false as const,
-        command: runtime.resolveCommand({ shell: false }),
-    };
+    // Identical to the runner options — one implementation, two names
+    // (review finding: the bodies were byte-identical copies that would
+    // drift).
+    return runnerPlaywrightSpawnOptions(base);
 }

@@ -25,21 +25,3 @@ export async function getVisibleText(page: Page): Promise<string> {
         return "";
     }
 }
-
-/**
- * True if a locator resolves to at least one element that is actually
- * visible. Swallows errors (detached elements, cross-origin iframes,
- * mid-navigation frames) and reports `false` rather than throwing, since a
- * detector abstaining is always safer than one that crashes the pipeline.
- */
-export async function isVisible(locator: {
-    count: () => Promise<number>;
-    first: () => { isVisible: () => Promise<boolean> };
-}): Promise<boolean> {
-    try {
-        if ((await locator.count()) === 0) return false;
-        return await locator.first().isVisible();
-    } catch {
-        return false;
-    }
-}

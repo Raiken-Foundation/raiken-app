@@ -51,11 +51,11 @@ export type HealthCheckStatus =
     | "malformed";
 
 export interface HealthChecks {
-    config: "ok" | "invalid" | "missing";
-    database: "ok" | "unavailable" | "missing";
-    ai: "ok" | "degraded" | "unavailable";
-    operation: "idle" | "busy";
-    auth: "ok" | "degraded" | "unavailable" | "not_configured";
+    config: Extract<HealthCheckStatus, "ok" | "invalid" | "missing">;
+    database: Extract<HealthCheckStatus, "ok" | "unavailable" | "missing">;
+    ai: Extract<HealthCheckStatus, "ok" | "degraded" | "unavailable">;
+    operation: Extract<HealthCheckStatus, "idle" | "busy">;
+    auth: Extract<HealthCheckStatus, "ok" | "degraded" | "unavailable" | "not_configured">;
 }
 
 /** Health contract — preserves legacy fields and adds readiness probes. */

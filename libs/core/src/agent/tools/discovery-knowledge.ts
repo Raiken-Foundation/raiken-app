@@ -5,6 +5,7 @@ import { formatDOMContext } from "../../browser/dom-capture";
 import { acquireProjectOperation } from "../../operations";
 import { DiscoveryQueryService } from "../../site-discovery/query-service";
 import { ensureBrowserStarted, getBoundBrowserSession } from "./shared/browser-session";
+import { assertHttpUrl } from "./shared/url-guard";
 import type { AgentToolGroupDeps, ToolResult } from "./types";
 
 /** Tool names owned by the discovery / knowledge group. */
@@ -39,6 +40,7 @@ export function createDiscoveryKnowledgeTools(deps: AgentToolGroupDeps) {
             > => {
                 const { url } = params as { url: string };
                 try {
+                    assertHttpUrl(url);
                     const session = getBoundBrowserSession(projectPath);
                     await ensureBrowserStarted(session, projectPath, getAuthPrecondition, true);
 
@@ -328,6 +330,7 @@ export function createDiscoveryKnowledgeTools(deps: AgentToolGroupDeps) {
                     excludePatterns?: string[];
                 };
                 try {
+                    assertHttpUrl(input.url, "start URL");
                     const result = await getProjectApplication(projectPath).discovery.start(input);
                     return {
                         success: result.success,

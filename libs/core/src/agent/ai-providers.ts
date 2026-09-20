@@ -48,6 +48,13 @@ export interface ProviderDefinition {
     description: string;
     /** Default base URL for this provider's REST API. */
     defaultBaseURL: string;
+    /**
+     * Base URL for the model-listing endpoint when it differs from
+     * `defaultBaseURL`. DeepSeek serves chat at `/v1` but lists models at the
+     * root (`https://api.deepseek.com/models`), so `${defaultBaseURL}/models`
+     * would be wrong. Defaults to `defaultBaseURL`.
+     */
+    modelsBaseURL?: string;
     /** Default model identifier when none is specified. */
     defaultModel: string;
     /** Environment variables checked for an API key (in order). */
@@ -262,22 +269,23 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
         label: "DeepSeek",
         description: "DeepSeek chat and reasoning models.",
         defaultBaseURL: "https://api.deepseek.com/v1",
-        defaultModel: "deepseek-chat",
+        modelsBaseURL: "https://api.deepseek.com",
+        defaultModel: "deepseek-v4-flash",
         envVars: ["DEEPSEEK_API_KEY"],
         publicCatalog: false,
         apiKeyUrl: "https://platform.deepseek.com/api_keys",
         apiKeyPlaceholder: "sk-…",
         recommendedModels: [
             {
-                id: "deepseek-chat",
-                name: "DeepSeek Chat",
-                description: "Default DeepSeek chat model",
+                id: "deepseek-v4-flash",
+                name: "DeepSeek V4 Flash",
+                description: "Fast V4 reasoning model",
                 source: "recommended",
-                capabilities: { vision: false, structuredOutput: false },
+                capabilities: { vision: false, structuredOutput: false, reasoning: true },
             },
             {
-                id: "deepseek-reasoner",
-                name: "DeepSeek Reasoner",
+                id: "deepseek-v4-pro",
+                name: "DeepSeek V4 Pro",
                 description: "Reasoning model for harder planning/debugging",
                 source: "recommended",
                 capabilities: { vision: false, structuredOutput: false, reasoning: true },
@@ -611,24 +619,27 @@ export async function listProviderModels(
     const provider = getProvider(args.provider);
     const baseURL = args.baseURL?.trim() || provider.defaultBaseURL;
     const apiKey = args.apiKey?.trim() || readApiKeyFromEnv(provider.id);
+    // Some providers list models at a different base than their chat base
+    // (DeepSeek: chat at /v1, models at the root).
+    const modelsBaseURL = provider.modelsBaseURL ?? baseURL;
 
     try {
         let result: { models: ModelInfo[]; error?: string };
         switch (provider.id) {
             case "openrouter":
-                result = await fetchOpenRouterModels(baseURL);
+                result = await fetchOpenRouterModels(modelsBaseURL);
                 break;
             case "anthropic":
-                result = await fetchAnthropicModels(baseURL, apiKey);
+                result = await fetchAnthropicModels(modelsBaseURL, apiKey);
                 break;
             case "google":
-                result = await fetchGoogleModels(baseURL, apiKey);
+                result = await fetchGoogleModels(modelsBaseURL, apiKey);
                 break;
             case "ollama":
-                result = await fetchOllamaModels(baseURL);
+                result = await fetchOllamaModels(modelsBaseURL);
                 break;
             default:
-                result = await fetchOpenAICompatibleModels(baseURL, apiKey);
+                result = await fetchOpenAICompatibleModels(modelsBaseURL, apiKey);
         }
         return mergeRecommendedModels(provider, result);
     } catch (err) {
@@ -879,11 +890,19 @@ export const REASONING_REQUEST_TIMEOUT_MS = 2 * LLM_REQUEST_TIMEOUT_MS;
 export const TOKEN_BUDGET_FLOOR = 2000;
 
 /**
- * Reasoning models spend output tokens on chain-of-thought before the answer
- * (e.g. ~1700 tokens of thinking plus ~1300 tokens of content for one draft);
- * give them twice the standard floor so the answer itself fits.
+ * Reasoning models spend output tokens on chain-of-thought before the answer;
+ * a selector-heavy draft can burn 4000+ tokens of reasoning alone, so the floor
+ * must be high enough that the answer fits after the thinking. Empirically 8000
+ * is the minimum for a cover-sized draft (see deepseek-v4-flash).
  */
-export const REASONING_TOKEN_BUDGET_FLOOR = 4000;
+export const REASONING_TOKEN_BUDGET_FLOOR = 8000;
+
+/**
+ * Hard cost ceiling for the escalation loop in {@link callWithTokenBudget}.
+ * Reasoning models that keep exhausting their budget get room up to this cap;
+ * beyond it we surface an error rather than billing an unbounded chain of thought.
+ */
+export const MAX_TOKEN_BUDGET = 32_000;
 
 /** Per-request timeout for a provider/model pair; reasoning models get more. */
 export function requestTimeoutMs(ai: Pick<ResolvedAIConfig, "provider" | "model">): number {
@@ -1028,16 +1047,21 @@ export async function callWithTokenBudget<T>(options: {
     const build = () => createLangChainModel({ ...options.ai, temperature, maxTokens });
 
     let result = await options.invoke(build(), timeoutMs);
-    if (isExhausted(result)) {
-        maxTokens *= 2;
+    // Escalate only on the empty-length signature: the model was cut off at its
+    // output-token cap mid-reasoning, so give it more room rather than calling
+    // it a failure. Doubles the budget each retry up to a hard cost ceiling.
+    // Non-reasoning models never emit the signature, so they still make exactly
+    // one call — the escalation is free for them.
+    while (isExhausted(result) && maxTokens < MAX_TOKEN_BUDGET) {
+        maxTokens = Math.min(maxTokens * 2, MAX_TOKEN_BUDGET);
         result = await options.invoke(build(), timeoutMs);
-        if (isExhausted(result)) {
-            throw new Error(
-                `Model "${options.ai.model}" exhausted its reasoning budget: even after ` +
-                    `retrying at 2× output tokens (${maxTokens}) it returned nothing usable. ` +
-                    "Raise ai.maxTokens in raiken.config.json for reasoning-heavy drafts.",
-            );
-        }
+    }
+    if (isExhausted(result)) {
+        throw new Error(
+            `Model "${options.ai.model}" exhausted its reasoning budget: even at ` +
+                `${maxTokens} output tokens it returned nothing usable. Raise ` +
+                "ai.maxTokens in raiken.config.json for reasoning-heavy drafts.",
+        );
     }
     return result;
 }

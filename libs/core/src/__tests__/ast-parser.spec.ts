@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-    astToSearchableText,
-    chunkToSearchableText,
-    generateCodeChunks,
-    parseSourceFile,
-} from "../analysis/ast-parser";
+import { fullAstToSearchableText, parseSourceFile } from "../analysis/ast-parser";
 
 describe("AST Parser", () => {
     describe("Function Extraction", () => {
@@ -240,22 +235,62 @@ describe("AST Parser", () => {
             expect(ast.exports[0]).toContain("default"); // Now includes function name: 'default (main)'
         });
 
-        it("should extract re-exports", () => {
+        it("should extract re-exports and their dependency source", () => {
             const code = `
         export { foo, bar } from './module';
       `;
             const { parsed: ast } = parseSourceFile(code, "test.ts");
 
-            expect(ast.exports.length).toBeGreaterThan(0);
+            expect(ast.exports).toEqual(expect.arrayContaining(["foo", "bar"]));
+            // The re-export is a dependency edge — the source must be
+            // recorded so the code graph links this file to './module'
+            // (review finding: the source used to be discarded).
+            expect(ast.imports).toEqual([
+                expect.objectContaining({ source: "./module", namedImports: ["foo", "bar"] }),
+            ]);
         });
 
-        it("should extract export all", () => {
+        it("should extract export all as a dependency edge", () => {
             const code = `
         export * from './module';
       `;
             const { parsed: ast } = parseSourceFile(code, "test.ts");
 
-            expect(ast.exports.length).toBeGreaterThanOrEqual(0);
+            // Export-all carries no local export names, but the barrel
+            // dependency must exist (review finding: no visitor at all).
+            expect(ast.imports).toEqual([
+                expect.objectContaining({ source: "./module" }),
+            ]);
+        });
+
+        it("records dynamic imports and CJS requires as dependencies", () => {
+            const code = `
+        async function load() {
+            const mod = await import('./lazy');
+            const other = require('./legacy');
+            return [mod, other];
+        }
+      `;
+            const { parsed: ast } = parseSourceFile(code, "test.cjs.ts");
+
+            const sources = ast.imports.map((imp) => imp.source);
+            expect(sources).toEqual(expect.arrayContaining(["./lazy", "./legacy"]));
+        });
+
+        it("marks inline type-only imports as type-only", () => {
+            const code = `import { type Foo, type Bar } from './types';\nexport const x = 1;\n`;
+            const { parsed: ast } = parseSourceFile(code, "test.ts");
+
+            expect(ast.imports[0]?.isTypeOnly).toBe(true);
+        });
+
+        it("records default-valued parameters by their bound name", () => {
+            const code = `function f(a = 1, ...rest) { return [a, rest]; }\n`;
+            const { parsed: ast } = parseSourceFile(code, "test.ts");
+
+            // Review finding: default params used to render as the literal
+            // string "param", corrupting every downstream signature.
+            expect(ast.functions[0]?.params).toEqual(["a", "...rest"]);
         });
     });
 
@@ -429,151 +464,6 @@ describe("AST Parser", () => {
         });
     });
 
-    describe("AST to Searchable Text", () => {
-        it("should convert parsed AST to searchable text format", () => {
-            const code = `
-        export function sum(a: number, b: number) {
-          return a + b;
-        }
-        
-        export class Calculator {
-          multiply(x: number, y: number) {
-            return x * y;
-          }
-        }
-        
-        export type Result = number;
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const searchableText = astToSearchableText(ast, "src/math.ts");
-
-            expect(searchableText).toContain("File: src/math.ts");
-            expect(searchableText).toContain("function sum(a, b)");
-            expect(searchableText).toContain("class Calculator");
-            expect(searchableText).toContain("method Calculator.multiply()"); // Updated to match refactored output
-            expect(searchableText).toContain("type Result");
-        });
-
-        it("should include async modifier for async functions", () => {
-            const code = `
-        export async function fetchData(url: string) {
-          return await fetch(url);
-        }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const searchableText = astToSearchableText(ast, "src/api.ts");
-
-            expect(searchableText).toContain("async function fetchData(url)");
-        });
-
-        it("should format class methods properly", () => {
-            const code = `
-        export class Service {
-          async getData() {}
-          processData(data: any) {}
-        }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const searchableText = astToSearchableText(ast, "src/service.ts");
-
-            expect(searchableText).toContain("class Service");
-            expect(searchableText).toContain("method Service.getData()"); // Updated to match refactored output
-            expect(searchableText).toContain("method Service.processData()"); // Updated to match refactored output
-        });
-    });
-
-    describe("Code Chunk Generation", () => {
-        it("should generate chunks for functions", () => {
-            const code = `
-        export function sum(a: number, b: number) { return a + b; }
-        async function fetch() { return data; }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/math.ts");
-
-            expect(chunks).toHaveLength(2);
-            expect(chunks[0].type).toBe("function");
-            expect(chunks[0].name).toBe("sum");
-            expect(chunks[0].isAsync).toBe(false);
-            expect(chunks[1].isAsync).toBe(true);
-        });
-
-        it("should generate chunks for classes and methods", () => {
-            const code = `
-        export class Calculator {
-          add(a, b) { return a + b; }
-          multiply(x, y) { return x * y; }
-        }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/calc.ts");
-
-            expect(chunks.length).toBeGreaterThanOrEqual(3); // class + 2 methods
-            expect(chunks.some((c) => c.name === "Calculator")).toBe(true);
-            expect(chunks.some((c) => c.name === "Calculator.add")).toBe(true);
-            expect(chunks.some((c) => c.name === "Calculator.multiply")).toBe(true);
-        });
-
-        it("should convert chunks to searchable text", () => {
-            const code = `export function test(x: string) {}`;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/utils.ts");
-
-            const text = chunkToSearchableText(chunks[0]);
-            expect(text).toContain("function test");
-            expect(text).toContain("src/utils.ts");
-        });
-
-        it("should handle class chunks with method info", () => {
-            const code = `
-        export class Service {
-          getData() {}
-          setData() {}
-        }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/service.ts");
-
-            const classChunk = chunks.find((c) => c.type === "class");
-            if (!classChunk) throw new Error("expected a class chunk");
-            const text = chunkToSearchableText(classChunk);
-            expect(text).toContain("class Service");
-            expect(text).toContain("with 2 methods");
-        });
-
-        it("should handle type chunks", () => {
-            const code = `
-        export interface User { name: string; }
-        export type Status = 'active' | 'inactive';
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/types.ts");
-
-            expect(chunks).toHaveLength(2);
-            expect(chunks[0].type).toBe("type");
-            expect(chunks[1].type).toBe("type");
-
-            const text1 = chunkToSearchableText(chunks[0]);
-            const text2 = chunkToSearchableText(chunks[1]);
-            expect(text1).toContain("interface User");
-            expect(text2).toContain("type Status");
-        });
-
-        it("should preserve metadata in chunks", () => {
-            const code = `
-        export async function fetchData(url: string) {
-          return await fetch(url);
-        }
-      `;
-            const { parsed: ast } = parseSourceFile(code, "test.ts");
-            const chunks = generateCodeChunks(ast, "src/api.ts");
-
-            expect(chunks[0].isExported).toBe(true);
-            expect(chunks[0].isAsync).toBe(true);
-            expect(chunks[0].line).toBeGreaterThan(0);
-        });
-    });
-
     describe("Performance", () => {
         it("should parse files quickly", () => {
             const code = `
@@ -590,5 +480,69 @@ describe("AST Parser", () => {
 
             expect(duration).toBeLessThan(50); // Should parse in less than 50ms
         });
+    });
+});
+
+describe("fullAstToSearchableText", () => {
+    it("extracts functions, classes, types, and imports with full context", () => {
+        const code = `
+import React from "react";
+
+export async function fetchData(url: string) {
+    return url;
+}
+
+export class Store {
+    constructor() {}
+    get value() { return 1; }
+    set value(v: number) {}
+    async load() {}
+    count = 0;
+}
+
+export interface Options {
+    timeout: number;
+    retry(): void;
+}
+
+export type Id = string;
+
+export enum Color { Red, Green }
+`;
+        const { ast } = parseSourceFile(code, "sample.ts");
+        const text = fullAstToSearchableText(ast, "sample.ts");
+
+        expect(text).toContain("File: sample.ts");
+        expect(text).toContain("export async function fetchData(url)");
+        expect(text).toContain("export class Store");
+        expect(text).toContain("getter value()");
+        expect(text).toContain("setter value(v)");
+        expect(text).toContain("async method load()");
+        expect(text).toContain("property count");
+        expect(text).toContain("export interface Options");
+        expect(text).toContain("timeout: type");
+        expect(text).toContain("retry()");
+        expect(text).toContain("export type Id = ...");
+        expect(text).toContain("export enum Color");
+        expect(text).toContain("Red");
+        expect(text).toContain('import React from "react"');
+    });
+
+    it("returns just the file header for a missing program", () => {
+        expect(fullAstToSearchableText(null, "x.ts")).toBe("File: x.ts\n");
+        expect(fullAstToSearchableText({}, "x.ts")).toBe("File: x.ts\n");
+    });
+
+    it("appends a code snippet for short source code", () => {
+        const { ast } = parseSourceFile("export const a = 1;", "s.ts");
+        const text = fullAstToSearchableText(ast, "s.ts", "export const a = 1;");
+        expect(text).toContain("--- Code Snippet ---");
+        expect(text).toContain("export const a = 1;");
+    });
+});
+
+describe("parse error handling", () => {
+    it("reports the filename and message for invalid syntax", () => {
+        expect(() => parseSourceFile("const = ;", "bad.ts")).toThrow(/Parse error in bad\.ts/);
     });
 });

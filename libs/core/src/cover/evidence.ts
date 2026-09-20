@@ -43,6 +43,8 @@ export interface CoverEvidence {
     snapshots: string[];
     /** Literal selector facts from indexed source markup. */
     sourceSelectors: TemplateSelector[];
+    /** Client-side route paths (React Router `<Route path>`) from indexed source. */
+    sourceRoutes: string[];
     /** Selectors that worked in previous runs, highest confidence first. */
     knownSelectors: Array<{ element: string; selector: string }>;
     /** Login form observed on a prior agent/discover pass, when known. */
@@ -73,6 +75,7 @@ export interface CoverEvidence {
 export interface RepairEvidence {
     snapshots: string[];
     sourceSelectors: TemplateSelector[];
+    sourceRoutes: string[];
     knownOrigins: Set<string>;
     baseURL: string | null;
     authLogin: AuthLoginEvidence | null;
@@ -84,9 +87,25 @@ const MAX_SNAPSHOT_CHARS = 1600;
 const MAX_SOURCE_SELECTORS = 300;
 const MAX_KNOWN_SELECTORS = 15;
 
-/** True when the scenario is about signing in / credentials / the login page. */
+/** Unambiguous auth signals — verbs and nouns that rarely double as data. */
+const AUTH_SIGNALS =
+    /\b(?:auth|log(?:ging)?[\s]+in|log(?:ging)?[\s]?out|logout|sign(?:ing)?[\s]+(?:in|up)|register(?:ed|ing|ation)?|authenticat(?:e|ed|ion)|credentials?|password|passcode|username|mfa|otp|2fa|two[-\s]?factor|verification\s+code)\b/i;
+
+/**
+ * True when the scenario is about an auth flow (signing in, the login page,
+ * credentials, MFA, …).
+ *
+ * A bare "login" noun — "search for 'login'", "the login card" — is DATA, not
+ * a flow, so it only counts when followed by an auth-flow noun
+ * ("login page/form/screen/flow"). "log in" (with a space) stays unambiguous.
+ */
 export function looksLikeAuthScenario(text: string): boolean {
-    return /\b(log[\s-]?in|sign[\s-]?in|auth(enticat|orisation|orization)?|credentials?|password|username)\b/i.test(
+    if (AUTH_SIGNALS.test(text)) return true;
+    // "login"/"signin" alone is ambiguous (verb vs. a data noun), so require a
+    // verb continuation ("login as admin", "login with …", "login to …") or a
+    // flow noun ("login page/form/screen/flow"). A bare "login" noun — "search
+    // for 'login'", "the login card" — matches neither.
+    return /\b(?:login|signin)(?:\s+(?:page|form|screen|flow|ui|experience|prompt|modal|dialog|as|with|to|using|then|and))\b/i.test(
         text,
     );
 }
@@ -174,6 +193,7 @@ export async function gatherCoverEvidence(
         pages: [],
         snapshots: [],
         sourceSelectors: [],
+        sourceRoutes: [],
         knownSelectors: [],
         authLogin: null,
         hasStorageState: Boolean(resolveAuthStorageStateRelativePath(projectPath)),
@@ -220,17 +240,22 @@ export async function gatherCoverEvidence(
 
     try {
         const knowledge = await loadSiteKnowledge(projectPath);
-        if (knowledge && knowledge.verifiedPaths.length > 0) {
+        if (knowledge) {
+            // Recorded flows (login + prior discovery) are valuable even when
+            // this crawl verified zero links — load them independently of
+            // verifiedPaths (review finding).
             const formsByUrl = new Map(
                 knowledge.routes.map((route) => [route.url, route.forms] as const),
             );
-            evidence.flows = buildNavigationFlows(knowledge.verifiedPaths, description, formsByUrl);
+            evidence.flows = knowledge.verifiedPaths.length
+                ? buildNavigationFlows(knowledge.verifiedPaths, description, formsByUrl)
+                : [];
+            const recorded = loadRecordedCoverFlows(projectPath);
             if (evidence.flows.length > 0) {
                 persistCoverFlows(projectPath, evidence.flows, "discovery");
             }
             // Prefer recorded flows (login + prior discovery) when present;
             // keep freshly built chains too, deduped by label.
-            const recorded = loadRecordedCoverFlows(projectPath);
             if (recorded.length > 0) {
                 const seen = new Set(evidence.flows.map((f) => f.label));
                 for (const flow of recorded) {
@@ -279,10 +304,43 @@ export async function gatherCoverEvidence(
     try {
         const db = new CodeGraphDB(projectPath);
         try {
-            evidence.sourceSelectors = collectTemplateSelectors(db);
-            evidence.knownSelectors = db
+            // MERGE graph-derived selectors with the flow-derived selectors
+            // gathered above. The old plain assignment discarded them
+            // whenever a code graph existed (and openDatabase creates one),
+            // so flow grounding was dead code in real projects (review
+            // finding: false @raiken-unverified stamps, weaker prompts).
+            const graphSelectors = collectTemplateSelectors(db);
+            const seenSelectors = new Set(
+                evidence.sourceSelectors.map((s) => `${s.kind}::${s.value}`),
+            );
+            for (const selector of graphSelectors) {
+                const key = `${selector.kind}::${selector.value}`;
+                if (!seenSelectors.has(key)) {
+                    seenSelectors.add(key);
+                    evidence.sourceSelectors.push(selector);
+                }
+            }
+            const graphRoutes = collectRoutePaths(db);
+            const seenRoutes = new Set(evidence.sourceRoutes);
+            for (const route of graphRoutes) {
+                if (!seenRoutes.has(route)) {
+                    seenRoutes.add(route);
+                    evidence.sourceRoutes.push(route);
+                }
+            }
+            const graphKnown = db
                 .getSuccessfulSelectors(MAX_KNOWN_SELECTORS)
                 .map((entry) => ({ element: entry.element, selector: entry.selector }));
+            const seenKnown = new Set(
+                evidence.knownSelectors.map((k) => `${k.element}::${k.selector}`),
+            );
+            for (const known of graphKnown) {
+                const key = `${known.element}::${known.selector}`;
+                if (!seenKnown.has(key)) {
+                    seenKnown.add(key);
+                    evidence.knownSelectors.push(known);
+                }
+            }
         } finally {
             db.close();
         }
@@ -300,6 +358,7 @@ export async function gatherRepairEvidence(
     const evidence: RepairEvidence = {
         snapshots: [],
         sourceSelectors: [],
+        sourceRoutes: [],
         knownOrigins: new Set<string>(),
         baseURL: null,
         authLogin: null,
@@ -348,6 +407,7 @@ export async function gatherRepairEvidence(
         const db = new CodeGraphDB(projectPath);
         try {
             evidence.sourceSelectors = collectTemplateSelectors(db);
+            evidence.sourceRoutes = collectRoutePaths(db);
         } finally {
             db.close();
         }
@@ -460,4 +520,25 @@ function collectTemplateSelectors(db: CodeGraphDB): TemplateSelector[] {
         }
     }
     return selectors;
+}
+
+/**
+ * Client-side route paths across the indexed graph (React Router <Route path>).
+ * Whole-graph like {@link collectTemplateSelectors}: cover has no exploration
+ * step, and a few dozen route strings are far cheaper than a guessed route.
+ */
+function collectRoutePaths(db: CodeGraphDB): string[] {
+    const routes: string[] = [];
+    for (const file of db.getFiles()) {
+        if (!file.parsed_ast) continue;
+        try {
+            const parsed = JSON.parse(file.parsed_ast) as { routes?: string[] };
+            for (const route of parsed.routes ?? []) {
+                if (route && !routes.includes(route)) routes.push(route);
+            }
+        } catch {
+            // Malformed AST row — skip.
+        }
+    }
+    return routes;
 }

@@ -25,7 +25,9 @@ export async function runEvalScenarios(
     options: RunEvalOptions = {},
 ): Promise<EvalReport> {
     const startedAt = Date.now();
-    const repeat = Math.max(1, options.repeat ?? 1);
+    const repeat = options.repeat ?? 1;
+    if (!Number.isInteger(repeat) || repeat < 1)
+        throw new Error("Eval repeat must be a positive integer");
     const log = options.log ?? (() => {});
 
     const selected = options.filter
@@ -42,7 +44,9 @@ export async function runEvalScenarios(
         durationMs: Date.now() - startedAt,
         repeat,
         scenarios: reports,
-        passed: reports.every((report) => report.skipped !== undefined || report.passRate === 1),
+        passed:
+            reports.length > 0 &&
+            reports.every((report) => report.skipped === undefined && report.passRate === 1),
     };
 }
 
@@ -61,7 +65,7 @@ async function runScenario(
             description: scenario.description,
             skipped: reason,
             attempts: [],
-            passRate: 1,
+            passRate: 0,
         };
     }
 

@@ -148,10 +148,18 @@ export class ProjectContext {
         const savedIndex = this.loadKeywordIndexFromDB(db);
         if (savedIndex && savedIndex.size > 0) {
             log(`Loaded ${savedIndex.size} keywords from database`);
-            // Merge with freshly built index (fresh takes priority)
+            // Merge DB rows into the freshly built index — but INTERSECT with
+            // the files the graph actually knows about. Keywords whose only
+            // file was deleted/renamed are absent from the fresh build; merging
+            // them back verbatim made stale keyword→deleted-file rows immortal
+            // across restarts (review finding: findRelevantFiles returned
+            // nonexistent paths forever).
+            const currentFiles = new Set(this.graph.getAllFiles().map((node) => node.filePath));
             for (const [keyword, files] of savedIndex) {
-                if (!this.keywordIndex.has(keyword)) {
-                    this.keywordIndex.set(keyword, files);
+                if (this.keywordIndex.has(keyword)) continue;
+                const live = files.filter((file) => currentFiles.has(file));
+                if (live.length > 0) {
+                    this.keywordIndex.set(keyword, live);
                 }
             }
         }

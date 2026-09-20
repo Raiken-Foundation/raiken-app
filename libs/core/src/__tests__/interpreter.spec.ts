@@ -18,7 +18,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildInterpretationPrompt, type InterpretationContext } from "../testing/interpreter";
+import {
+    buildInterpretationPrompt,
+    buildRepairPrompt,
+    type InterpretationContext,
+    type RepairContext,
+} from "../testing/interpreter";
 
 const baseContext = (overrides: Partial<InterpretationContext> = {}): InterpretationContext => ({
     testResults: [],
@@ -408,5 +413,33 @@ describe("buildInterpretationPrompt", () => {
             const prompt = buildInterpretationPrompt(failingContext());
             expect(prompt).toMatch(/justify with evidence/i);
         });
+    });
+});
+
+describe("buildRepairPrompt — known selectors", () => {
+    const baseRepairContext = (overrides: Partial<RepairContext> = {}): RepairContext => ({
+        testResults: [],
+        testCode: "import { test } from '@playwright/test';\ntest('noop', () => {});",
+        projectPath: "/tmp/proj",
+        ...overrides,
+    });
+
+    it("lists indexed selectors so a typo'd locator can be corrected, not invented", () => {
+        const prompt = buildRepairPrompt(
+            baseRepairContext({
+                sourceSelectors: [
+                    { kind: "testId", value: "catalog-search", line: 1, attribute: "data-testid" },
+                    { kind: "testId", value: "product-price", line: 2, attribute: "data-testid" },
+                ],
+            }),
+        );
+        expect(prompt).toMatch(/Known selectors in this app/i);
+        expect(prompt).toContain("catalog-search");
+        expect(prompt).toContain("product-price");
+    });
+
+    it("omits the section when no source selectors are indexed", () => {
+        const prompt = buildRepairPrompt(baseRepairContext());
+        expect(prompt).not.toContain("Known selectors in this app");
     });
 });

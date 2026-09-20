@@ -22,6 +22,8 @@ export interface SiteDiscoveryOverrides {
     pauseOnAuth?: boolean;
     preserveQueryParams?: boolean;
     maxRunTimeMs?: number | string | null;
+    settleQuietMs?: number | string | null;
+    settleMaxMs?: number | string | null;
     storageStatePath?: string | null;
     skipAuth?: boolean;
     continueSession?: boolean;
@@ -138,6 +140,15 @@ export function resolveSiteDiscoveryOptions(
             ? overrides.preserveQueryParams
             : config.preserveQueryParams;
 
+    const settleQuietMs =
+        overrides.settleQuietMs !== undefined
+            ? resolveNonNegativeInt(overrides.settleQuietMs, config.settleQuietMs)
+            : config.settleQuietMs;
+    const settleMaxMs =
+        overrides.settleMaxMs !== undefined
+            ? resolveNonNegativeInt(overrides.settleMaxMs, config.settleMaxMs)
+            : config.settleMaxMs;
+
     let storageStatePath: string | null = null;
     if (overrides.storageStatePath !== undefined) {
         storageStatePath = overrides.storageStatePath;
@@ -156,6 +167,8 @@ export function resolveSiteDiscoveryOptions(
         pauseOnAuth,
         preserveQueryParams,
         maxRunTimeMs,
+        settleQuietMs,
+        settleMaxMs,
         storageStatePath,
         continueSession: overrides.continueSession ?? false,
         purgeQueueOnResume: overrides.purgeQueueOnResume ?? false,

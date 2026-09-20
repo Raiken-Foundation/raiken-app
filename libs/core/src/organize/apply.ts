@@ -7,17 +7,18 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { writeConfigAtomicSync } from "../config";
+import { readRawConfigSync, writeConfigAtomicSync } from "../config";
 import { CodeGraphDB } from "../database/db";
+import { analyzeConfigCleanup } from "./config-cleanup";
 import { rewriteFileImports } from "./imports";
 import { listTestDirectoryFiles } from "./inventory";
 import { toNativePath, toPosixPath } from "./path-utils";
 import type { OrganizeApplyResult, OrganizeMove, OrganizeResult } from "./types";
 
-export function applyOrganizePlan(
+export async function applyOrganizePlan(
     projectPath: string,
     result: OrganizeResult,
-): OrganizeApplyResult {
+): Promise<OrganizeApplyResult> {
     const errors: string[] = [];
     let movedFiles = 0;
     let rewrittenImportFiles = 0;
@@ -33,6 +34,13 @@ export function applyOrganizePlan(
                 applied,
                 errors,
             );
+            // Path-form quarantine entries must follow moved specs — a flaky
+            // test that moves silently escapes quarantine otherwise (review
+            // finding). Runs BEFORE the config-cleanup write below, which
+            // re-reads the current config and therefore preserves this.
+            if (rewriteQuarantineEntries(projectPath, applied, errors)) {
+                // count via configWritten below if no other config write happens
+            }
         }
     }
 
@@ -43,8 +51,19 @@ export function applyOrganizePlan(
         result.configCleanup.changes.length > 0
     ) {
         try {
-            writeConfigAtomicSync(projectPath, result.configCleanup.cleanedConfig);
-            configWritten = true;
+            // Re-run the deterministic cleanup passes on the CURRENT config
+            // instead of writing the plan-time snapshot — edits made between
+            // proposal and confirmation (key rotation, a new quarantine
+            // entry) must not be silently reverted (review finding).
+            const fresh = await analyzeConfigCleanup(projectPath);
+            if (!fresh.skipped) {
+                writeConfigAtomicSync(projectPath, fresh.cleanedConfig);
+                configWritten = true;
+            } else {
+                errors.push(
+                    "raiken.config.json changed since the plan was proposed — config cleanup skipped; re-run organize to pick up the new state.",
+                );
+            }
         } catch (err) {
             errors.push(
                 `Failed to write raiken.config.json: ${err instanceof Error ? err.message : err}`,
@@ -53,6 +72,48 @@ export function applyOrganizePlan(
     }
 
     return { movedFiles, rewrittenImportFiles, configWritten, errors };
+}
+
+/**
+ * Rewrite path-form `quarantine.testFiles` entries for specs that just moved
+ * (from → to). Returns true when the config was rewritten.
+ */
+function rewriteQuarantineEntries(
+    projectPath: string,
+    applied: OrganizeMove[],
+    errors: string[],
+): boolean {
+    try {
+        const raw = readRawConfigSync(projectPath);
+        const quarantine = raw["quarantine"] as { testFiles?: unknown } | undefined;
+        const files = quarantine?.testFiles;
+        if (!Array.isArray(files) || files.length === 0) return false;
+        const fromByPosix = new Map<string, string>(
+            applied.map((move) => [toPosixPath(move.from), toPosixPath(move.to)] as const),
+        );
+        let changed = false;
+        const next = files.map((entry) => {
+            if (typeof entry !== "string") return entry;
+            const normalized = toPosixPath(entry).replace(/^\.\//, "");
+            const to = fromByPosix.get(normalized);
+            if (to === undefined) return entry;
+            changed = true;
+            return to;
+        });
+        if (!changed) return false;
+        raw["quarantine"] = { ...quarantine, testFiles: next };
+        writeConfigAtomicSync(projectPath, raw);
+        return true;
+    } catch (err) {
+        // A missing config simply means nothing to rewrite.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+        errors.push(
+            `Moved test files but failed to update quarantine entries in raiken.config.json: ${
+                err instanceof Error ? err.message : err
+            } — update them manually or the moved specs will escape quarantine.`,
+        );
+        return false;
+    }
 }
 
 /**

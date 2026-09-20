@@ -60,7 +60,9 @@ describe("generation auth preconditions", () => {
         };
         const model = {
             invoke: async (messages: Array<{ content: unknown }>) => {
-                capturedSystemPrompt = String(messages[0]?.content ?? "");
+                capturedSystemPrompt = JSON.parse(
+                    String(messages.at(-1)?.content ?? "{}"),
+                ).untrustedEvidence;
                 return { content: GENERATED_TEST };
             },
         };

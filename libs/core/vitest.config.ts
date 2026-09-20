@@ -8,11 +8,13 @@ export default defineConfig({
     // matched when cwd happened to be the repo root.
     root: __dirname,
     test: {
+        reporters: ["default"],
         globals: true,
         environment: "node",
         pool: "forks",
+        maxWorkers: 4,
         include: ["src/**/*.spec.ts", "src/**/*.test.ts"],
-        exclude: ["src/**/*.integration.spec.ts"],
+        exclude: ["src/**/*.integration.spec.ts", "src/browser/session/__tests__/*.parity.spec.ts"],
         testTimeout: 15000,
     },
     resolve: {

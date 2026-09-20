@@ -95,7 +95,18 @@ export function buildAiConfigPatch(
     if (options.provider) patch["provider"] = options.provider.trim().toLowerCase();
     if (options.model) patch["model"] = options.model;
     if (options.baseUrl) patch["baseURL"] = options.baseUrl;
-    if (options.unsetKey) return { patch, clearSecrets: ["ai.apiKey"] };
+    if (options.unsetKey) {
+        // Clear BOTH the legacy active key and the provider-scoped map entry
+        // the modern shape stores under — the old patch only cleared
+        // ai.apiKey, leaving the live key active after a reported unset
+        // (review finding).
+        const clearSecrets = ["ai.apiKey"];
+        const provider = (patch["provider"] as AIProviderId | undefined) ?? undefined;
+        if (provider && (AI_PROVIDER_IDS as readonly string[]).includes(provider)) {
+            clearSecrets.push(`ai.apiKeys.${provider}`);
+        }
+        return { patch, clearSecrets };
+    }
     if (options.apiKey) patch["apiKey"] = options.apiKey;
 
     return { patch };

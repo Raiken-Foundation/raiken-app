@@ -241,18 +241,16 @@ const AUTH_TASK_RE =
  * grounding cannot start authenticated while the generated test starts logged
  * out (or vice versa).
  */
+/** Strong, unambiguous "the test must start logged out" signals. */
+const EXPLICITLY_UNAUTHENTICATED_RE =
+    /\bunauthenticated\b|\bnot\s+(?:logged|signed)\s+in\b|\b(?:logged|signed)\s+out\b|\bwithout\s+(?:signing|logging)\s+in\b|\bdo\s+not\s+assume\s+a\s+logged[-\s]?in\b/i;
+
 export function resolveAuthPrecondition(input: AuthPreconditionInput): AuthPrecondition {
     const text = [input.userPrompt, input.activeGoal, input.targetFeature, input.targetAction]
         .filter(Boolean)
         .join(" ");
 
-    const explicitlyUnauthenticated =
-        /\bunauthenticated\b/i.test(text) ||
-        /\bnot\s+(?:logged|signed)\s+in\b/i.test(text) ||
-        /\b(?:logged|signed)\s+out\b/i.test(text) ||
-        /\bwithout\s+(?:signing|logging)\s+in\b/i.test(text) ||
-        /\bdo\s+not\s+assume\s+a\s+logged[-\s]?in\b/i.test(text);
-    if (explicitlyUnauthenticated) return "unauthenticated";
+    if (EXPLICITLY_UNAUTHENTICATED_RE.test(text)) return "unauthenticated";
 
     if (EXPLICIT_AUTHENTICATED_RE.test(text)) return "authenticated";
     if (LOGIN_FLOW_RE.test(text)) return "login_flow";
@@ -263,6 +261,25 @@ export function resolveAuthPrecondition(input: AuthPreconditionInput): AuthPreco
 
 export function shouldUseStorageState(precondition: AuthPrecondition): boolean {
     return precondition === "authenticated";
+}
+
+/**
+ * Cover's one-shot auth classification.
+ *
+ * The interactive agent can refine a coarse first guess in later graph nodes,
+ * but `raiken cover` is a single LLM call with no refinement pass. This
+ * resolver therefore honours only the UNambiguous signals and defaults to
+ * `authenticated`. The broad AUTH_TASK_RE catch-all is deliberately omitted:
+ * it matches bare nouns (`auth`, `session`, `logout`, `register`) that usually
+ * describe *signed-in* actions — "session details on the dashboard", "auth
+ * guard redirects signed-in users" — and classifying those as `login_flow`
+ * would strip `storageState` from tests that must start authenticated.
+ */
+export function resolveCoverAuthPrecondition(text: string): AuthPrecondition {
+    if (EXPLICITLY_UNAUTHENTICATED_RE.test(text)) return "unauthenticated";
+    if (LOGIN_FLOW_RE.test(text)) return "login_flow";
+    if (goalTargetsUnauthedPage(text)) return "unauthenticated";
+    return "authenticated";
 }
 
 export function parseSummaryElements(summary: string): SummaryElement[] {

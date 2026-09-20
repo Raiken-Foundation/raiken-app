@@ -27,7 +27,8 @@ const MAX_DEPTH = 3;
 
 function pathScore(path: NavigationPath, scenarioTokens: Set<string>): number {
     let score = 0;
-    const hay = `${path.fromUrl} ${path.toUrl} ${path.linkText ?? ""} ${path.selector}`.toLowerCase();
+    const hay =
+        `${path.fromUrl} ${path.toUrl} ${path.linkText ?? ""} ${path.selector}`.toLowerCase();
     for (const token of scenarioTokens) {
         if (hay.includes(token)) score += 1;
     }
@@ -39,7 +40,7 @@ function chainLabel(steps: CoverFlowStep[]): string {
     const short = urls.map((url) => {
         try {
             const path = new URL(url).pathname.replace(/\/+$/, "") || "/";
-            return path === "/" ? "Home" : path.split("/").filter(Boolean).slice(-1)[0] ?? path;
+            return path === "/" ? "Home" : (path.split("/").filter(Boolean).slice(-1)[0] ?? path);
         } catch {
             return url;
         }
@@ -171,9 +172,7 @@ export function formatNavigationFlows(flows: CoverFlow[]): string {
     for (const flow of flows) {
         lines.push(`Flow: ${flow.label}`);
         for (const step of flow.steps) {
-            const via = step.linkText
-                ? `"${step.linkText}" via ${step.selector}`
-                : step.selector;
+            const via = step.linkText ? `"${step.linkText}" via ${step.selector}` : step.selector;
             lines.push(`  ${step.fromUrl} → ${step.toUrl}  (${via})`);
         }
     }

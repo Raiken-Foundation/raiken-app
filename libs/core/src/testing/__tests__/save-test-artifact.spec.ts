@@ -77,7 +77,9 @@ describe("saveTestArtifact", () => {
 
     it("strips edit markers for agent writes", async () => {
         const projectPath = await makeProject();
-        const raw = `<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\nimport { test } from '@playwright/test';\n`;
+        // Real test code — the save pipeline now validates every write, so
+        // the fixture must be an actual spec, not bare prose.
+        const raw = `<<<<<<< SEARCH\nold\n=======\nimport { test } from '@playwright/test';\ntest("agent flow", () => {});\n>>>>>>> REPLACE\n`;
 
         const result = await saveTestArtifact({
             projectPath,

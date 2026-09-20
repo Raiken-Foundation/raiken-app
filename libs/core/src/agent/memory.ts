@@ -62,9 +62,7 @@ export function isRunScopedPreference(key: string): boolean {
 }
 
 /** Filter a preference map down to durable project knowledge. */
-export function filterDurablePreferences(
-    prefs: Record<string, string>,
-): Record<string, string> {
+export function filterDurablePreferences(prefs: Record<string, string>): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [key, value] of Object.entries(prefs)) {
         if (!isRunScopedPreference(key) && value !== "") {

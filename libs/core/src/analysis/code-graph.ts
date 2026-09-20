@@ -164,8 +164,12 @@ export class CodeGraph {
     private extractAliasesFromConfig(content: string): Record<string, string> {
         const aliases: Record<string, string> = {};
 
-        // Remove comments and strings to avoid false matches
-        const cleaned = this.removeCommentsAndStrings(content);
+        // Strip comments ONLY. The old code ran these regexes on content
+        // whose string literals had also been blanked (`'@'` → `''`), and
+        // the entry patterns require 1+ chars inside the quotes — so alias
+        // extraction was provably dead and every `@/component` import went
+        // unresolved (review finding).
+        const cleaned = this.removeComments(content);
 
         // Pattern 1: Object literal aliases
         // alias: { '@': './src', '@components': './src/components' }
@@ -214,24 +218,17 @@ export class CodeGraph {
     }
 
     /**
-     * Remove comments and string literals to avoid false pattern matches.
-     * Simple but effective for bundler configs.
+     * Remove comments while PRESERVING string literals — alias keys and
+     * values live inside strings, so they must survive for
+     * {@link extractAliasesFromConfig} to see them.
      */
-    private removeCommentsAndStrings(content: string): string {
-        return (
-            content
-                // Remove single-line comments
-                .replace(/\/\/.*$/gm, "")
-                // Remove multi-line comments
-                .replace(/\/\*[\s\S]*?\*\//g, "")
-                // Remove template literals (keep structure)
-                .replace(/`[^`]*`/g, '""')
-                // Keep the structure but mark strings
-                .replace(/'[^']*'/g, "''")
-                .replace(/"[^"]*"/g, '""')
-        );
+    private removeComments(content: string): string {
+        return content
+            .replace(/\/\/.*$/gm, "")
+            .replace(/\/\*[\s\S]*?\*\//g, "");
     }
 
+    /**
     /**
      * Check if a value looks like a simple path string.
      * Rejects function calls, variables, complex expressions.
@@ -817,8 +814,8 @@ export class CodeGraph {
             };
 
             // Attach intra-file edges via a non-enumerable side channel so
-            // serialization paths don't accidentally pick them up. They're consumed
-            // by callers that persist the edge set (see CodeGraph.getIntraFileEdges).
+            // serialization paths don't accidentally pick them up. Persistence
+            // reads node.intraFileEdges directly (buildEdgesForNode).
             this.intraFileEdges.set(filePath, intraFileEdges);
 
             return node;
@@ -1187,14 +1184,6 @@ export class CodeGraph {
     }
 
     /**
-     * Check if a node's subtree has changed by comparing tree hashes
-     */
-    hasSubtreeChanged(filePath: string, oldTreeHash: string): boolean {
-        const node = this.getNode(filePath);
-        return node ? node.treeHash !== oldTreeHash : false;
-    }
-
-    /**
      * Recompute tree hashes upward (for a changed node and all its dependents)
      *
      * PERFORMANCE: This uses topological sorting to recompute hashes in dependency order,
@@ -1360,14 +1349,6 @@ export class CodeGraph {
 
     getAllFiles(): CodeNode[] {
         return Array.from(this.nodes.values());
-    }
-
-    /**
-     * Intra-file structural edges (extends/implements) collected during parse.
-     * Used by persistence code to populate the unified graph_edges table.
-     */
-    getIntraFileEdges(filePath: string): GraphEdge[] {
-        return this.intraFileEdges.get(filePath) ?? [];
     }
 
     getStats(): GraphStats {

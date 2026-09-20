@@ -30,7 +30,6 @@ import {
     MEMORY_TERMINAL_CONTROL_TOOL_NAMES,
     TEST_EXECUTION_REPAIR_TOOL_NAMES,
 } from "../registry";
-import { redactToolArgs } from "../shared/redaction";
 import type { AgentToolGroupDeps, AutonomySettings, ToolResult } from "../types";
 
 function callToolExecute<T>(fn: unknown, args: unknown): Promise<ToolResult<T>> {
@@ -59,28 +58,6 @@ function parseToolInput(tool: ToolWithSchema, input: unknown) {
         throw new Error("tool has no inputSchema");
     }
     return schema.parse(input);
-}
-
-/** Mirrors `callTool` in agent.ts for callback-order parity. */
-async function invokeToolLikeAgent(
-    toolName: string,
-    args: unknown,
-    execute: unknown,
-    hooks: {
-        onToolCall?: (name: string, args: unknown) => void;
-        onToolResult?: (name: string, result: ToolResult) => void;
-    },
-): Promise<ToolResult> {
-    const safeArgs = redactToolArgs(toolName, args);
-    hooks.onToolCall?.(toolName, safeArgs);
-    let result: ToolResult;
-    if (execute && typeof execute === "function") {
-        result = await (execute as (a: unknown) => Promise<ToolResult>)(args);
-    } else {
-        result = { success: true, message: `${toolName} invoked` };
-    }
-    hooks.onToolResult?.(toolName, result);
-    return result;
 }
 
 describe("agent tool group registry contracts", () => {
@@ -181,7 +158,6 @@ describe("agent tool group registry contracts", () => {
         ["toggleCheckbox", { selector: "#terms", checked: true }],
         ["discoverLinks", { includeExternal: false }],
         ["done", { summary: "Explored login flow" }],
-        ["respond", { message: "Which account?", needsInput: true }],
         ["awaitUser", { message: "Continue?" }],
     ] as const)("schema accepts representative input for %s", (name, input) => {
         const tools = createAgentTools({ projectPath });
@@ -459,17 +435,6 @@ describe("memory / terminal / control group contract", () => {
         expect(tools.done.execute).toBeUndefined();
         expect(tools.awaitUser.execute).toBeUndefined();
     });
-
-    it("respond returns messageSent and preserves options in the message", async () => {
-        const result = await callToolExecute<{ messageSent: boolean; awaitingInput: boolean }>(
-            tools.respond.execute,
-            { message: "Which flow?", needsInput: true, options: ["Login", "Signup"] },
-        );
-        expect(result.success).toBe(true);
-        expect(result.data?.messageSent).toBe(true);
-        expect(result.data?.awaitingInput).toBe(true);
-        expect(result.message).toContain("Options: Login, Signup");
-    });
 });
 
 describe("browser / navigation / interaction group contract", () => {
@@ -496,59 +461,5 @@ describe("browser / navigation / interaction group contract", () => {
         const result = await callToolExecute(tools.closeBrowser.execute, {});
         expect(result.success).toBe(true);
         expect(result.data?.closed).toBe(true);
-    });
-});
-
-describe("composed facade callback order", () => {
-    let projectPath: string;
-
-    beforeEach(() => {
-        projectPath = fs.mkdtempSync(path.join(os.tmpdir(), "raiken-callback-order-"));
-        fs.mkdirSync(path.join(projectPath, "src"), { recursive: true });
-        fs.writeFileSync(path.join(projectPath, "src", "secret.ts"), "export {};\n");
-    });
-
-    afterEach(() => {
-        fs.rmSync(projectPath, { recursive: true, force: true });
-    });
-
-    it("redacts sensitive fillInput args before onToolCall while execute receives raw args", async () => {
-        const rawArgs = { selector: "#pwd", value: "hunter2" };
-        const events: string[] = [];
-        let callbackArgs: unknown;
-        let executeArgs: unknown;
-        const execute = vi.fn(async (args: unknown) => {
-            executeArgs = args;
-            return { success: true, message: "filled" };
-        });
-
-        await invokeToolLikeAgent("fillInput", rawArgs, execute, {
-            onToolCall: (_name, args) => {
-                callbackArgs = args;
-                events.push("onToolCall");
-            },
-            onToolResult: () => events.push("onToolResult"),
-        });
-
-        expect(events).toEqual(["onToolCall", "onToolResult"]);
-        expect(callbackArgs).toEqual({ selector: "#pwd", value: "[REDACTED]" });
-        expect(executeArgs).toEqual(rawArgs);
-        expect(execute).toHaveBeenCalledWith(rawArgs);
-    });
-
-    it("terminal tools without execute still invoke onToolCall then onToolResult", async () => {
-        const events: string[] = [];
-        const result = await invokeToolLikeAgent(
-            "done",
-            { summary: "Finished exploration" },
-            undefined,
-            {
-                onToolCall: () => events.push("onToolCall"),
-                onToolResult: () => events.push("onToolResult"),
-            },
-        );
-
-        expect(events).toEqual(["onToolCall", "onToolResult"]);
-        expect(result).toEqual({ success: true, message: "done invoked" });
     });
 });

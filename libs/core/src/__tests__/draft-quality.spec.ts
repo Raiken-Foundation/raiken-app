@@ -18,13 +18,16 @@ import {
 } from "../cover/draft-quality";
 import {
     applyRepairSetupFixes,
+    changedAssertedValues,
     containsParentTraversal,
+    describeAssertionValueMismatch,
     describeDroppedScenarioExpectation,
     describeParentTraversal,
     describeRegressedSelector,
     describeTimeoutFocus,
     extractProvenAbsentLocators,
     extractProvenPresentSelectors,
+    extractValueMismatch,
     missingScenarioExpectations,
     scenarioExpectedTokens,
     stillAssertsAbsentLocators,
@@ -68,6 +71,26 @@ describe("playwright testMatch fit", () => {
             false,
         );
         expect(matchesPlaywrightTestPattern("e2e/cover-foo.spec.ts", "**/*.spec.ts")).toBe(true);
+    });
+
+    it("matches brace-expansion, char-class, and extglob patterns Playwright accepts", () => {
+        // Review finding: these shapes previously failed translation and
+        // hard-blocked every draft ("will not be collected") even though
+        // Playwright itself collects the file.
+        expect(matchesPlaywrightTestPattern("e2e/foo.spec.ts", "**/*.{spec,test}.ts")).toBe(true);
+        expect(matchesPlaywrightTestPattern("e2e/foo.test.ts", "**/*.{spec,test}.ts")).toBe(true);
+        expect(matchesPlaywrightTestPattern("e2e/foo.spec.js", "**/*.spec.[jt]s")).toBe(true);
+        expect(matchesPlaywrightTestPattern("e2e/foo.test.js", "**/*.spec.[jt]s")).toBe(false);
+        expect(matchesPlaywrightTestPattern("e2e/foo.spec.ts", "**/*.@(spec|test).ts")).toBe(true);
+        expect(matchesPlaywrightTestPattern("e2e/foo.steps.ts", "**/*.@(spec|test).ts")).toBe(
+            false,
+        );
+        // Negated class and class ranges keep glob semantics.
+        expect(matchesPlaywrightTestPattern("e2e/foo.spec.ts", "**/*.[!s]pec.ts")).toBe(false);
+        expect(matchesPlaywrightTestPattern("e2e/foo.apec.ts", "**/*.[a-c]pec.ts")).toBe(true);
+        // Escaped regex metacharacters in filenames stay literal.
+        expect(matchesPlaywrightTestPattern("e2e/foo+bar.spec.ts", "**/*.spec.ts")).toBe(true);
+        expect(matchesPlaywrightTestPattern("e2e/foo(1).spec.ts", "**/*.spec.ts")).toBe(true);
     });
 
     it("flags output that playwright will not collect", async () => {
@@ -260,6 +283,88 @@ describe("scenario expectation guards (false-green prevention)", () => {
         const guidance = describeDroppedScenarioExpectation(["$59.00"]);
         expect(guidance).toContain("$59.00");
         expect(guidance).toContain("false green");
+    });
+});
+
+describe("changedAssertedValues", () => {
+    it("flags a value changed inside a value matcher", () => {
+        const original = "await expect(page.getByTestId('product-price')).toHaveText('$59.00');";
+        const weakened = "await expect(page.getByTestId('product-price')).toHaveText('$49.00');";
+        expect(changedAssertedValues(original, weakened)).toEqual(["$59.00"]);
+    });
+
+    it("ignores selector changes (getByTestId is not an assertion value)", () => {
+        const original = "await expect(page.getByTestId('search-input')).toBeVisible();";
+        const fixed = "await expect(page.getByTestId('catalog-search')).toBeVisible();";
+        expect(changedAssertedValues(original, fixed)).toEqual([]);
+    });
+
+    it("ignores wait and navigation changes", () => {
+        const original =
+            "await page.goto('/products/pulse-ergonomic-mouse'); await expect(x).toHaveText('A');";
+        const fixed = "await page.goto('/product/pulse-mouse'); await expect(x).toHaveText('A');";
+        expect(changedAssertedValues(original, fixed)).toEqual([]);
+    });
+
+    it("flags numeric and count changes", () => {
+        expect(
+            changedAssertedValues("expect(rows).toHaveCount(5)", "expect(rows).toHaveCount(4)"),
+        ).toEqual(["5"]);
+    });
+
+    it("ignores a value that stays identical", () => {
+        const original = "await expect(x).toHaveText('$59.00');";
+        const fixed = "await expect(x).toHaveText('$59.00');";
+        expect(changedAssertedValues(original, fixed)).toEqual([]);
+    });
+});
+
+describe("extractValueMismatch", () => {
+    const priceFailure = `Error: expect(locator).toHaveText(expected) failed
+
+Locator:  getByTestId('product-detail-page').getByTestId('product-price')
+Expected: "$59.00"
+Received: "$49.00"
+`;
+
+    it("extracts Expected/Received from an assertion-value failure", () => {
+        expect(extractValueMismatch(priceFailure)).toEqual({
+            expected: "$59.00",
+            received: "$49.00",
+        });
+    });
+
+    it("returns null when the expected and received values are equal", () => {
+        expect(extractValueMismatch('Expected: "$59.00"\nReceived: "$59.00"')).toBeNull();
+    });
+
+    it("returns null for non-value failures (locator/timeout)", () => {
+        expect(
+            extractValueMismatch("Locator: getByRole('heading')\nError: element(s) not found"),
+        ).toBeNull();
+        expect(extractValueMismatch("Test timeout of 30000ms exceeded.")).toBeNull();
+    });
+
+    it("survives ANSI colour codes around the values", () => {
+        const coloured = [
+            'Expected: \u001b[32m"$59.00"\u001b[39m',
+            'Received: \u001b[31m"$49.00"\u001b[39m',
+        ].join("\n");
+        expect(extractValueMismatch(coloured)).toEqual({
+            expected: "$59.00",
+            received: "$49.00",
+        });
+    });
+
+    it("describes the mismatch as an app-side bug, not a test bug", () => {
+        const guidance = describeAssertionValueMismatch({
+            expected: "$59.00",
+            received: "$49.00",
+        });
+        expect(guidance).toContain("$59.00");
+        expect(guidance).toContain("$49.00");
+        expect(guidance).toContain("application-side behavior mismatch");
+        expect(guidance).toContain("--allow-weaken");
     });
 });
 

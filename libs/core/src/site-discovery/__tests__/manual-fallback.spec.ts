@@ -20,6 +20,7 @@ interface FakeLocator {
     first: () => FakeLocator;
     nth: (i: number) => FakeLocator;
     isVisible: () => Promise<boolean>;
+    boundingBox: () => Promise<{ width: number; height: number; x: number; y: number } | null>;
     textContent: () => Promise<string | null>;
     locator: (selector: string) => FakeLocator;
 }
@@ -30,6 +31,7 @@ function defaultLocator(): FakeLocator {
         first: () => self,
         nth: () => self,
         isVisible: async () => false,
+        boundingBox: async () => null,
         textContent: async () => null,
         locator: () => defaultLocator(),
     };
@@ -42,6 +44,7 @@ function visibleLocator(overrides: Partial<FakeLocator> = {}): FakeLocator {
         first: () => self,
         nth: () => self,
         isVisible: async () => true,
+        boundingBox: async () => ({ width: 300, height: 65, x: 0, y: 0 }),
         textContent: async () => null,
         locator: () => defaultLocator(),
         ...overrides,

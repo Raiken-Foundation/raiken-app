@@ -6,6 +6,8 @@ import type { ReportAttachment } from "./playwright-report-model";
 export interface TestRunResult {
     testFile: string;
     testName: string;
+    /** Playwright project; repetitions retain this identity. */
+    projectName?: string;
     /** Nested suite breadcrumb from the Playwright JSON reporter, when available. */
     suite?: string;
     /**

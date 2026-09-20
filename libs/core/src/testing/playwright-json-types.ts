@@ -10,10 +10,10 @@ export interface PlaywrightJsonResult {
 export interface PlaywrightJsonSpec {
     id?: string;
     title: string;
-    /** Project-relative spec file path (present on --list and run reports). */
+    /** Path relative to reporter config.rootDir (present on --list and run reports). */
     file?: string;
     line?: number;
-    tests?: Array<{ results?: PlaywrightJsonResult[] }>;
+    tests?: Array<{ projectName?: string; projectId?: string; results?: PlaywrightJsonResult[] }>;
 }
 export interface PlaywrightJsonSuite {
     title?: string;
@@ -21,6 +21,7 @@ export interface PlaywrightJsonSuite {
     suites?: PlaywrightJsonSuite[];
 }
 export interface PlaywrightJsonReport {
+    config?: { rootDir?: string };
     stats?: { expected?: number; unexpected?: number; skipped?: number; duration?: number };
     suites?: PlaywrightJsonSuite[];
     errors?: Array<{ message?: string; snippet?: string; location?: ReportErrorLocation }>;

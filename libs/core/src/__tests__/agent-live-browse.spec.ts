@@ -112,7 +112,10 @@ describe("agent live-page resolution (F5)", () => {
     it("classifier prefers a remembered base over the Playwright config", async () => {
         writePlaywrightConfig(projectDir, "http://localhost:5173");
         const { AgentMemory } = await import("../agent/memory");
-        AgentMemory.getInstance(projectDir).setPreference("project_base_url", "http://app.internal:9999");
+        AgentMemory.getInstance(projectDir).setPreference(
+            "project_base_url",
+            "http://app.internal:9999",
+        );
         try {
             const model = {
                 withStructuredOutput: () => ({

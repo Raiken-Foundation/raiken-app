@@ -61,16 +61,54 @@ describe("cover honesty + evidence", () => {
         expect(written).toContain("TODO");
     });
 
-    it("comment-only TODOs are notes; string-literal TODOs are blockers", () => {
+    it("injects storageState only for authenticated scenarios", async () => {
+        const authDir = path.join(projectDir, ".raiken");
+        fs.mkdirSync(authDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(authDir, "auth-state.json"),
+            JSON.stringify({
+                cookies: [{ name: "session", value: "active", expires: -1 }],
+                origins: [],
+            }),
+        );
+
+        const login = await runCover({
+            projectPath: projectDir,
+            target: "test the MFA verification code prompt for mfa-admin",
+            dryRun: true,
+            allowUngrounded: true,
+        });
+        expect(fs.readFileSync(login.outputPath, "utf-8")).not.toContain("storageState");
+
+        const authed = await runCover({
+            projectPath: projectDir,
+            target: "delete the workspace from settings as an admin",
+            dryRun: true,
+            allowUngrounded: true,
+        });
+        expect(fs.readFileSync(authed.outputPath, "utf-8")).toContain("storageState");
+    });
+
+    it("classifies TODOs into placeholders, blocking stubs, and optional notes", () => {
         const commentsOnly = `test("add to cart", async ({ page }) => {
   await page.getByTestId("add-to-cart").click();
   // TODO: optionally assert free-shipping badge once shipping tiers land
   await expect(page.getByTestId("cart-link")).toContainText("1");
 });`;
-        expect(assessTodoMarkers(commentsOnly)).toEqual({ placeholders: 0, notes: 1 });
+        expect(assessTodoMarkers(commentsOnly)).toEqual({ placeholders: 0, blocking: 0, notes: 1 });
 
         const withPlaceholder = `await page.goto("TODO: Define product page URL");`;
-        expect(assessTodoMarkers(withPlaceholder)).toEqual({ placeholders: 1, notes: 0 });
+        expect(assessTodoMarkers(withPlaceholder)).toEqual({
+            placeholders: 1,
+            blocking: 0,
+            notes: 0,
+        });
+
+        const blockingStub = `test("log in", async ({ page }) => {
+  // TODO: fill username
+  // await page.getByLabel("Username").fill("admin");
+});`;
+        expect(assessTodoMarkers(blockingStub)).toEqual({ placeholders: 0, blocking: 1, notes: 0 });
     });
 
     it("refuses to overwrite an existing spec unless force is set", async () => {

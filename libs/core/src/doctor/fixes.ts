@@ -5,13 +5,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { findPlaywrightConfigPath, readPlaywrightBaseURL } from "../testing/playwright-config";
 import { detectDevServerPort } from "../testing/port-detector";
-import {
-    findPlaywrightConfigPath,
-    readPlaywrightBaseURL,
-} from "../testing/playwright-config";
-import type { DoctorFinding } from "./scan";
 import { findWebServerRunScripts, readPackageScripts } from "./environment";
+import type { DoctorFinding } from "./scan";
 
 export type DoctorFixId = "widen-testmatch" | "align-baseurl-port" | "add-webserver";
 
@@ -75,10 +72,7 @@ export async function applyWidenTestMatch(projectPath: string): Promise<DoctorFi
     if (/testMatch\s*:\s*\[/.test(next)) {
         next = next.replace(/testMatch\s*:\s*\[[\s\S]*?\]/, 'testMatch: ["**/*.spec.ts"]');
     } else if (/testMatch\s*:\s*(['"`])[^'"`\n]+\1/.test(next)) {
-        next = next.replace(
-            /testMatch\s*:\s*(['"`])[^'"`\n]+\1/,
-            'testMatch: ["**/*.spec.ts"]',
-        );
+        next = next.replace(/testMatch\s*:\s*(['"`])[^'"`\n]+\1/, 'testMatch: ["**/*.spec.ts"]');
     } else {
         // Insert under use: or at top-level export default.
         if (/export\s+default\s+\{/.test(next)) {

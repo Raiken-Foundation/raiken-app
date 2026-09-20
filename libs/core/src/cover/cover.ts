@@ -24,8 +24,14 @@ import {
     isEmptyLengthResponse,
     type ResolvedAIConfig,
 } from "../agent/ai-providers";
+import {
+    type AuthPrecondition,
+    resolveCoverAuthPrecondition,
+    shouldUseStorageState,
+} from "../agent/graph/utils";
 import type { GroundingReport } from "../agent/grounding";
 import { loadTestDirectory } from "../config";
+import { authCredentialEnvGuidance } from "../config/auth-credentials";
 import { authLivenessBlocks, probeAuthState } from "../config/auth-liveness";
 import { resolveAuthStorageStateRelativePath } from "../config/auth-state";
 import { CodeGraphDB } from "../database/db";
@@ -146,6 +152,8 @@ export interface CoverResult {
     reviewReasons: string[];
     /** TODOs in comments only — optional follow-ups, not blockers. */
     todoNotes: number;
+    /** TODOs whose code is commented out — the draft cannot run without them. */
+    blockingTodos: number;
     /**
      * True when the draft fails a hard gate (does not parse, or Playwright
      * will not collect it). Distinct from soft review reasons so callers can
@@ -265,12 +273,25 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
         sourceSelectors: evidence.sourceSelectors.length,
         baseURL: evidence.baseURL,
     });
+    // Resolve the auth starting condition ONCE, for both the prompt and the
+    // storageState injection below. Cover is one-shot — no graph node refines
+    // this later — so use the strict resolver that defaults to authenticated
+    // and honours only unambiguous login / logged-out signals.
+    const precondition = resolveCoverAuthPrecondition(resolved.description);
+
     const requiresKey = options.ai && getProvider(options.ai.provider).envVars.length > 0;
     if (options.dryRun || !options.ai || (requiresKey && !options.ai.apiKey)) {
         body = buildScaffold(resolved.description, resolved.sourceFiles);
     } else {
         emit({ type: "llm_started" });
-        const result = await callLLM(options.ai, resolved, evidence, sourceContext);
+        const result = await callLLM(
+            options.ai,
+            resolved,
+            evidence,
+            sourceContext,
+            precondition,
+            projectPath,
+        );
         body = result.body;
         usedModel = result.model;
         emit({ type: "llm_finished", bytes: Buffer.byteLength(body, "utf-8") });
@@ -279,7 +300,9 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
     // Deterministic normalizations — same as the agent generation path so
     // cover drafts don't invent absolute URLs against a known baseURL or
     // stall at a login wall when a storageState already exists.
-    const authStateRel = resolveAuthStorageStateRelativePath(projectPath);
+    const authStateRel = shouldUseStorageState(precondition)
+        ? resolveAuthStorageStateRelativePath(projectPath)
+        : null;
     if (authStateRel) {
         body = injectStorageState(body, authStateRel);
     }
@@ -371,6 +394,7 @@ export async function runCover(options: CoverOptions): Promise<CoverResult> {
         needsReview: assessed.needsReview,
         reviewReasons: assessed.reviewReasons,
         todoNotes: assessed.todoNotes,
+        blockingTodos: assessed.blockingTodos,
         blocked: assessed.blocked,
     };
 }
@@ -538,8 +562,10 @@ async function callLLM(
     resolved: ResolvedTarget,
     evidence: CoverEvidence,
     sourceContext: string | null,
+    precondition: AuthPrecondition,
+    projectPath: string,
 ): Promise<{ body: string; model: string }> {
-    const prompt = buildCoverPrompt(resolved, evidence, sourceContext);
+    const prompt = buildCoverPrompt(resolved, evidence, sourceContext, precondition, projectPath);
     // One factory owns native-provider versus OpenAI-compatible wiring. This
     // keeps `raiken cover` aligned with chat, organize, and repair instead of
     // silently sending every configured provider through OpenRouter's API.
@@ -558,10 +584,36 @@ async function callLLM(
     return { body: stripCodeFences(text), model: ai.model };
 }
 
+/** Auth guidance for the cover prompt, keyed on the resolved precondition. */
+function formatCoverAuthGuidance(precondition: AuthPrecondition, projectPath: string): string {
+    if (precondition === "login_flow") {
+        const lines = [
+            "- This scenario tests the sign-in flow itself. Write the login steps: navigate to the",
+            "  login page, fill the credential fields, and submit — do NOT skip them and do NOT",
+            "  assume a saved session.",
+        ];
+        const credentialEnv = authCredentialEnvGuidance(projectPath);
+        if (credentialEnv) {
+            lines.push("- Read credentials from the environment — never hardcode a real password:");
+            lines.push(...credentialEnv.split("\n").map((line) => `  ${line}`));
+        }
+        return lines.join("\n");
+    }
+    if (precondition === "unauthenticated") {
+        return "- This scenario must run logged out. Do not sign in and do not use a saved session.";
+    }
+    return (
+        "- If a reusable auth session exists, the draft will receive test.use({ storageState })\n" +
+        "  automatically — do not invent a login flow."
+    );
+}
+
 function buildCoverPrompt(
     resolved: ResolvedTarget,
     evidence: CoverEvidence,
     sourceContext: string | null,
+    precondition: AuthPrecondition,
+    projectPath: string,
 ): string {
     const fileList =
         resolved.sourceFiles.length > 0
@@ -593,9 +645,12 @@ ${formatEvidence(evidence)}
   the origin. Use page.goto only for the initial entry URL. Mid-flow, prefer clicking
   in-app links/buttons from the known page context — full reloads wipe SPA
   client state (cart, wizards, session UI).
-- If a reusable auth session exists, the draft will receive test.use({ storageState })
-  automatically — do not invent a login flow.
+${formatCoverAuthGuidance(precondition, projectPath)}
 - Selector priority: getByRole > getByLabel > getByPlaceholder > getByTestId > getByText.
+- A data-testid that repeats across list rows/cards resolves to MULTIPLE elements
+  (strict-mode failure). Scope it to the item's own testid container
+  (getByTestId('card-<id>').getByTestId('title')) or use getByRole with the
+  specific accessible name instead of a bare shared test id.
 - Assertions must be specific and tied to the scenario.
 - getByText matches ONE element's full text. Assert individual values — never
   one assertion over concatenated text from separate elements.
@@ -672,6 +727,14 @@ function formatEvidence(evidence: CoverEvidence): string {
         }
         sections.push(
             `[SELECTORS PRESENT IN SOURCE MARKUP — safe to use even for states not captured above]\n${lines.join("\n")}`,
+        );
+    }
+
+    if (evidence.sourceRoutes.length > 0) {
+        sections.push(
+            `[ROUTES DEFINED IN SOURCE — navigate to these, not invented paths]\n${evidence.sourceRoutes
+                .map((route) => `- ${route}`)
+                .join("\n")}`,
         );
     }
 

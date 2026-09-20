@@ -362,19 +362,34 @@ export async function runInteractiveAuthHandoff(
         headless,
         args: headless ? [] : ["--start-maximized"],
     });
-    const context: BrowserContext = await browser.newContext({ viewport: null });
-    const page: Page = await context.newPage();
+    // Everything between launch and the race setup can throw (newContext,
+    // newPage, the caller-supplied onBrowserReady hook). Without this guard
+    // the rejection escapes with no browser.close() — a zombie Chromium
+    // process per failed handoff (review finding).
+    let context: BrowserContext;
+    let page: Page;
+    try {
+        context = await browser.newContext({ viewport: null });
+        page = await context.newPage();
 
-    const url = options.url ?? "about:blank";
-    if (url !== "about:blank") {
-        try {
-            await page.goto(url, { waitUntil: "domcontentloaded" });
-        } catch {
-            // Partial loads and manual navigation still allow handoff success.
+        const url = options.url ?? "about:blank";
+        if (url !== "about:blank") {
+            try {
+                await page.goto(url, { waitUntil: "domcontentloaded" });
+            } catch {
+                // Partial loads and manual navigation still allow handoff success.
+            }
         }
-    }
 
-    options.onBrowserReady?.();
+        options.onBrowserReady?.();
+    } catch (error) {
+        try {
+            await browser.close();
+        } catch {
+            /* the original error is the useful one */
+        }
+        throw error;
+    }
 
     const baseline = await captureStorageBaseline(context, page);
 

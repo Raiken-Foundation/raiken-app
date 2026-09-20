@@ -37,44 +37,7 @@ export class AdminRepository {
         }
     }
 
-    /**
-     * Query a table with pagination.
-     */
-    queryTable(tableName: string, limit: number, offset: number): unknown[] {
-        if (!this.isValidTableName(tableName)) {
-            return [];
-        }
-        try {
-            return this.adapter.db
-                .prepare(`
-      SELECT * FROM "${tableName}"
-      LIMIT ? OFFSET ?
-    `)
-                .all(limit, offset);
-        } catch (error) {
-            console.error(`Error querying table ${tableName}:`, error);
-            return [];
-        }
-    }
-
     private isValidTableName(name: string): boolean {
         return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
-    }
-
-    /**
-     * Execute a custom SQL query (SELECT only for safety).
-     */
-    executeQuery(query: string, params: unknown[] = []): unknown[] {
-        // Only allow SELECT queries for safety
-        const trimmedQuery = query.trim().toUpperCase();
-        if (!trimmedQuery.startsWith("SELECT")) {
-            throw new Error("Only SELECT queries are allowed");
-        }
-
-        try {
-            return this.adapter.db.prepare(query).all(...params);
-        } catch (error) {
-            throw new Error(`Query execution failed: ${(error as Error).message}`);
-        }
     }
 }

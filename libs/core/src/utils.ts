@@ -8,6 +8,14 @@ export function getParamName(param: t.Node): string {
         return param.name;
     } else if (t.isRestElement(param) && t.isIdentifier(param.argument)) {
         return `...${param.argument.name}`;
+    } else if (t.isAssignmentPattern(param)) {
+        // Default-valued params (`function f(a = 1)`): record the bound
+        // name, not the literal "param" — default params are ubiquitous and
+        // corrupted every affected signature downstream (review finding).
+        return getParamName(param.left);
+    } else if (t.isTSParameterProperty(param)) {
+        // Constructor parameter properties (`constructor(private x: T)`).
+        return getParamName(param.parameter);
     } else if (t.isObjectPattern(param)) {
         return "{ ... }";
     } else if (t.isArrayPattern(param)) {

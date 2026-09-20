@@ -129,6 +129,13 @@ export const discoveryConfigSchema = z.object({
      * otherwise query params are stripped so `/x?a=1` and `/x?a=2` collapse.
      */
     preserveQueryParams: z.boolean().optional(),
+    /**
+     * The DOM must be unchanged for this long (ms) before capture, for
+     * timer-driven loading that has no network signal (default: 400).
+     */
+    settleQuietMs: z.number().int().min(0).optional(),
+    /** Hard cap on the DOM-quiet wait, in ms (default: 3000). */
+    settleMaxMs: z.number().int().min(0).optional(),
 });
 
 export const indexingConfigSchema = z.object({
@@ -261,6 +268,8 @@ export const defaultConfig = {
         pauseOnAuth: true,
         maxRunTimeMs: 30 * 60 * 1000,
         preserveQueryParams: false,
+        settleQuietMs: 400,
+        settleMaxMs: 3000,
     },
     indexing: {
         fullScan: false,

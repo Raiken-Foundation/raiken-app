@@ -7,7 +7,6 @@ import type { AgentToolGroupDeps, ToolResult } from "./types";
 export const MEMORY_TERMINAL_CONTROL_TOOL_NAMES = [
     "getMemoryContext",
     "done",
-    "respond",
     "awaitUser",
 ] as const;
 
@@ -68,41 +67,6 @@ export function createMemoryTerminalControlTools(deps: AgentToolGroupDeps) {
                     .describe("List of pages/URLs that were visited"),
             }),
             // NO execute function - calling this tool stops the agent loop
-        }),
-
-        respond: tool({
-            description:
-                "Send a message to the user. Use this when you need to ask a clarifying question, report progress, or provide information that requires user acknowledgment before continuing.",
-            inputSchema: z.object({
-                message: z.string().describe("Message to send to the user"),
-                needsInput: z
-                    .boolean()
-                    .optional()
-                    .default(false)
-                    .describe("Whether you need user input to continue (true = wait for response)"),
-                options: z
-                    .array(z.string())
-                    .optional()
-                    .describe("Optional list of choices for the user to pick from"),
-            }),
-            execute: async (
-                params,
-            ): Promise<ToolResult<{ messageSent: boolean; awaitingInput: boolean }>> => {
-                const {
-                    message,
-                    needsInput = false,
-                    options,
-                } = params as {
-                    message: string;
-                    needsInput?: boolean;
-                    options?: string[];
-                };
-                return {
-                    success: true,
-                    data: { messageSent: true, awaitingInput: needsInput },
-                    message: options ? `${message}\nOptions: ${options.join(", ")}` : message,
-                };
-            },
         }),
 
         awaitUser: tool({

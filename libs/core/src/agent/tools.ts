@@ -96,7 +96,6 @@ export function createAgentTools(ctx: ToolContext) {
         saveAuthState: browser.saveAuthState,
         discoverLinks: browser.discoverLinks,
         done: memory.done,
-        respond: memory.respond,
         awaitUser: memory.awaitUser,
     } satisfies Record<(typeof AGENT_TOOL_REGISTRY_ORDER)[number], unknown>;
 

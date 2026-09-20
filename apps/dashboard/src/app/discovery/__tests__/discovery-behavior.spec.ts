@@ -243,20 +243,3 @@ describe("generate-test handoff", () => {
         expect(GENERATE_TEST_HANDOFF_MS).toBe(600);
     });
 });
-
-describe("blocker resolution choices", () => {
-    it("supports all resolution modes used by the dashboard", () => {
-        const resolutions = ["clear", "skip", "ignore_category", "provide_state"] as const;
-        expect(resolutions).toContain("provide_state");
-        expect(resolutions).toContain("clear");
-    });
-});
-
-describe("page selection pagination", () => {
-    it("computes next and previous offsets from page size", () => {
-        const pageSize = 20;
-        const offset = 20;
-        expect(Math.max(0, offset - pageSize)).toBe(0);
-        expect(offset + pageSize).toBe(40);
-    });
-});

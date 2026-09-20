@@ -25,10 +25,9 @@ import { CLI_EXIT } from "./errors";
 import { detectProject } from "./project-detector";
 import {
     createServerSession,
-    isAllowedDashboardOrigin,
     isLoopbackAddress,
-    isSessionAuthorized,
     redactRequestUrl,
+    registerServerSessionAuth,
 } from "./server-auth";
 import { registerCorrelationScope } from "./server-correlation";
 
@@ -94,28 +93,7 @@ export async function startServer(options: StartServerOptions | number = 7101) {
         });
     });
 
-    // All API routes, including tRPC, artifacts, and the SSE endpoint, are
-    // token-protected in explicitly enabled remote mode. Loopback mode relies
-    // on its binding address and has no long-lived credential to manage.
-    app.addHook("onRequest", async (request, reply) => {
-        if (!request.url.startsWith("/api")) return;
-
-        if (
-            session.mode === "remote" &&
-            !isAllowedDashboardOrigin(request.headers.origin, request.headers.host)
-        ) {
-            return reply.code(403).send({ error: "origin not allowed" });
-        }
-
-        // A local operator can inspect the current session if a future
-        // development client needs to bootstrap it. Never expose a remote
-        // token to a LAN requester.
-        if (request.url.startsWith("/api/session") && isLoopbackAddress(request.ip)) return;
-
-        if (!isSessionAuthorized(request.headers, session)) {
-            return reply.code(401).send({ error: "authorization required" });
-        }
-    });
+    registerServerSessionAuth(app, session);
 
     // Initialize the code graph, ProjectContext, and AgentMemory. Shared with
     // `raiken chat` so both surfaces give the agent the same understanding.

@@ -12,7 +12,7 @@ import { splitTestSavePath } from "@raiken/shared";
 import chalk from "chalk";
 import { dim, renderToolCall, routeDiagnosticsToStderr, splitHITL } from "../agent-stream";
 import { bootstrapProject } from "../bootstrap";
-import { CLI_EXIT, type CliExitCode, safeCliErrorMessage } from "../errors";
+import { CLI_EXIT, type CliExitCode, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
 import { createEventStream, nowTs } from "../repl/events";
 import { cliExit } from "../repl/exit";
 
@@ -170,7 +170,7 @@ export function computeOneShotOutcome(input: OneShotOutcomeInput): OneShotOutcom
             "A test was generated but no file exists on disk for it. Nothing was saved, so nothing was verified.",
         );
     }
-    if (input.runRequested && input.producedTest && !input.runSummary) {
+    if (input.runRequested && !input.runSummary) {
         return notOk("--run was requested but the generated test was never executed.");
     }
     if (input.runSummary && !input.runSummary.success) {
@@ -437,7 +437,7 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
                 .catch(() => undefined);
         }
         if (abort.signal.aborted) return void fail("Run aborted.", CLI_EXIT.CANCELLED);
-        return void fail(err);
+        return void fail(err, mapErrorToCliExitCode(err));
     } finally {
         if (timer) clearTimeout(timer);
         process.off("SIGINT", onSigint);

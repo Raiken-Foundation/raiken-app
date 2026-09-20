@@ -12,7 +12,7 @@
  *   - `flakiness <testFile>`: project-agnostic — runs one spec N times against
  *     the current project and scores run-to-run stability.
  *
- * Exit codes: 0 all scenarios passed (or skipped), 2 bad arguments, and
+ * Exit codes: 0 all selected scenarios executed and passed, 2 bad arguments, and
  * otherwise the shared CLI_EXIT policy — 1 for a scenario or harness failure.
  */
 

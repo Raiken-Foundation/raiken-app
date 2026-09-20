@@ -73,15 +73,31 @@ describe("workflow resolution authority", () => {
         });
     });
 
-    it("uses the last successful snapshot when the query later errors", () => {
-        expect(
-            deriveSaveResolution(
-                { id: "hitl-msg", hitlData: saveHitl },
-                [activeWorkflow],
-                {},
-                true,
-            ),
-        ).toBeUndefined();
+    it("uses the last successful snapshot when the query later errors", async () => {
+        // First: query succeeds with an active workflow.
+        queryState.data = [activeWorkflow];
+        queryState.isSuccess = true;
+        queryState.isError = false;
+        queryState.isLoading = false;
+
+        const { result, rerender } = renderHook(() => useActiveHitlWorkflows(false));
+
+        await waitFor(() => {
+            expect(result.current.workflows).toEqual([activeWorkflow]);
+            expect(result.current.workflowsAuthoritative).toBe(true);
+        });
+
+        // Then: query errors. The hook must keep the last successful snapshot
+        // rather than clearing the list, so pending HITL cards stay visible.
+        queryState.isError = true;
+        queryState.isSuccess = false;
+        queryState.data = [];
+        rerender();
+
+        await waitFor(() => {
+            expect(result.current.workflows).toEqual([activeWorkflow]);
+            expect(result.current.isWorkflowQueryError).toBe(true);
+        });
     });
 });
 

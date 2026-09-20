@@ -96,9 +96,9 @@ describe("computeOneShotOutcome", () => {
     });
 
     // A question ("which pages need tests?") legitimately produces no test.
-    it("does not demand an artifact when the agent produced no test", () => {
+    it("does not report a requested run as successful when no test was produced", () => {
         const outcome = computeOneShotOutcome(base({ producedTest: false, runRequested: true }));
-        expect(outcome).toEqual({ ok: true, exitCode: 0 });
+        expect(outcome).toMatchObject({ ok: false, exitCode: 1 });
     });
 
     // Observed: an agent that stopped at a login form to ask for credentials

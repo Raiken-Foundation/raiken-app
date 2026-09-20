@@ -66,7 +66,7 @@ export async function organizeCommand(options: OrganizeCommandOptions): Promise<
         return;
     }
 
-    const applyResult = applyOrganizePlan(projectPath, result);
+    const applyResult = await applyOrganizePlan(projectPath, result);
 
     if (options.json) {
         process.stdout.write(

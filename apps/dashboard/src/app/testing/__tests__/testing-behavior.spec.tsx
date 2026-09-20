@@ -234,29 +234,3 @@ describe("sidebar always-mounted semantics", () => {
         expect(sidebar.getAttribute("data-collapsed")).toBe("true");
     });
 });
-
-describe("file path selection dedupe", () => {
-    it("reuses an open tab when selecting the same path twice", () => {
-        const openTabs: TestFile[] = [];
-        const path = "e2e/login.spec.ts";
-
-        const openByPath = (filePath: string) => {
-            const existing = openTabs.find((f) => f.path === filePath);
-            if (existing) return existing.id;
-            const id = `graph:${filePath}`;
-            openTabs.push({
-                id,
-                name: "login.spec.ts",
-                path: filePath,
-                content: "",
-                status: "pending",
-            });
-            return id;
-        };
-
-        const first = openByPath(path);
-        const second = openByPath(path);
-        expect(first).toBe(second);
-        expect(openTabs).toHaveLength(1);
-    });
-});

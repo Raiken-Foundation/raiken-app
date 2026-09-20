@@ -334,6 +334,20 @@ nx run-many -t build      # Build all projects
 
 ### Testing
 
+```bash
+pnpm test                 # Unit suites; no browser installation needed
+pnpm test:trust           # Deterministic assertion, prompt-role, and failure regressions
+pnpm exec playwright install chromium
+pnpm exec nx run @raiken/playground-notes:build
+pnpm test:integration     # Serialized browser integration, including repair on a mutated page
+pnpm verify               # Static, unit, browser, build, and repeated golden-suite gates
+```
+
+The trust suite checks acceptance and failure contracts with deterministic responses. Live-model
+quality and prompt-injection resistance require separate repeated provider evaluations; a passing
+handwritten golden suite does not establish generated-test accuracy. See the
+[remediation record](docs/system-remediation-2026-09-08.md) for evidence and limits.
+
 #### Manual Discovery Testing (Recommended)
 
 Use this runbook to manually validate discovery, auth pause/resume, and dashboard runtime behavior.
@@ -444,6 +458,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
 
 - **static-checks** — Biome, TypeScript, unit tests, CLI build
 - **discovery-integration** — serialized Playwright-backed discovery integration specs (`pnpm test:integration`)
+- **accuracy-gates** — deterministic trust checks and the golden suite repeated with retries disabled
 - **cli-smoke** — builds the CLI on Ubuntu and runs `pnpm smoke:cli`
 
 Release version metadata lives in `apps/cli/package.json`. The Node host reads it through `@raiken/shared/server`; the browser-safe version constant is parity-tested against the same package version. Health is composed in the split router under `libs/shared/src/lib/router/`.

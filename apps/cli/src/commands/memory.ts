@@ -1,8 +1,4 @@
-import {
-    AgentMemory,
-    createProjectApplication,
-    isRunScopedPreference,
-} from "@raiken/core";
+import { AgentMemory, createProjectApplication, isRunScopedPreference } from "@raiken/core";
 import chalk from "chalk";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { exitUsage } from "../errors";

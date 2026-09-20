@@ -36,7 +36,7 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
     try {
         const mem = AgentMemory.getInstance(projectPath);
         mem.initialize(false);
-        prefCount = Object.keys(mem.getAllPreferences()).length;
+        prefCount = Object.keys(mem.getDurablePreferences()).length;
     } catch {
         /* memory unavailable */
     }

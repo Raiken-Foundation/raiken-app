@@ -28,7 +28,7 @@ vi.mock("../bootstrap", () => ({
     ensureBrowserSession: vi.fn(),
 }));
 
-vi.mock("../status", () => ({
+vi.mock("../../status", () => ({
     gatherStatusSnapshot: vi.fn().mockResolvedValue({}),
     renderStatusStrip: vi.fn(),
 }));

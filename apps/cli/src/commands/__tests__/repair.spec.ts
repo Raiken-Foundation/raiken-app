@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { createProjectApplication } from "@raiken/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runTests = vi.fn(async () => ({ success: true }));
@@ -134,6 +134,18 @@ describe("repairCommand fail-fast order", () => {
         expect(runTests).not.toHaveBeenCalled();
     });
 
+    it("exits 2 (usage) when no file is passed and no spec is broken on record", async () => {
+        vi.mocked(createProjectApplication).mockReturnValueOnce({
+            testing: {
+                listTestFiles: vi.fn(async () => ({ files: [] })),
+                runTests,
+            },
+        } as never);
+        const code = await withThrowExit(() => repairCommand(undefined, {}));
+        expect(code).toBe(2);
+        expect(runTests).not.toHaveBeenCalled();
+    });
+
     it("runs the spec first when a key is configured", async () => {
         process.env.OPENROUTER_API_KEY = "sk-or-v1-testkey123";
         const code = await withThrowExit(() => repairCommand(undefined, {}));
@@ -198,7 +210,10 @@ describe("droppedProvenSelectors", () => {
 
     it("accepts a fix that keeps the proven literal", () => {
         expect(
-            droppedProvenSelectors("await page.getByRole('link', { name: 'Tasks' }).click();", proven),
+            droppedProvenSelectors(
+                "await page.getByRole('link', { name: 'Tasks' }).click();",
+                proven,
+            ),
         ).toEqual([]);
     });
 

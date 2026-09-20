@@ -2,6 +2,7 @@
 // Must stay the first import: installs the console filter before any module
 // whose init code nags (baseline-browser-mapping fires at import time).
 import "./upstream-warnings";
+import fs from "node:fs";
 import path from "node:path";
 import { getRaikenVersion } from "@raiken/shared";
 import chalk from "chalk";
@@ -199,6 +200,11 @@ program
         false,
     )
     .action(async (options) => {
+        if (!fs.existsSync(path.join(process.cwd(), "package.json"))) {
+            exitUsage(
+                'No package.json found in the current directory. Run "raiken init" from your project root.',
+            );
+        }
         try {
             const { initializeProject } = await import("./initializer");
             await initializeProject(process.cwd(), {
@@ -666,6 +672,11 @@ program
     )
     .option("--apply", "Write the fix without prompting (scripts / CI)", false)
     .option("--json", "Emit the repair outcome as JSON (implies no prompt)", false)
+    .option(
+        "--allow-weaken",
+        "Permit a fix that changes an asserted value (use only when the expectation itself is wrong)",
+        false,
+    )
     .option("--no-interpret", "Skip the diagnosis step and go straight to the fix")
     .option(
         "--no-verify",

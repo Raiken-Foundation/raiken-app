@@ -44,7 +44,10 @@ describe("raiken test unverified gate", () => {
             path.join(projectPath, "e2e", "unverified.spec.ts"),
             `${MARKER}\ntest('x', () => {});\n`,
         );
-        fs.writeFileSync(path.join(projectPath, "e2e", "verified.spec.ts"), "test('x', () => {});\n");
+        fs.writeFileSync(
+            path.join(projectPath, "e2e", "verified.spec.ts"),
+            "test('x', () => {});\n",
+        );
     });
 
     afterEach(() => {
@@ -84,10 +87,7 @@ describe("raiken test unverified gate", () => {
 
     it("scans the whole suite when no file is given", async () => {
         listTestFiles.mockResolvedValue({
-            files: [
-                { path: "e2e/unverified.spec.ts" },
-                { path: "e2e/verified.spec.ts" },
-            ],
+            files: [{ path: "e2e/unverified.spec.ts" }, { path: "e2e/verified.spec.ts" }],
             testDirectory: "e2e",
         });
         const code = await withThrowExit(() => testCommand(undefined, {}));

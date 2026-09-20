@@ -14,9 +14,7 @@ function registeredTopLevelCommands(): string[] {
     const names = new Set<string>();
     // `program\n    .command("cover <target>")`, including the `const x = program`
     // form. Anything chained off another variable (e.g. `hooks`) is nested.
-    for (const match of source.matchAll(
-        /(?:^|=\s*)program\s*\n\s*\.command\(\s*["'`]([\w-]+)/gm,
-    )) {
+    for (const match of source.matchAll(/(?:^|=\s*)program\s*\n\s*\.command\(\s*["'`]([\w-]+)/gm)) {
         const name = match[1];
         if (name) names.add(name);
     }
@@ -52,7 +50,12 @@ describe("grouped help", () => {
 
     it("leads with the commands a first run needs", () => {
         expect(HELP_GROUPS[0]?.title).toBe("Set up");
-        for (const command of ["raiken init", "raiken doctor --fix", "raiken cover", "raiken test"]) {
+        for (const command of [
+            "raiken init",
+            "raiken doctor --fix",
+            "raiken cover",
+            "raiken test",
+        ]) {
             expect(help).toContain(command);
         }
     });

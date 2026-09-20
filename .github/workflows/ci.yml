@@ -64,6 +64,7 @@ jobs:
             # runs the benchmark's hand-written suite repeatedly with retries
             # disabled, which is the only way a fix that passes intermittently
             # is told apart from one that holds.
+            - run: pnpm test:trust
             - run: node scripts/verify-gates.mjs --only golden-suite
 
     cli-smoke:

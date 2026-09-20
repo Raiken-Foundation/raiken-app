@@ -186,7 +186,7 @@ describe("configCommand", () => {
 
         expect(readConfig().ai).toMatchObject({
             provider: "deepseek",
-            model: "deepseek-chat",
+            model: "deepseek-v4-flash",
             baseURL: "https://api.deepseek.com/v1",
         });
         // The prior provider key was migrated to its provider-scoped slot
@@ -402,7 +402,7 @@ describe("configCommand", () => {
             expect(mockListProviderModels).not.toHaveBeenCalled();
             expect(readConfig().ai).toMatchObject({
                 provider: "deepseek",
-                model: "deepseek-chat",
+                model: "deepseek-v4-flash",
             });
             expect((readConfig().ai as Record<string, unknown>).apiKey).toBeUndefined();
         });
@@ -427,7 +427,7 @@ describe("configCommand", () => {
         it("caps a large catalog to a shortlist so the picker stays readable", async () => {
             // OpenRouter-style response: a big live catalog that happens to
             // already contain the provider's own recommended ids (real ids
-            // for DeepSeek: "deepseek-chat" is the default, "deepseek-reasoner"
+            // for DeepSeek: "deepseek-v4-flash" is the default, "deepseek-v4-pro"
             // is recommended-but-not-default), buried among 300 unrelated
             // entries. The shortlist should surface the default first, then
             // the recommended pick, ahead of the rest of the noise.
@@ -437,12 +437,12 @@ describe("configCommand", () => {
                 source: "live" as const,
             }));
             filler.splice(150, 0, {
-                id: "deepseek-chat",
+                id: "deepseek-v4-flash",
                 name: "DeepSeek Chat",
                 source: "live" as const,
             });
             filler.splice(250, 0, {
-                id: "deepseek-reasoner",
+                id: "deepseek-v4-pro",
                 name: "DeepSeek Reasoner",
                 source: "live" as const,
             });
@@ -458,7 +458,7 @@ describe("configCommand", () => {
 
             expect(readConfig().ai).toMatchObject({
                 provider: "deepseek",
-                model: "deepseek-reasoner",
+                model: "deepseek-v4-pro",
             });
         });
 

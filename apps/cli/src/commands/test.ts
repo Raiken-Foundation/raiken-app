@@ -603,6 +603,11 @@ async function listTests(
     if (!result.success) {
         console.log(chalk.red("  ✗ Could not list tests (Playwright failed to load the suite)."));
         if (result.stderr) console.log(dim(result.stderr.split("\n").slice(0, 8).join("\n")));
+        console.log(
+            chalk.dim(
+                "  Hint: if this project has no playwright.config.ts, run `raiken init` to scaffold one.",
+            ),
+        );
         cliExit(1);
     }
 

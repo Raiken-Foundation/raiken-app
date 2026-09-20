@@ -129,10 +129,15 @@ export async function coverCommand(target: string, options: CoverCommandOptions)
     if (result.sourceFiles.length > 0) {
         console.log(chalk.dim(`   context: ${result.sourceFiles.length} source file(s)`));
     }
-    if (result.todoNotes > 0) {
+    if (result.blockingTodos > 0) {
         console.log(
-            chalk.dim(`   ${result.todoNotes} optional TODO note(s) in comments — not blocking`),
+            chalk.yellow(
+                `   ${result.blockingTodos} step(s) stubbed as TODO comments — the draft cannot run until filled in`,
+            ),
         );
+    }
+    if (result.todoNotes > 0) {
+        console.log(chalk.dim(`   ${result.todoNotes} optional TODO note(s) in comments`));
     }
     if (result.grounding && result.grounding.sourceGrounded.length > 0) {
         console.log(

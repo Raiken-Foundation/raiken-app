@@ -2,11 +2,15 @@ packages:
   - 'apps/*'
   - 'libs/*'
   - 'tools/*'
+# sharp 0.32 builds its native binary (prebuild-install → node-gyp), which needs
+# network and a vendored libvips. 0.33+ ships the binary + libvips as prebuilt
+# @img/sharp-* packages, so install can never fall back to a source build.
+overrides:
+  sharp: ^0.33.5
 onlyBuiltDependencies:
   - '@swc/core'
   - better-sqlite3
   - esbuild
   - nx
   - protobufjs
-  - sharp
   - unrs-resolver

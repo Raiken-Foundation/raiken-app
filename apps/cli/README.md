@@ -25,7 +25,7 @@ Raiken is a developer-centric CLI tool that uses AI to automatically generate, r
 npm install -g raiken
 ```
 
-Requires **Node.js 22.x** (see the workspace `.nvmrc`)
+Requires **Node.js 22 or newer** (22 LTS or 24 LTS both work; prebuilt native modules are included for each).
 
 Installing with `pnpm add -g` instead needs one extra step. pnpm blocks dependency
 build scripts by default, which leaves the native modules behind `better-sqlite3`

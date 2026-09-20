@@ -10,16 +10,20 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
     applyRepairSetupFixes,
+    changedAssertedValues,
     containsParentTraversal,
     createProjectApplication,
+    describeAssertionValueMismatch,
     describeGroundingViolations,
     describeParentTraversal,
     describeReassertedAbsence,
     describeRegressedSelector,
     describeTimeoutFocus,
+    describeWeakenedAssertion,
     extractOrigins,
     extractProvenAbsentLocators,
     extractProvenPresentSelectors,
+    extractValueMismatch,
     gatherContext,
     gatherRepairEvidence,
     getProvider,
@@ -49,6 +53,12 @@ export interface RepairCommandOptions {
      * the run for callers who only want the diff applied.
      */
     verify?: boolean;
+    /**
+     * Permit a fix that changes an asserted value (toHaveText/toEqual/…). Off
+     * by default: changing an expected value to match the page is the false-
+     * green signature — the app may be the broken side, not the test.
+     */
+    allowWeaken?: boolean;
     /**
      * The original user scenario the failing draft was drafted for (cover
      * --verify). Fed into the repair prompt as ground truth so the fix never
@@ -173,7 +183,10 @@ export function isAttemptOscillation(
  * otherwise an AI that weakened the test to green would silently inherit the
  * right to run in CI. Exported for unit tests.
  */
-export function restampUnverifiedMarker(originalCode: string, fixedCode: string): {
+export function restampUnverifiedMarker(
+    originalCode: string,
+    fixedCode: string,
+): {
     code: string;
     restamped: boolean;
 } {
@@ -487,7 +500,9 @@ export async function repairFailedRun(input: {
                     pageSummaries,
                     sourceCode,
                     provenSelectors,
+                    sourceSelectors: evidence.sourceSelectors,
                     scenario: options.scenario,
+                    allowWeaken: options.allowWeaken,
                     signal,
                     // The diagnosis was made against the original failure; later
                     // attempts carry the fresh run output instead.
@@ -520,7 +535,22 @@ export async function repairFailedRun(input: {
         lastRepair = repair;
 
         if (repair.error || !repair.fixedCode) {
-            const message = repair.error ?? "The AI could not produce a corrected test.";
+            const rawMessage = repair.error ?? "The AI could not produce a corrected test.";
+            // An assertion-value failure (Expected X / Received Y) is an
+            // app-side behavior mismatch the model cannot patch. When the
+            // model returns no code for one, say so in those terms instead of
+            // leaking an opaque "empty response".
+            const valueMismatch = !repair.fixedCode
+                ? extractValueMismatch(
+                      [
+                          currentRaw,
+                          ...currentResults.map((result) => result.error?.message ?? ""),
+                      ].join("\n"),
+                  )
+                : null;
+            const message = valueMismatch
+                ? describeAssertionValueMismatch(valueMismatch)
+                : rawMessage;
             if (attempt === 1) {
                 restore?.();
                 if (options.json) emit({ repaired: false, filePath: file, error: message });
@@ -547,10 +577,7 @@ export async function repairFailedRun(input: {
         // still mean what the scenario asked — an AI that weakens a test to green
         // must not silently inherit permission to run in CI. If the input spec
         // carried the marker and the AI draft dropped it, stamp it back.
-        const restamped = restampUnverifiedMarker(
-            repair.originalCode ?? currentCode,
-            fixedCode,
-        );
+        const restamped = restampUnverifiedMarker(repair.originalCode ?? currentCode, fixedCode);
         fixedCode = restamped.code;
         if (restamped.restamped) markerRestamped = true;
 
@@ -655,6 +682,21 @@ export async function repairFailedRun(input: {
                 );
             }
             continue;
+        }
+
+        // Unconditional assertion-value guard: a fix that removes or replaces a
+        // literal the test asserted (toHaveText/toContainText/toEqual/toHaveCount/
+        // toHaveURL/toHaveTitle/toHaveValue) has adapted the test to the app — a
+        // false green. Reject unless the caller explicitly opts out. This is the
+        // standalone-repair backstop; G2 below only adds scenario context under
+        // `cover --verify`.
+        const weakened = changedAssertedValues(repair.originalCode ?? currentCode, fixedCode);
+        if (weakened.length > 0 && !options.allowWeaken) {
+            stopReason = `the fix changed asserted value(s) ${weakened.join(", ")} — the app may be the broken side, not the test`;
+            if (!options.json) {
+                console.log(chalk.red(`  ✗ ${describeWeakenedAssertion(weakened)}`));
+            }
+            break;
         }
 
         // G2 — scenario mode (cover --verify): a fix that drops an expectation
@@ -797,7 +839,7 @@ export async function repairFailedRun(input: {
                 restore?.();
                 if (options.json) {
                     emit({
-                        repaired: true,
+                        repaired: false,
                         applied: false,
                         filePath: file,
                         mode: repair.mode,
@@ -958,7 +1000,7 @@ export async function repairFailedRun(input: {
     restore?.();
     if (options.json) {
         emit({
-            repaired: applied,
+            repaired: false,
             applied: applied && !reverted,
             filePath: file,
             ...(lastRepair ? { mode: lastRepair.mode, editCount: lastRepair.editCount } : {}),
@@ -1031,7 +1073,10 @@ export async function repairCommand(
                     ),
                 );
             }
-            cliExit(1);
+            // No file passed and no prior failure on record: the invocation
+            // itself is missing its required input, so this is a usage error (2),
+            // consistent with repair's other missing-argument paths.
+            cliExit(CLI_EXIT.USAGE);
         }
         if (broken.length > 1) {
             const list = broken.map((f) => f.path).join(", ");

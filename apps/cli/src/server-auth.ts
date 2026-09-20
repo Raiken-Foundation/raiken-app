@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import type { FastifyInstance } from "fastify";
 
 export interface ServerSession {
     mode: "loopback" | "remote";
@@ -32,10 +33,16 @@ export function getSessionToken(headers: ServerHeaders): string {
 }
 
 export function isSessionAuthorized(headers: ServerHeaders, session: ServerSession): boolean {
-    if (session.mode === "loopback") return true;
+    if (session.mode === "loopback") {
+        const host = typeof headers.host === "string" ? headers.host : undefined;
+        const origin = typeof headers.origin === "string" ? headers.origin : undefined;
+        return isLocalHost(host) && isAllowedDashboardOrigin(origin, host);
+    }
     const supplied = getSessionToken(headers);
     if (!session.token || supplied.length !== session.token.length) return false;
-    return timingSafeEqual(Buffer.from(supplied), Buffer.from(session.token));
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(session.token);
+    return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function isLoopbackAddress(address: string | undefined): boolean {
@@ -60,6 +67,16 @@ export function redactRequestUrl(rawUrl: string): string {
     }
 }
 
+export function isLocalHost(host: string | undefined): boolean {
+    if (!host || /[\\/@?#\s]/.test(host)) return false;
+    try {
+        const hostname = new URL(`http://${host}`).hostname;
+        return ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+    } catch {
+        return false;
+    }
+}
+
 export function isAllowedDashboardOrigin(
     origin: string | undefined,
     host: string | undefined,
@@ -67,6 +84,8 @@ export function isAllowedDashboardOrigin(
     if (!origin) return true;
     try {
         const source = new URL(origin);
+        if (!["http:", "https:"].includes(source.protocol) || source.username || source.password)
+            return false;
         if (source.host === host) return true;
         return (
             (source.protocol === "http:" || source.protocol === "https:") &&
@@ -76,4 +95,30 @@ export function isAllowedDashboardOrigin(
     } catch {
         return false;
     }
+}
+
+/** Shared HTTP enforcement for API, SSE and artifact routes. */
+export function registerServerSessionAuth(app: FastifyInstance, session: ServerSession): void {
+    app.addHook("onRequest", async (request, reply) => {
+        if (!request.url.startsWith("/api")) return;
+
+        if (!isAllowedDashboardOrigin(request.headers.origin, request.headers.host)) {
+            return reply.code(403).send({ error: "origin not allowed" });
+        }
+
+        // A local operator can inspect the current session if a future
+        // development client needs to bootstrap it. Never expose a remote
+        // token to a LAN requester.
+        if (
+            session.mode === "remote" &&
+            request.url.split("?")[0] === "/api/session" &&
+            isLoopbackAddress(request.ip) &&
+            isLocalHost(request.headers.host)
+        )
+            return;
+
+        if (!isSessionAuthorized(request.headers, session)) {
+            return reply.code(401).send({ error: "authorization required" });
+        }
+    });
 }

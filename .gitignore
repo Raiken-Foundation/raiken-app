@@ -63,4 +63,11 @@ test-reports/
 **/tests/generated/
 **/e2e/generated/
 
+# Stryker mutation testing
+.stryker-tmp/
+reports/
+
 .local
+
+# Local dependency store
+.pnpm-store/

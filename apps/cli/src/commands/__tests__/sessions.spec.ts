@@ -1,5 +1,5 @@
 /**
- * `raiken sessions` — the terminal-visible list behind `raiken resume <name>`.
+ * `raiken sessions` — lists saved agent sessions (one-shot runs; see `raiken -p`).
  * Runs the command against a temp project's `.raiken/sessions/` fixtures.
  */
 
@@ -37,11 +37,11 @@ function logText(): string {
 }
 
 describe("sessionsCommand", () => {
-    it("teaches the next step when no sessions exist", async () => {
+    it("reports when no sessions exist", async () => {
         const code = await withThrowExit(() => sessionsCommand({}));
         expect(code).toBe(0);
         expect(logText()).toContain("No saved sessions");
-        expect(logText()).toContain("/sessions save");
+        expect(logText()).not.toContain("resume");
     });
 
     it("lists saved sessions newest first with counts and previews", async () => {
@@ -59,7 +59,7 @@ describe("sessionsCommand", () => {
         const text = logText();
         expect(text.indexOf("checkout")).toBeLessThan(text.indexOf("login flow"));
         expect(text).toContain("1 msgs");
-        expect(text).toContain("raiken resume <name>");
+        expect(text).not.toContain("resume");
     });
 
     it("emits machine-readable JSON", async () => {

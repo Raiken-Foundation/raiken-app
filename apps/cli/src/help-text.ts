@@ -76,7 +76,7 @@ export const HELP_GROUPS: HelpGroup[] = [
             entry("sync", "Sync with the ticket system and analyse impact"),
             entry("trace [stack]", "Which tests most likely reproduce a stack trace"),
             entry("context", "Write raiken.ctx.md for IDE AI agents"),
-            entry("search <query>", "Semantic code search"),
+            entry("search <query>", "Keyword code search"),
             entry("eval <suite>", "Agent eval suites and flakiness scoring"),
         ],
     },

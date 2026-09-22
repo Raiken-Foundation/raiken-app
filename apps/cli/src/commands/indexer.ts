@@ -41,7 +41,7 @@ export async function indexCommand(options: IndexOptions): Promise<void> {
 
     console.log(
         dim(
-            `\n  Index ready. Try ${chalk.white('raiken search "<query>"')}, ${chalk.white("raiken status")}, or just ${chalk.white("raiken")}.\n`,
+            `\n  Index ready. Try ${chalk.white('raiken search "<query>"')} or ${chalk.white("raiken status")}.\n`,
         ),
     );
 }

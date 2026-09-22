@@ -1,8 +1,5 @@
 /**
- * `raiken sessions` — list saved interactive sessions from the terminal.
- * `raiken resume <name>` needs a name; until now those names only existed
- * inside the REPL (`/sessions`), which made resume a dead end for
- * terminal-only users. Mirrors the REPL `/sessions` list.
+ * `raiken sessions` — list saved agent sessions (one-shot runs; see `raiken -p`).
  */
 
 import chalk from "chalk";
@@ -39,12 +36,7 @@ export async function sessionsCommand(options: SessionsCommandOptions): Promise<
     }
 
     if (sessions.length === 0) {
-        console.log(
-            dim(
-                "  No saved sessions. Start one with `raiken` and save it with " +
-                    "`/sessions save <name>` — then `raiken resume <name>` picks it back up.",
-            ),
-        );
+        console.log(dim("  No saved sessions."));
         cliExit(0);
     }
 
@@ -56,6 +48,5 @@ export async function sessionsCommand(options: SessionsCommandOptions): Promise<
         );
         console.log(`      ${dim(previewMessage(s.messages))}`);
     }
-    console.log(dim("\n  Resume with: raiken resume <name>"));
     cliExit(0);
 }

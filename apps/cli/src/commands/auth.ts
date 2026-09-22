@@ -29,8 +29,8 @@ import { loadAuthConfig, resolveAuthStorageStateDestination } from "@raiken/shar
 import chalk from "chalk";
 import ora from "ora";
 import { dim } from "../agent-stream";
-import { CLI_EXIT, exitUsage, safeCliErrorMessage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { CLI_EXIT, exitConfigAuth, exitUsage, safeCliErrorMessage } from "../errors";
+import { cliExit } from "../cli/exit";
 
 export interface ManualSaveWatcher {
     promise: Promise<void>;
@@ -193,6 +193,22 @@ export async function authCommand(options: AuthOptions): Promise<void> {
         }
     }
 
+    // The interactive browser flow needs a human to log in and (for manual
+    // saves) an Enter key to press. With a non-TTY stdin the readline watcher
+    // EOFs instantly and saves an empty session — the exact "contains no
+    // cookies or origins" failure mode. Fail fast with the non-interactive
+    // options instead of launching a browser nobody can drive.
+    if (!process.stdin.isTTY && !options.createManualSaveWatcher) {
+        exitConfigAuth(
+            "Interactive auth needs a terminal, but stdin is not a TTY (headless run).\n" +
+                "Provide credentials non-interactively instead:\n" +
+                "  --script <path>          custom login script (auth.customLoginScript)\n" +
+                '  --cookie "<pairs>"        import cookies directly (requires --domain)\n' +
+                "  --storage <key=value>    import localStorage entries (requires --domain)\n" +
+                "  --from-state-file <path> copy an existing Playwright storage-state JSON",
+        );
+    }
+
     console.log(chalk.cyan("\nStarting authentication flow...\n"));
 
     const url = options.url ?? "about:blank";
@@ -326,6 +342,11 @@ export async function authCommand(options: AuthOptions): Promise<void> {
             );
             console.log(
                 chalk.dim("   Re-run `raiken auth` and complete the login before exiting.\n"),
+            );
+            console.log(
+                chalk.dim(
+                    "   Non-interactive runs: use --cookie/--storage, --from-state-file, or a custom login script instead.\n",
+                ),
             );
             cliExit(CLI_EXIT.RUNTIME_FAILURE);
         }

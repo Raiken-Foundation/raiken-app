@@ -17,7 +17,6 @@ import { EVIDENCE_POLICY } from "../agent/prompt-messages";
 import { GraphQueryService } from "../analysis/graph-query";
 import { ProjectContext } from "../analysis/project-context";
 import { CodeGraphDB } from "../database/db";
-import { EmbeddingsGenerator } from "../database/embeddings";
 import type {
     SuggestionAction,
     TicketImpact,
@@ -250,20 +249,19 @@ ${ticket.changedFiles ? `\nChanged files:\n${ticket.changedFiles.map((f) => `  $
         return ctx.findRelevantFiles(query, 15);
     }
 
+    /**
+     * Keyword search over the code-graph index (replaced the embeddings
+     * model removed with the sqlite-vec/xenova cut). Same contract: files
+     * relevant to the ticket text + analyzed components/keywords.
+     */
     private async semanticSearch(ticket: TicketInfo, analysis: ImpactAnalysis): Promise<string[]> {
-        const embGen = EmbeddingsGenerator.getInstance();
-        if (!embGen.isReady()) return [];
-
-        const db = new CodeGraphDB(this.projectPath);
         try {
+            const ctx = ProjectContext.getInstance(this.projectPath);
+            if (!ctx.isInitialized()) return [];
             const queryText = `${ticket.title}. ${analysis.affectedComponents.join(", ")}. ${analysis.affectedKeywords.join(", ")}`;
-            const queryEmbedding = await embGen.generateEmbedding(queryText);
-            const results = db.searchSimilar(queryEmbedding, 10);
-            return results.map((r) => r.filePath);
+            return ctx.findRelevantFiles(queryText, 10);
         } catch {
             return [];
-        } finally {
-            db.close();
         }
     }
 

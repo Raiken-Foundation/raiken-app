@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import Database from "better-sqlite3";
-import { load as loadSqliteVec } from "sqlite-vec";
 import type { DbAdapter } from "./adapter";
 import { SqliteDbAdapter } from "./adapter";
 import { DatabaseError } from "./errors";
@@ -29,15 +28,6 @@ export function openDatabase(projectPath: string, dbPath?: string): OpenDatabase
         }
 
         const db = new Database(resolvedDbPath);
-
-        try {
-            loadSqliteVec(db);
-        } catch (error) {
-            throw new DatabaseError(
-                "Failed to load sqlite-vec extension. Ensure dependencies are installed for your platform and reinstall after Node upgrades.",
-                error as Error,
-            );
-        }
 
         db.pragma("journal_mode = WAL");
         db.pragma("foreign_keys = ON");

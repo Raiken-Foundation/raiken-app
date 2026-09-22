@@ -1,9 +1,79 @@
 import { describe, expect, it } from "vitest";
-import { normalizeUrl } from "../url-utils";
+import { fragmentAwareResolvedUrl, normalizeUrl } from "../url-utils";
+
+describe("fragmentAwareResolvedUrl", () => {
+    it("prefers the response URL for non-fragment requests", () => {
+        expect(
+            fragmentAwareResolvedUrl("http://x/a", "http://x/b", "http://x/b#/routed"),
+        ).toBe("http://x/b");
+    });
+
+    it("uses the live page URL (with fragment) for hash-route requests", () => {
+        expect(
+            fragmentAwareResolvedUrl(
+                "http://x/#/stats",
+                "http://x/",
+                "http://x/#/stats",
+            ),
+        ).toBe("http://x/#/stats");
+    });
+
+    it("reflects a client-side hash redirect in the page URL", () => {
+        expect(
+            fragmentAwareResolvedUrl(
+                "http://x/#/stats",
+                "http://x/",
+                "http://x/#/login",
+            ),
+        ).toBe("http://x/#/login");
+    });
+
+    it("falls back to the response URL when the app cleared the hash", () => {
+        expect(fragmentAwareResolvedUrl("http://x/#/stats", "http://x/", "http://x/")).toBe(
+            "http://x/",
+        );
+    });
+
+    it("falls back to the request URL when both fallbacks are null", () => {
+        expect(fragmentAwareResolvedUrl("http://x/#/stats", null, null)).toBe("http://x/#/stats");
+    });
+});
 
 describe("normalizeUrl", () => {
     it("strips the fragment", () => {
         expect(normalizeUrl("https://example.com/path#section")).toBe("https://example.com/path");
+    });
+
+    it("keeps hash routes distinct when preserveHashRoutes is set", () => {
+        const base = normalizeUrl("https://example.com/app", { preserveHashRoutes: true });
+        const stats = normalizeUrl("https://example.com/app#/stats", { preserveHashRoutes: true });
+        const notes = normalizeUrl("https://example.com/app#/notes", { preserveHashRoutes: true });
+        expect(stats).toBe("https://example.com/app#/stats");
+        expect(notes).toBe("https://example.com/app#/notes");
+        expect(base).not.toBe(stats);
+        expect(stats).not.toBe(notes);
+    });
+
+    it("still strips fragments by default even when the fragment looks like a route", () => {
+        expect(normalizeUrl("https://example.com/app#/stats")).toBe("https://example.com/app");
+    });
+
+    it("keeps hash routes distinct from the bare root page", () => {
+        expect(normalizeUrl("https://example.com/#/login", { preserveHashRoutes: true })).toBe(
+            "https://example.com/#/login",
+        );
+        expect(normalizeUrl("https://example.com/", { preserveHashRoutes: true })).toBe(
+            "https://example.com/",
+        );
+    });
+
+    it("keeps both query and hash when both preserve options are set", () => {
+        expect(
+            normalizeUrl("https://example.com/x?b=2&a=1#/tab", {
+                preserveQueryParams: true,
+                preserveHashRoutes: true,
+            }),
+        ).toBe("https://example.com/x?a=1&b=2#/tab");
     });
 
     it("strips query params by default", () => {

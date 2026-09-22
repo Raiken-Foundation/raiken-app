@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import chalk from "chalk";
 import { CLI_EXIT, cliExitForRuntimeFailure } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 export interface EvalCommandOptions {
     repeat?: string;

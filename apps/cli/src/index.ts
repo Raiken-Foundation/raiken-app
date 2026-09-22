@@ -9,13 +9,6 @@ export type {
 export type {
     Context,
     CoreRaikenConfig,
-    HookInstallOptions,
-    HookInstallResult,
-    HookKind,
-    HookStatusEntry,
-    HookType,
-    HookUninstallOptions,
-    HookUninstallResult,
     ResolvedDiscoveryConfig,
 } from "@raiken/shared/server";
 export {
@@ -23,13 +16,10 @@ export {
     configExample,
     createConfig,
     defaultConfig,
-    getHookStatus,
     getRaikenVersion,
-    installHook,
     loadDiscoveryConfig,
     mergeConfig,
     resolveAuthStorageStateDestination,
     resolveAuthStorageStatePath,
-    uninstallHook,
     validateConfig,
 } from "@raiken/shared/server";

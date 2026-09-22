@@ -119,16 +119,14 @@ After installing and building Raiken, the full command surface is available (eve
 #### Interactive agent & sessions
 
 ```bash
-raiken                         # Interactive chat REPL (slash commands: /test /repair /report /doctor /ci /cover /sessions …)
-raiken -p "test the login flow"  # One-shot, non-interactive agent request
+raiken -p "test the login flow"  # One-shot agent request (drives a live browser)
   --json                       # Machine-readable result
   --stream-json                # NDJSON events (start/tool/text/done)
   --run                        # Run the generated test; exit code = pass/fail
   --no-save                    # Don't persist the generated test
   --headed  --timeout <ms>
 
-raiken sessions [--json]       # List saved sessions
-raiken resume [name]           # Resume a saved session (latest if omitted)
+raiken sessions [--json]       # List saved sessions (one-shot runs are saved automatically)
 ```
 
 #### Setup
@@ -176,8 +174,6 @@ raiken doctor                  # Environment checks + flake anti-pattern lint
 raiken eval <suite> [target]   # Eval harness: playground | benchmark | flakiness <spec>
   --runs <n>  --expect-tests <n>  --repeat <n>  --out <path>  --json
 
-raiken organize                # AI-assisted test-dir + config cleanup (proposes, then applies)
-  -y, --yes  --tests-only  --config-only  --json
 ```
 
 Quarantining flaky specs: add them to `raiken.config.json` and they are skipped by default:
@@ -200,18 +196,14 @@ raiken sync [-t <ticket>]      # Sync with the ticket system and analyze test im
 raiken context                 # Write raiken.ctx.md (project snapshot for IDE AI agents)
   --output <path>  --max-rows <n>  --no-impact  --json
 
-raiken hooks install           # Git hook that runs raiken on commit/push (fail-soft)
-  --type <pre-commit|pre-push>  --skip-run  --husky
-raiken hooks uninstall [--type <type>]
-raiken hooks status
 ```
 
 #### Project intelligence & discovery
 
 ```bash
 raiken status [--json]         # Project setup at a glance
-raiken index [--embeddings] [--force]     # Build the code graph / semantic index
-raiken search <query> [--limit <n>] [--type <t>] [--json]   # Semantic code search
+raiken index [--force]                    # Build the code graph / keyword search index
+raiken search <query> [--limit <n>] [--json]   # Keyword code search over the code graph
 
 raiken discover [url]          # Autonomously discover web application structure
   --max-pages <n>  --max-depth <n>  --timeout <ms>

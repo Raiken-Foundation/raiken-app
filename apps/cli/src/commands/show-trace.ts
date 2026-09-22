@@ -11,7 +11,7 @@ import { runPlaywrightSubprocess } from "@raiken/core";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
 import { CLI_EXIT } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 interface ShowTraceOptions {
     json?: boolean;

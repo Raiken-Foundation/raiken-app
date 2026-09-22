@@ -277,12 +277,10 @@ export function parseSourceFile(
                             source: node.source.value,
                             namedImports: node.specifiers
                                 .filter((spec) => t.isExportSpecifier(spec))
-                                .map(
-                                    (spec) =>
-                                        (t.isIdentifier(spec.local)
-                                            ? spec.local.name
-                                            : String(spec.local.value)),
-                                ),
+                                // ExportSpecifier.local is always an Identifier
+                                // (only `exported` may be a StringLiteral), so
+                                // no string-local fallback is needed here.
+                                .map((spec) => spec.local.name),
                             isTypeOnly: node.exportKind === "type",
                         });
                     }

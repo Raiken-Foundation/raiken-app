@@ -7,7 +7,6 @@ import { EntryPointDetector } from "../analysis/entry-points";
 import { ProjectContext } from "../analysis/project-context";
 import { loadIntegrationsConfig } from "../config";
 import { CodeGraphDB } from "../database/db";
-import { EmbeddingsGenerator } from "../database/embeddings";
 import { notFoundError } from "../errors";
 import { getCurrentBranch, parseTicketFromBranch } from "../integrations/branch-parser";
 import { syncCurrentTicket } from "../integrations/sync";
@@ -197,136 +196,54 @@ export class IndexingApplication implements ProjectApplicationContext {
         }
     }
 
-    async generateEmbeddings(input: { path?: string; forceRegenerate?: boolean } = {}) {
+    async searchCode(input: { path?: string; query: string; limit?: number }) {
         const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
-        const db = new CodeGraphDB(projectPath);
-        const embGen = EmbeddingsGenerator.getInstance();
-        let totalChunks = 0;
-        let filesProcessed = 0;
-        let totalFiles = 0;
-        const skipped: Array<{ path: string; reason: string }> = [];
-
         try {
-            await embGen.initialize();
-            const files = db.getFiles();
-            totalFiles = files.length;
+            // Keyword search over the code-graph index — the replacement for
+            // the removed embeddings/vector store. No model download, no
+            // separate build step: the keyword index exists as soon as the
+            // code graph does.
+            const ctx = ProjectContext.getInstance(projectPath);
+            if (!ctx.isInitialized()) {
+                await ctx.initialize();
+            }
+            const limit = input.limit ?? 10;
+            const filePaths = ctx.findRelevantFiles(input.query, limit);
 
-            for (const file of files) {
-                try {
-                    if (!input.forceRegenerate && db.hasEmbeddings(file.id)) continue;
-                    if (!file.ast) {
-                        skipped.push({ path: file.relative_path, reason: "no AST data" });
-                        continue;
-                    }
-                    let ast: unknown;
-                    try {
-                        ast = JSON.parse(file.ast);
-                    } catch {
-                        skipped.push({
-                            path: file.relative_path,
-                            reason: "failed to parse stored AST",
-                        });
-                        continue;
-                    }
-                    const searchableText = fullAstToSearchableText(ast, file.relative_path);
-                    if (!searchableText || searchableText.trim().length === 0) continue;
-                    const chunks = [
-                        { type: "file" as const, name: file.relative_path, text: searchableText },
-                    ];
-                    const texts = chunks.map((c) => c.text);
-                    const embeddings = await embGen.generateEmbeddingsBatch(texts);
-                    const chunksWithEmbeddings = chunks
-                        .map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }))
-                        .filter(
-                            (chunk): chunk is typeof chunk & { embedding: number[] } =>
-                                chunk.embedding !== null && chunk.embedding !== undefined,
-                        );
-                    if (chunksWithEmbeddings.length === 0) {
-                        skipped.push({
-                            path: file.relative_path,
-                            reason: "embedding generation failed",
-                        });
-                        continue;
-                    }
-                    db.saveEmbeddings(file.id, chunksWithEmbeddings);
-                    totalChunks += chunksWithEmbeddings.length;
-                    filesProcessed++;
-                } catch (fileError) {
-                    const reason =
-                        fileError instanceof Error ? fileError.message : String(fileError);
-                    skipped.push({ path: file.relative_path, reason });
+            const db = new CodeGraphDB(projectPath);
+            let rows: Array<{
+                filePath: string;
+                chunkType: string;
+                chunkName: string;
+                chunkText: string;
+                similarity: number;
+                relevanceScore: number;
+            }> = [];
+            try {
+                for (const filePath of filePaths) {
+                    const file = db.getFileByRelativePath(filePath);
+                    if (!file) continue;
+                    const rank = filePaths.indexOf(filePath);
+                    const score = 1 - rank / Math.max(filePaths.length * 2, 1);
+                    rows.push({
+                        filePath,
+                        chunkType: "file",
+                        chunkName: file.relative_path,
+                        chunkText: (file.ast ?? "").slice(0, 200),
+                        similarity: score,
+                        relevanceScore: Math.round(score * 100),
+                    });
                 }
-            }
-
-            return {
-                success: true,
-                filesProcessed,
-                totalFiles,
-                chunksGenerated: totalChunks,
-                skipped,
-                modelUsed: "Xenova/all-MiniLM-L6-v2",
-                embeddingDimension: 384,
-                timestamp: new Date().toISOString(),
-            };
-        } catch (error) {
-            return {
-                success: false,
-                error: error instanceof Error ? error.message : "Unknown error",
-                filesProcessed,
-                totalFiles,
-                chunksGenerated: totalChunks,
-                skipped,
-                timestamp: new Date().toISOString(),
-            };
-        } finally {
-            db.close();
-        }
-    }
-
-    async searchCode(input: {
-        path?: string;
-        query: string;
-        limit?: number;
-        chunkTypes?: Array<"function" | "class" | "file" | "type">;
-    }) {
-        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
-        const db = new CodeGraphDB(projectPath);
-        const embGen = EmbeddingsGenerator.getInstance();
-        try {
-            const embeddingsCount = db.getEmbeddingsCount();
-            if (embeddingsCount === 0) {
+            } finally {
                 db.close();
-                return {
-                    query: input.query,
-                    results: [],
-                    message:
-                        "No search index yet. Run `raiken index --embeddings` to build one, then try your search again.",
-                    timestamp: new Date().toISOString(),
-                };
             }
-            await embGen.initialize();
-            const queryEmbedding = await embGen.generateEmbedding(input.query);
-            const results = db.searchSimilar(queryEmbedding, input.limit ?? 10, input.chunkTypes);
-            db.close();
-            const relevant = results.flatMap((r) => {
-                const relevance = toRelevanceResult(r);
-                return relevance ? [{ ...r, ...relevance }] : [];
-            });
             return {
                 query: input.query,
-                results: relevant.map((r) => ({
-                    filePath: r.filePath,
-                    chunkType: r.chunkType,
-                    chunkName: r.chunkName,
-                    chunkText: r.chunkText,
-                    similarity: r.similarity,
-                    relevanceScore: r.relevanceScore,
-                })),
-                totalResults: relevant.length,
+                results: rows,
+                totalResults: rows.length,
                 timestamp: new Date().toISOString(),
             };
         } catch (error) {
-            db.close();
             return {
                 query: input.query,
                 results: [],
@@ -334,22 +251,6 @@ export class IndexingApplication implements ProjectApplicationContext {
                 timestamp: new Date().toISOString(),
             };
         }
-    }
-
-    getEmbeddingsStats(input: { path?: string } = {}) {
-        const projectPath = assertUnderProjectRoot(input.path || ".", this.projectPath);
-        const db = new CodeGraphDB(projectPath);
-        const totalEmbeddings = db.getEmbeddingsCount();
-        const totalFiles = db.getStats()?.total_files || 0;
-        db.close();
-        return {
-            totalEmbeddings,
-            totalFiles,
-            embeddingsPerFile: totalFiles > 0 ? (totalEmbeddings / totalFiles).toFixed(2) : "0",
-            modelUsed: "Xenova/all-MiniLM-L6-v2",
-            embeddingDimension: 384,
-            timestamp: new Date().toISOString(),
-        };
     }
 
     getAffectedTests(input: { changedFiles: string[]; path?: string }) {

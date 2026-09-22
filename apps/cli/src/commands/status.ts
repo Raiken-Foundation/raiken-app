@@ -4,7 +4,7 @@ import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 
 /**
  * `raiken status` — a single at-a-glance view of everything Raiken knows about
- * the project: AI config, code graph, embeddings (semantic search), test files,
+ * the project: AI config, code graph, test files, the behavior contract,
  * discovered site knowledge, and agent memory. The developer's "am I set up?"
  * command.
  */
@@ -13,11 +13,11 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
     const restore = options.json ? routeDiagnosticsToStderr() : null;
     const app = createProjectApplication(projectPath);
 
-    const [graph, embeddings, discSession, discStats] = await Promise.all([
+    const [graph, discSession, discStats, contractView] = await Promise.all([
         Promise.resolve(app.indexing.getGraphStats({})).catch(() => null),
-        Promise.resolve(app.indexing.getEmbeddingsStats({})).catch(() => null),
         Promise.resolve(app.discovery.getSessionView()).catch(() => null),
         Promise.resolve(app.discovery.getStats()).catch(() => null),
+        Promise.resolve(app.contract.view()).catch(() => null),
     ]);
 
     // Count spec files from disk (the same source `raiken test --list` and the
@@ -52,8 +52,20 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
                     projectPath,
                     ai: { provider: ai.provider, model: ai.model, hasKey: !!ai.apiKey },
                     codeGraph: graph,
-                    embeddings,
                     tests: testCount,
+                    contract: contractView
+                        ? {
+                              facts: contractView.observed.length,
+                              requirements: contractView.intent.length,
+                              coverage: contractView.coverage
+                                  ? {
+                                        covered: contractView.coverage.covered,
+                                        uncovered: contractView.coverage.uncovered,
+                                        violated: contractView.coverage.violated,
+                                    }
+                                  : null,
+                          }
+                        : null,
                     memory: { preferences: prefCount },
                     discovery: { session: discSession, stats: discStats },
                 },
@@ -80,8 +92,7 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
             : providerDef.envVars.length === 0
               ? chalk.gray("not required for this provider")
               : chalk.yellow(
-                    `missing — set ${providerDef.envVars[0]}, run \`raiken config\`, or configure ` +
-                        "it in the dashboard's Settings view",
+                    `missing — set ${providerDef.envVars[0]} or run \`raiken config\``,
                 ),
     );
 
@@ -96,16 +107,29 @@ export async function statusCommand(options: { json?: boolean }): Promise<void> 
         console.log(dim("  (not built — run `raiken index`)"));
     }
 
-    console.log(accent("\n  Semantic search"));
-    if (embeddings && embeddings.totalEmbeddings > 0) {
-        row("Vectors", String(embeddings.totalEmbeddings));
-        row("Coverage", `${embeddings.embeddingsPerFile} per file`);
-    } else {
-        console.log(dim("  (no index — run `raiken index --embeddings`)"));
-    }
-
     console.log(accent("\n  Tests"));
     row("Spec files", String(testCount));
+
+    console.log(accent("\n  Behavior contract"));
+    if (contractView && contractView.observed.length > 0) {
+        row("Observed facts", String(contractView.observed.length));
+        if (contractView.intent.length > 0 && contractView.coverage) {
+            const { covered, uncovered, violated } = contractView.coverage;
+            row(
+                "Coverage",
+                `${chalk.green(covered)} covered · ${uncovered > 0 ? chalk.yellow(uncovered) : uncovered} uncovered · ${
+                    violated > 0 ? chalk.red(violated) : violated
+                } violated`,
+            );
+        } else {
+            row("Requirements", dim("none — `raiken contract import --file <ac.md>`"));
+        }
+        console.log(dim("  Details: `raiken contract show`"));
+    } else {
+        console.log(
+            dim("  (empty — `raiken contract capture <url>` to observe, `raiken contract import` for requirements)"),
+        );
+    }
 
     console.log(accent("\n  Site knowledge"));
     if (discSession && discStats) {

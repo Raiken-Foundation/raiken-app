@@ -121,72 +121,112 @@ export async function syncCurrentTicket(options: SyncOptions): Promise<SyncResul
 }
 
 // =========================================================================
-// Provider Factory
+// Provider Registry
 // =========================================================================
+
+/**
+ * A ticket provider adapter factory: given the project's `integrations`
+ * config section, return a configured provider (or null when the required
+ * credentials are missing). Register with {@link registerTicketProvider} so
+ * `integrations.provider: "<id>"` in raiken.config.json instantiates it —
+ * adding a ticket source is one adapter file plus one registration, no core
+ * changes.
+ */
+export type TicketProviderFactory = (
+    config: IntegrationConfig | undefined,
+    context: { projectPath: string },
+) => TicketProvider | null;
+
+const ticketProviderFactories = new Map<string, TicketProviderFactory>();
+
+/** Register a ticket provider adapter under a config-selectable id. */
+export function registerTicketProvider(id: string, factory: TicketProviderFactory): void {
+    ticketProviderFactories.set(id, factory);
+}
+
+/** ids of all registered providers (built-ins first). */
+export function listTicketProviderIds(): string[] {
+    return Array.from(ticketProviderFactories.keys());
+}
+
+/** Resolve the configured ticket provider via the registry (public). */
+export function resolveTicketProviderForConfig(
+    config: IntegrationConfig | undefined,
+    projectPath: string,
+): TicketProvider | null {
+    return createProvider(config, projectPath);
+}
 
 function createProvider(
     config: IntegrationConfig | undefined,
     projectPath: string,
 ): TicketProvider | null {
     const providerType = config?.provider || "github";
-
-    if (providerType === "github") {
-        const gh = new GitHubProvider(config?.github);
-
-        // Fill in owner/repo from the local git remote when the user
-        // didn't put them in raiken.config.json. This is the common
-        // case — most projects have a github remote already.
-        if (!gh.isConfigured()) {
-            const remote = getGitRemoteInfo(projectPath);
-            if (remote) {
-                gh.setRepo(remote.owner, remote.repo);
-            }
-        }
-
-        if (!gh.isConfigured()) {
-            console.warn(
-                "GitHub integration not configured: missing owner/repo. " +
-                    "Add `integrations.github.owner` and `integrations.github.repo` to raiken.config.json, " +
-                    "or run from inside a git repo with a github remote.",
-            );
-            return null;
-        }
-
-        // Surface a softer warning when there's no token — public repos
-        // still work, just at 60 req/hour instead of 5000.
-        if (!gh.hasToken()) {
-            console.warn(
-                "No GITHUB_TOKEN found. Anonymous mode active (60 req/hour). " +
-                    "Set GITHUB_TOKEN to access private repos and lift the rate limit.",
-            );
-        }
-
-        return gh;
+    const factory = ticketProviderFactories.get(providerType);
+    if (!factory) {
+        console.warn(
+            `Unknown provider "${providerType}". Registered: ${listTicketProviderIds().join(", ")}.`,
+        );
+        return null;
     }
-
-    if (providerType === "jira") {
-        const jira = new JiraProvider(config?.jira);
-        if (!jira.isConfigured()) {
-            console.warn(
-                "Jira integration not configured. Set JIRA_HOST, JIRA_EMAIL, and JIRA_API_TOKEN env vars.",
-            );
-            return null;
-        }
-        return jira;
-    }
-
-    if (providerType === "linear") {
-        const linear = new LinearProvider(config?.linear);
-        if (!linear.isConfigured()) {
-            console.warn("Linear integration not configured. Set LINEAR_API_KEY env var.");
-            return null;
-        }
-        return linear;
-    }
-
-    console.warn(`Unknown provider "${providerType}". Supported: github, jira, linear.`);
-    return null;
+    return factory(config, { projectPath });
 }
+
+// Built-in registrations — the factory bodies are unchanged; they now run
+// through the registry like any third-party adapter.
+registerTicketProvider("github", (config, { projectPath }) => {
+    const gh = new GitHubProvider(config?.github);
+
+    // Fill in owner/repo from the local git remote when the user
+    // didn't put them in raiken.config.json. This is the common
+    // case — most projects have a github remote already.
+    if (!gh.isConfigured()) {
+        const remote = getGitRemoteInfo(projectPath);
+        if (remote) {
+            gh.setRepo(remote.owner, remote.repo);
+        }
+    }
+
+    if (!gh.isConfigured()) {
+        console.warn(
+            "GitHub integration not configured: missing owner/repo. " +
+                "Add `integrations.github.owner` and `integrations.github.repo` to raiken.config.json, " +
+                "or run from inside a git repo with a github remote.",
+        );
+        return null;
+    }
+
+    // Surface a softer warning when there's no token — public repos
+    // still work, just at 60 req/hour instead of 5000.
+    if (!gh.hasToken()) {
+        console.warn(
+            "No GITHUB_TOKEN found. Anonymous mode active (60 req/hour). " +
+                "Set GITHUB_TOKEN to access private repos and lift the rate limit.",
+        );
+    }
+
+    return gh;
+});
+
+registerTicketProvider("jira", (config) => {
+    const jira = new JiraProvider(config?.jira);
+    if (!jira.isConfigured()) {
+        console.warn(
+            "Jira integration not configured. Set JIRA_HOST, JIRA_EMAIL, and JIRA_API_TOKEN env vars.",
+        );
+        return null;
+    }
+    return jira;
+});
+
+registerTicketProvider("linear", (config) => {
+    const linear = new LinearProvider(config?.linear);
+    if (!linear.isConfigured()) {
+        console.warn("Linear integration not configured. Set LINEAR_API_KEY env var.");
+        return null;
+    }
+    return linear;
+});
 
 // =========================================================================
 // PR Fallback

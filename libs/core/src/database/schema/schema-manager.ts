@@ -36,6 +36,7 @@ export class SchemaManager {
         this.ensureFileColumns();
         this.ensureSymbolGraphSchema();
         this.ensureDiscoveredPageColumns();
+        this.ensureContractSchema();
     }
 
     /**
@@ -569,13 +570,6 @@ export class SchemaManager {
       CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(chunk_type);
       CREATE INDEX IF NOT EXISTS idx_embeddings_name ON embeddings(chunk_name);
     `);
-
-            // Create virtual table for vector search using sqlite-vec
-            this.adapter.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
-        embedding float[384]
-      );
-    `);
         })();
     }
 
@@ -595,6 +589,101 @@ export class SchemaManager {
       CREATE INDEX IF NOT EXISTS idx_keyword_keyword ON keyword_index(keyword);
       CREATE INDEX IF NOT EXISTS idx_keyword_updated ON keyword_index(updated_at);
     `);
+        })();
+    }
+
+    private ensureContractSchema(): void {
+        this.adapter.db.transaction(() => {
+            // Two-sided behavior contract: observed facts (what the app does)
+            // and intent facts (what tickets/ACs require). The delta between
+            // the sides — uncovered requirements and violated facts — is the
+            // product; see libs/core/src/contract/.
+            this.adapter.db.exec(`
+      CREATE TABLE IF NOT EXISTS behavior_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        fact_key TEXT NOT NULL,
+        route TEXT NOT NULL,
+        precondition TEXT,
+        action TEXT NOT NULL,
+        expected_observable TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'verified',
+        evidence_json TEXT,
+        source_commit TEXT,
+        captured_at INTEGER NOT NULL,
+        last_verified_at INTEGER,
+        verified_count INTEGER NOT NULL DEFAULT 0,
+        violated_count INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (project_path, fact_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_behavior_facts_project ON behavior_facts(project_path);
+      CREATE INDEX IF NOT EXISTS idx_behavior_facts_status ON behavior_facts(project_path, status);
+
+      CREATE TABLE IF NOT EXISTS intent_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        requirement_key TEXT NOT NULL,
+        requirement_text TEXT NOT NULL,
+        route_hint TEXT,
+        ticket_id TEXT,
+        ticket_provider TEXT,
+        ticket_severity TEXT,
+        ticket_url TEXT,
+        never_regress INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'uncovered',
+        matched_fact_id INTEGER,
+        source TEXT NOT NULL DEFAULT 'manual',
+        imported_at INTEGER NOT NULL,
+        UNIQUE (project_path, requirement_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_intent_facts_project ON intent_facts(project_path);
+      CREATE INDEX IF NOT EXISTS idx_intent_facts_status ON intent_facts(project_path, status);
+
+      CREATE TABLE IF NOT EXISTS fact_trace (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        fact_id INTEGER NOT NULL,
+        side TEXT NOT NULL,
+        trace_type TEXT NOT NULL,
+        trace_ref TEXT NOT NULL,
+        traced_at INTEGER NOT NULL,
+        UNIQUE (project_path, fact_id, side, trace_type, trace_ref)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_fact_trace_fact ON fact_trace(project_path, fact_id, side);
+
+      CREATE TABLE IF NOT EXISTS fact_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        fact_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        detail TEXT,
+        occurred_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_fact_events_key
+        ON fact_events(project_path, fact_key, occurred_at);
+
+      CREATE TABLE IF NOT EXISTS fact_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        fact_key TEXT NOT NULL,
+        observed TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_fact_reviews_pending
+        ON fact_reviews(project_path, status);
+    `);
+        try {
+            this.adapter.db.exec("ALTER TABLE fact_reviews ADD COLUMN fact_json TEXT");
+        } catch {
+            /* column already exists */
+        }
         })();
     }
 

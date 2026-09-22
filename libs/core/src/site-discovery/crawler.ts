@@ -28,7 +28,7 @@ import { SiteKnowledgeDB } from "./db";
 import { createAuthDetector, createManualFallbackDetector } from "./detectors";
 import { looksLikeLogoutUrl } from "./detectors/auth";
 import { formatDiscoveryError } from "./discovery-error";
-import { mergeBlockedUrlIntoQueue } from "./link-utils";
+import { hasHashRoute, mergeBlockedUrlIntoQueue } from "./link-utils";
 import { acquireDiscoveryLock, type DiscoveryLockHandle } from "./project-lock";
 import type { BlockerCategory, DiscoveryOptions, DiscoveryStats } from "./types";
 import { normalizeUrl } from "./url-utils";
@@ -704,6 +704,10 @@ export class SiteDiscovery extends EventEmitter {
     private normalizeUrl(url: string): string {
         return normalizeUrl(url, {
             preserveQueryParams: this.options.preserveQueryParams,
+            // Hash-route URLs (`/#/stats`) are distinct crawlable pages and
+            // must stay distinct; plain `#anchor` fragments are still stripped
+            // exactly as before.
+            preserveHashRoutes: hasHashRoute(url),
         });
     }
 

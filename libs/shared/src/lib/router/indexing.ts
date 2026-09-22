@@ -44,29 +44,15 @@ export const indexingRouter = {
         .input(z.object({ filePath: z.string() }))
         .query(({ input, ctx }) => appFor(ctx).indexing.getFileContent(input)),
 
-    generateEmbeddings: procedure
-        .input(
-            z.object({
-                path: z.string().optional(),
-                forceRegenerate: z.boolean().default(false),
-            }),
-        )
-        .mutation(({ input, ctx }) => appFor(ctx).indexing.generateEmbeddings(input)),
-
     searchCode: procedure
         .input(
             z.object({
                 path: z.string().optional(),
                 query: z.string(),
                 limit: z.number().default(10),
-                chunkTypes: z.array(z.enum(["function", "class", "file", "type"])).optional(),
             }),
         )
         .query(({ input, ctx }) => appFor(ctx).indexing.searchCode(input)),
-
-    getEmbeddingsStats: procedure
-        .input(z.object({ path: z.string().optional() }))
-        .query(({ input, ctx }) => appFor(ctx).indexing.getEmbeddingsStats(input)),
 
     getAffectedTests: procedure
         .input(

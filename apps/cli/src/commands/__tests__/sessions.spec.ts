@@ -7,8 +7,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { withThrowExit } from "../../repl/exit";
-import { saveSession } from "../../repl/sessions";
+import { withThrowExit } from "../../cli/exit";
+import { saveSession } from "../../cli/sessions";
 
 const { sessionsCommand } = await import("../sessions");
 

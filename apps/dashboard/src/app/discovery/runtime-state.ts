@@ -174,9 +174,6 @@ export function formatProvideStateError(message: string): string {
 }
 
 export function buildGenerateTestToast(pageUrl: string): string {
-    return `Sending to AI Agent: ${pageUrl}`;
+    return `Drafting a smoke spec: ${pageUrl}`;
 }
 
-export function buildGenerateTestPrompt(pageUrl: string): string {
-    return `Generate E2E tests for ${pageUrl}`;
-}

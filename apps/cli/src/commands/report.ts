@@ -12,7 +12,7 @@ import { createProjectApplication, type TestExecutionInput } from "@raiken/core"
 import chalk from "chalk";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { CLI_EXIT, safeCliErrorMessage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 import { partitionSuiteSpecs, quarantineSkipNotice } from "./run-scope";
 
 interface ReportOptions {

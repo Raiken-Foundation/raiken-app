@@ -1,6 +1,6 @@
 import { redactSecrets, serializeSafeClientError } from "@raiken/core";
 import chalk from "chalk";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 import { CLI_EXIT, type CliExitCode, mapErrorToCliExitCode } from "./exit-codes";
 
 export interface RenderCliErrorOptions {

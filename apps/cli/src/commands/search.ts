@@ -3,7 +3,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { accent, dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { CLI_EXIT } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 interface SearchOptions {
     limit?: string;
@@ -11,14 +11,11 @@ interface SearchOptions {
     json?: boolean;
 }
 
-const CHUNK_TYPES = ["function", "class", "file", "type"] as const;
-type ChunkType = (typeof CHUNK_TYPES)[number];
-
 /**
- * `raiken search <query>` — semantic (embeddings) search over the codebase.
- * Finds relevant functions/classes/files by meaning, not just text. On first
- * use it builds the embeddings index automatically (human mode only, so JSON
- * output stays script-clean).
+ * `raiken search <query>` — keyword search over the code-graph index (paths,
+ * symbols, and AST text). Replaces the removed embeddings/vector search; no
+ * model download and no separate build step — the keyword index exists as
+ * soon as the code graph does (`raiken index`).
  */
 export async function searchCommand(query: string, options: SearchOptions): Promise<void> {
     const projectPath = process.cwd();
@@ -27,14 +24,6 @@ export async function searchCommand(query: string, options: SearchOptions): Prom
         cliExit(CLI_EXIT.USAGE);
     }
 
-    let chunkTypes: ChunkType[] | undefined;
-    if (options.type) {
-        if (!CHUNK_TYPES.includes(options.type as ChunkType)) {
-            console.error(chalk.red(`  invalid --type. one of: ${CHUNK_TYPES.join(", ")}`));
-            cliExit(CLI_EXIT.USAGE);
-        }
-        chunkTypes = [options.type as ChunkType];
-    }
     let limit = 10;
     if (options.limit !== undefined) {
         const parsed = Number(options.limit);
@@ -51,29 +40,7 @@ export async function searchCommand(query: string, options: SearchOptions): Prom
     const app = createProjectApplication(projectPath);
 
     const spinner = options.json ? null : ora({ text: "Searching…", spinner: "dots" }).start();
-    let res = await app.indexing.searchCode({ query, limit, chunkTypes });
-
-    // Auto-heal the index on first use — human mode only (generation logs would
-    // pollute --json stdout, so scripts get the explicit "run index" message).
-    // Embeddings come from a local model, so this needs no API key — but the
-    // first run downloads model weights, hence the spinner copy.
-    if (
-        !options.json &&
-        res.results.length === 0 &&
-        /no (search index|embeddings)/i.test(res.message ?? "")
-    ) {
-        if (spinner) spinner.text = "Building search index (first run only)…";
-        const genRestore = routeDiagnosticsToStderr();
-        try {
-            await app.indexing.generateEmbeddings({ forceRegenerate: false });
-            res = await app.indexing.searchCode({ query, limit, chunkTypes });
-        } catch {
-            // Model download/generation failed — keep the original "no index"
-            // result so the user still gets the explicit remediation message.
-        } finally {
-            genRestore();
-        }
-    }
+    const res = await app.indexing.searchCode({ query, limit });
     spinner?.stop();
 
     if (options.json) {
@@ -88,14 +55,7 @@ export async function searchCommand(query: string, options: SearchOptions): Prom
     }
     if (res.results.length === 0) {
         console.log(dim(`\n  No matches for "${query}".`));
-        if (res.message) {
-            // The backend message usually names the fix itself; only add the
-            // pointer when it doesn't.
-            const suffix = res.message.includes("raiken index")
-                ? ""
-                : " → try `raiken index --embeddings`";
-            console.log(dim(`  ${res.message}${suffix}`));
-        }
+        console.log(dim("  → try `raiken index` to (re)build the code graph"));
         console.log("");
         return;
     }

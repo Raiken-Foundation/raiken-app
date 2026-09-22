@@ -27,7 +27,6 @@ export {
     raikenCategoryToTrpcCode,
     toTrpcError,
 } from "./lib/errors/trpc-adapter";
-export * from "./lib/git-hooks";
 export { type AppRouter, appRouter, type Context } from "./lib/router";
 export { procedure, t } from "./lib/router/trpc";
 export { getRaikenVersion } from "./lib/version.server";

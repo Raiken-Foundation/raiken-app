@@ -7,8 +7,8 @@
 
 import chalk from "chalk";
 import { dim } from "../agent-stream";
-import { cliExit } from "../repl/exit";
-import { listSessions, previewMessage } from "../repl/sessions";
+import { cliExit } from "../cli/exit";
+import { listSessions, previewMessage } from "../cli/sessions";
 
 interface SessionsCommandOptions {
     json?: boolean;

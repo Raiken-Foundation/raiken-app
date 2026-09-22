@@ -4,7 +4,7 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLI_EXIT } from "../../errors";
-import { withThrowExit } from "../../repl/exit";
+import { withThrowExit } from "../../cli/exit";
 
 const mocks = vi.hoisted(() => ({
     loadAuthConfig: vi.fn(),
@@ -282,5 +282,62 @@ describe("authCommand --cookie import", () => {
             authCommand({ cookie: "session=abc", domain: "http://" }),
         );
         expect(code).toBe(CLI_EXIT.USAGE);
+    });
+});
+
+describe("authCommand headless guard", () => {
+    let projectPath: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+    const originalIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        projectPath = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cli-auth-")));
+        cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(projectPath);
+        // No configured login script — the command would otherwise take the
+        // scripted path and never reach the interactive flow.
+        mocks.loadAuthConfig.mockReturnValue({});
+        Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    });
+
+    afterEach(() => {
+        cwdSpy.mockRestore();
+        if (originalIsTty) {
+            Object.defineProperty(process.stdin, "isTTY", originalIsTty);
+        } else {
+            delete (process.stdin as unknown as { isTTY?: boolean }).isTTY;
+        }
+        fs.rmSync(projectPath, { recursive: true, force: true });
+    });
+
+    it("fails fast with the non-interactive options when stdin is not a TTY", async () => {
+        const code = await withThrowExit(() => authCommand({}));
+
+        expect(code).toBe(CLI_EXIT.CONFIG_AUTH);
+        expect(mocks.runCustomLoginScript).not.toHaveBeenCalled();
+    });
+
+    it("still uses a configured login script headless (scripted path is unaffected)", async () => {
+        mocks.loadAuthConfig.mockReturnValue({ customLoginScript: "auth/login.ts" });
+        mocks.runCustomLoginScript.mockResolvedValue({
+            scriptPath: path.join(projectPath, "auth", "login.ts"),
+            storageStatePath: path.join(projectPath, ".raiken", "auth-state.json"),
+            cookies: 1,
+            origins: 1,
+        });
+
+        await authCommand({});
+
+        expect(mocks.runCustomLoginScript).toHaveBeenCalled();
+    });
+
+    it("still imports --cookie state headless (import paths are unaffected)", async () => {
+        await authCommand({ cookie: "session=abc", domain: "http://localhost:3000" });
+
+        const dest = path.join(projectPath, ".raiken", "auth-state.json");
+        const state = JSON.parse(fs.readFileSync(dest, "utf8")) as {
+            cookies: Array<{ name: string; value: string }>;
+        };
+        expect(state.cookies).toHaveLength(1);
     });
 });

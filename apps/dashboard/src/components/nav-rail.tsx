@@ -1,7 +1,6 @@
 import { Logo } from "./logo";
 
-type View = "testing" | "discovery" | "quality" | "settings";
-type SidebarTab = "chat" | "files";
+type View = "testing" | "quality" | "contract";
 
 /**
  * Attention flags surfaced as a small dot on the corresponding rail button —
@@ -10,8 +9,6 @@ type SidebarTab = "chat" | "files";
  * number, and "does this need a look" is all the badge needs to answer.
  */
 interface NavRailAttention {
-    /** A `save_approval`/`run_approval` card is awaiting a decision. */
-    chat?: boolean;
     /** At least one test file's last recorded run failed/errored/timed out. */
     files?: boolean;
     /** Discovery is paused/failed, or has unresolved blockers. */
@@ -20,9 +17,8 @@ interface NavRailAttention {
 
 interface NavRailProps {
     activeView: View;
-    activeSidebarTab: SidebarTab;
     sidebarCollapsed: boolean;
-    onNavigate: (view: View, tab?: SidebarTab) => void;
+    onNavigate: (view: View) => void;
     onToggleCollapse: () => void;
     attention?: NavRailAttention;
 }
@@ -35,7 +31,6 @@ function AttentionDot({ show }: { show: boolean | undefined }) {
 
 export function NavRail({
     activeView,
-    activeSidebarTab,
     sidebarCollapsed,
     onNavigate,
     onToggleCollapse,
@@ -50,10 +45,16 @@ export function NavRail({
             </div>
             <button
                 type="button"
-                className={`rail-btn ${isOnTesting && activeSidebarTab === "chat" ? "active" : ""}`}
-                onClick={() => onNavigate("testing", "chat")}
-                title={attention?.chat ? "chat — waiting on your approval" : "chat"}
-                aria-label={attention?.chat ? "chat, needs attention" : "chat"}
+                className={`rail-btn ${activeView === "contract" ? "active" : ""}`}
+                onClick={() => onNavigate("contract")}
+                title={
+                    attention?.discovery
+                        ? "contract — acquisition (discovery) needs attention"
+                        : "contract — observed behavior vs requirements"
+                }
+                aria-label={
+                    attention?.discovery ? "contract, needs attention" : "contract"
+                }
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -62,17 +63,17 @@ export function NavRail({
                     strokeWidth="1.5"
                     aria-hidden="true"
                 >
-                    <rect x="4" y="4" width="16" height="14" rx="3" />
-                    <path d="M8 9h8M8 13h5" />
+                    <path d="M6 3h9l4 4v14H6z" />
+                    <path d="M9 12h6M9 16h6" />
                 </svg>
-                <AttentionDot show={attention?.chat} />
+                <AttentionDot show={attention?.discovery} />
             </button>
             <button
                 type="button"
-                className={`rail-btn ${isOnTesting && activeSidebarTab === "files" ? "active" : ""}`}
-                onClick={() => onNavigate("testing", "files")}
-                title={attention?.files ? "files — a test is failing" : "files"}
-                aria-label={attention?.files ? "files, needs attention" : "files"}
+                className={`rail-btn ${isOnTesting ? "active" : ""}`}
+                onClick={() => onNavigate("testing")}
+                title={attention?.files ? "tests — a test is failing" : "tests"}
+                aria-label={attention?.files ? "tests, needs attention" : "tests"}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -84,25 +85,6 @@ export function NavRail({
                     <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                 </svg>
                 <AttentionDot show={attention?.files} />
-            </button>
-            <button
-                type="button"
-                className={`rail-btn ${activeView === "discovery" ? "active" : ""}`}
-                onClick={() => onNavigate("discovery")}
-                title={attention?.discovery ? "discovery — needs attention" : "discovery"}
-                aria-label={attention?.discovery ? "discovery, needs attention" : "discovery"}
-            >
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    aria-hidden="true"
-                >
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M14.8 9.2l-2.1 5.6-3.5 1.2 1.2-3.5 4.4-3.3z" />
-                </svg>
-                <AttentionDot show={attention?.discovery} />
             </button>
             <button
                 type="button"
@@ -122,24 +104,7 @@ export function NavRail({
                     <path d="M12 2l9 4v6c0 5-3.5 9.5-9 10-5.5-.5-9-5-9-10V6l9-4z" />
                 </svg>
             </button>
-            <button
-                type="button"
-                className={`rail-btn settings-btn ${activeView === "settings" ? "active" : ""}`}
-                onClick={() => onNavigate("settings")}
-                title="settings"
-                aria-label="settings"
-            >
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    aria-hidden="true"
-                >
-                    <path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                    <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-            </button>
+
 
             {isOnTesting && (
                 <button
@@ -209,9 +174,15 @@ export function NavRail({
                     box-shadow: inset 0 0 0 1px var(--accent);
                 }
 
+                .rail-btn {
+                    transition: color 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        background 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        box-shadow 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+                }
                 .rail-btn.active {
                     color: var(--accent);
                     background: var(--bg);
+                    box-shadow: 0 0 16px -6px var(--accent-dim);
                 }
                 .rail-btn.active::before {
                     content: "";
@@ -219,8 +190,9 @@ export function NavRail({
                     left: 0;
                     top: 0;
                     bottom: 0;
-                    width: 1px;
+                    width: 2px;
                     background: var(--accent);
+                    box-shadow: 0 0 8px -1px var(--accent);
                 }
 
                 .rail-btn.settings-btn {

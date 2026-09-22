@@ -1,0 +1,1082 @@
+/* Contract portfolio — uses the shared theme tokens (theme.css).
+   Everything referenced here must exist there: bg, bg-bar, bg-elev,
+   hair, ink, accent, pass, warn, fail, mono.                        */
+
+.c-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.c-statusbar {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    height: 28px;
+    padding: 0 0.875rem;
+    background: var(--bg-bar);
+    border-bottom: 1px solid var(--hair);
+    font-size: 11px;
+    color: var(--ink-dim);
+    flex-shrink: 0;
+}
+
+.c-status-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4375rem;
+}
+
+.c-status-cell--brand {
+    color: var(--accent);
+}
+
+.c-status-key {
+    color: var(--ink-faint);
+}
+
+.c-status-val {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+}
+
+.c-main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 1rem;
+    padding: 1rem 1.25rem 3rem;
+    overflow-y: auto;
+    align-items: start;
+    min-height: 0;
+}
+
+@media (max-width: 980px) {
+    .c-main {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.c-panel {
+    border: 1px solid var(--hair);
+    background: var(--bg-elev);
+}
+
+.c-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-bar);
+    border-bottom: 1px solid var(--hair);
+    font-size: 11px;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
+}
+
+.c-panel-head::before {
+    content: "─ ";
+    color: var(--ink-faint);
+}
+
+.c-panel-count {
+    color: var(--ink-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.c-panel-body {
+    padding: 0.875rem;
+}
+
+/* ---------- Coverage bar + legend ---------- */
+
+.c-coverage-bar {
+    display: flex;
+    height: 14px;
+    border: 1px solid var(--hair);
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.c-cov {
+    display: block;
+    min-width: 2px;
+}
+.c-cov--covered {
+    background: var(--pass);
+}
+.c-cov--uncovered {
+    background: var(--warn);
+}
+.c-cov--violated {
+    background: var(--fail);
+}
+
+.c-cov-legend {
+    font-size: 11px;
+    color: var(--ink-dim);
+    margin: 0 0 0.75rem;
+}
+
+.c-cov-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 3px;
+    vertical-align: baseline;
+}
+.c-cov-dot--covered {
+    background: var(--pass);
+}
+.c-cov-dot--uncovered {
+    background: var(--warn);
+}
+.c-cov-dot--violated {
+    background: var(--fail);
+}
+
+.c-never {
+    color: var(--fail);
+}
+
+/* ---------- Requirement rows ---------- */
+
+.c-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.c-verdict {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+    padding: 0.4375rem 0;
+    border-bottom: 1px solid var(--hair-soft);
+    font-size: 12px;
+}
+.c-verdict:last-child {
+    border-bottom: 0;
+}
+
+.c-mark {
+    width: 1.2em;
+    flex-shrink: 0;
+    font-weight: 500;
+}
+.c-verdict--covered .c-mark {
+    color: var(--pass);
+}
+.c-verdict--uncovered .c-mark {
+    color: var(--warn);
+}
+.c-verdict--violated .c-mark {
+    color: var(--fail);
+}
+
+.c-verdict--uncovered .c-text {
+    color: var(--ink-dim);
+}
+
+.c-req-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.c-text {
+    overflow-wrap: break-word;
+}
+
+.c-match {
+    color: var(--ink-faint);
+    font-size: 11px;
+}
+
+/* ---------- Fact rows ---------- */
+
+.c-fact {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+    padding: 0.4375rem 0;
+    border-bottom: 1px solid var(--hair-soft);
+    font-size: 12px;
+}
+.c-fact:last-child {
+    border-bottom: 0;
+}
+
+.c-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    align-self: center;
+    background: var(--ink-faint);
+}
+.c-fact--verified .c-dot {
+    background: var(--pass);
+}
+.c-fact--violated .c-dot {
+    background: var(--fail);
+}
+.c-fact--unverified .c-dot {
+    background: var(--warn);
+}
+
+.c-conf {
+    color: var(--accent);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    width: 3em;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.c-fact-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.c-fact-line {
+    display: flex;
+    gap: 0;
+    align-items: baseline;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.c-fact-arrow {
+    color: var(--ink-faint);
+}
+
+.c-fact-route {
+    color: var(--ink-faint);
+    font-size: 10.5px;
+    overflow-wrap: anywhere;
+}
+
+.c-fact-action {
+    color: var(--ink);
+}
+
+.c-fact--violated .c-fact-action {
+    color: var(--fail);
+}
+
+.c-fact--unverified .c-fact-action {
+    color: var(--warn);
+}
+
+.c-fact-obs {
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+}
+
+.c-more {
+    padding: 0.5rem 0 0;
+    color: var(--ink-faint);
+    font-size: 11px;
+}
+
+/* ---------- Empty states + onboarding ---------- */
+
+.c-empty {
+    padding: 1.25rem 0.875rem;
+    color: var(--ink-dim);
+    font-size: 12px;
+}
+
+.c-empty-title {
+    margin: 0 0 0.375rem;
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 500;
+}
+
+.c-cmd {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    margin-top: 0.5rem;
+    background: var(--bg-bar);
+    border: 1px solid var(--hair);
+    padding: 0.4375rem 0.625rem;
+}
+
+.c-cmd-prompt {
+    color: var(--accent);
+    font-size: 12px;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.c-cmd-text {
+    font-size: 12px;
+    color: var(--ink);
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.c-cmd-bin {
+    color: var(--ink);
+}
+
+.c-cmd-flag {
+    color: var(--accent);
+}
+
+.c-cmd-arg {
+    color: var(--ink-dim);
+}
+
+.c-onboard {
+    grid-column: 1 / -1;
+    max-width: 720px;
+    margin: 2rem auto;
+}
+
+.c-onboard-steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.c-onboard-step {
+    display: flex;
+    gap: 0.875rem;
+    padding: 0.625rem 0;
+    border-bottom: 1px solid var(--hair-soft);
+}
+.c-onboard-step:last-child {
+    border-bottom: 0;
+}
+
+.c-onboard-n {
+    color: var(--accent);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.c-onboard-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.c-onboard-text {
+    color: var(--ink);
+    font-size: 12.5px;
+}
+
+.c-onboard-hint {
+    color: var(--ink-faint);
+    font-size: 11.5px;
+    margin: 0;
+}
+
+.c-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 0.5rem;
+    color: var(--ink-dim);
+    font-size: 12px;
+}
+
+.c-loading-spin {
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--hair-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: c-spin 0.7s linear infinite;
+}
+
+@keyframes c-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---------- Acquisition tab (discovery folded in) ---------- */
+
+.c-acquisition {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---------- Statusbar actions + action note ---------- */
+
+.c-status-spacer {
+    flex: 1;
+}
+
+.c-action-note {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 1rem;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--hair);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink);
+    flex-shrink: 0;
+}
+.c-action-note > span {
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+
+/* ---------- Requirement rows: clickable + expandable ---------- */
+
+.c-verdict {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+}
+
+.c-verdict-row {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+    background: transparent;
+    border: 0;
+    padding: 0.375rem 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+}
+.c-verdict-row:focus-visible {
+    outline: 0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.c-verdict--open {
+    background: var(--bg-bar);
+    margin: 0 -0.5rem;
+    padding: 0 0.5rem;
+    border-bottom: 1px solid var(--hair);
+}
+
+.c-req-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0 0 0.375rem 1.85rem;
+}
+
+.c-req-detail {
+    margin: 0 0 0.5rem 1.85rem;
+    border-left: 1px solid var(--hair-strong);
+    padding: 0.5rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.c-req-meta {
+    display: flex;
+    gap: 1.25rem;
+    margin: 0;
+    font-size: 11px;
+}
+.c-req-meta dt {
+    color: var(--ink-faint);
+    display: inline;
+}
+.c-req-meta dd {
+    margin: 0 0 0 0.375rem;
+    color: var(--ink-dim);
+    display: inline;
+}
+
+.c-req-nomatch {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 11.5px;
+}
+
+.c-req-match {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0.375rem 0;
+    border-top: 1px solid var(--hair-soft);
+}
+
+.c-evidence {
+    color: var(--ink-faint);
+    font-size: 11px;
+    font-style: italic;
+    overflow-wrap: anywhere;
+}
+
+.c-fact-meta {
+    color: var(--ink-faint);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Facts toolbar ---------- */
+
+.c-fact-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.c-chips {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.c-chip {
+    background: transparent;
+    border: 1px solid var(--hair);
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 1px 6px;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+}
+.c-chip:hover {
+    color: var(--ink);
+    border-color: var(--hair-strong);
+}
+.c-chip.is-active {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
+}
+
+.c-filter {
+    flex: 1;
+    min-width: 140px;
+    background: var(--bg);
+    border: 1px solid var(--hair);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 2px 0.5rem;
+    outline: none;
+}
+.c-filter:focus {
+    border-color: var(--accent);
+}
+.c-filter::placeholder {
+    color: var(--ink-faint);
+}
+
+/* ---------- Fact rows: clickable + evidence ledger ---------- */
+
+.c-fact-row {
+    display: flex;
+    gap: 0.625rem;
+    align-items: baseline;
+    padding: 0.4375rem 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+}
+.c-fact-row:focus-visible {
+    outline: 0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.c-fact--open {
+    background: var(--bg-bar);
+    margin: 0 -0.5rem;
+    padding: 0 0.5rem;
+    border-bottom: 1px solid var(--hair);
+}
+
+.c-ledger {
+    margin: 0 0 0 3.2rem;
+    border-left: 1px solid var(--hair-strong);
+    padding: 0.375rem 0.625rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.c-ledger-title {
+    color: var(--ink-faint);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+}
+.c-event {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    font-size: 11px;
+}
+.c-event-when {
+    color: var(--ink-faint);
+    width: 5.5em;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+.c-event-type {
+    width: 5.5em;
+    flex-shrink: 0;
+}
+.c-event-type--verified { color: var(--pass); }
+.c-event-type--violated { color: var(--fail); }
+.c-event-type--minted { color: var(--accent); }
+.c-event-type--unverified { color: var(--warn); }
+.c-event-detail {
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+}
+
+/* ---------- Review queue (behavior changes awaiting a decision) ---------- */
+
+.c-review {
+    margin: 1rem 1.25rem 0;
+    border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--hair));
+    background: color-mix(in srgb, var(--warn) 6%, var(--bg-elev));
+    flex-shrink: 0;
+}
+.c-review-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.375rem 0.625rem;
+    border-bottom: 1px solid var(--hair);
+    font-size: 11px;
+    color: var(--warn);
+    letter-spacing: 0.04em;
+}
+.c-review-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem 0.625rem;
+}
+.c-review-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--hair-soft);
+}
+.c-review-row:last-child {
+    border-bottom: 0;
+}
+.c-review-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+.c-review-expected {
+    color: var(--ink-faint);
+    font-size: 11px;
+}
+.c-review-observed {
+    color: var(--warn);
+    font-size: 11.5px;
+    overflow-wrap: anywhere;
+}
+.c-review-actions {
+    display: flex;
+    gap: 0.375rem;
+    flex-shrink: 0;
+}
+
+.c-event-type--retired { color: var(--ink-dim); }
+.c-event-type--accepted { color: var(--pass); }
+.c-event-type--rejected { color: var(--fail); }
+
+/* ---------- Verdict banner (Pact-style ship/no-ship at a glance) ---------- */
+
+.c-verdict-banner {
+    display: flex;
+    align-items: baseline;
+    gap: 0.625rem;
+    padding: 0.5rem 1.25rem;
+    border-bottom: 1px solid var(--hair);
+    flex-shrink: 0;
+    font-family: var(--mono);
+}
+.c-verdict-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 1px 7px;
+}
+.c-verdict-banner--pass {
+    background: var(--pass-soft);
+}
+.c-verdict-banner--pass .c-verdict-badge {
+    color: var(--pass);
+    background: color-mix(in srgb, var(--pass) 18%, transparent);
+}
+.c-verdict-banner--warn {
+    background: var(--warn-soft);
+}
+.c-verdict-banner--warn .c-verdict-badge {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.c-verdict-banner--fail {
+    background: var(--fail-soft);
+}
+.c-verdict-banner--fail .c-verdict-badge {
+    color: var(--fail);
+    background: color-mix(in srgb, var(--fail) 18%, transparent);
+}
+.c-verdict-summary {
+    font-size: 12px;
+    color: var(--ink);
+}
+.c-verdict-sub {
+    color: var(--ink-faint);
+    font-size: 11px;
+}
+
+/* ---------- Verification history strip (Currents-style squares) ---------- */
+
+.c-strip-events {
+    display: inline-flex;
+    gap: 3px;
+    margin: 2px 0;
+}
+.c-evsq {
+    width: 10px;
+    height: 10px;
+    border: 1px solid var(--hair-strong);
+}
+.c-evsq--verified {
+    background: var(--pass);
+    border-color: var(--pass);
+}
+.c-evsq--violated {
+    background: var(--fail);
+    border-color: var(--fail);
+}
+.c-evsq--unverified {
+    background: var(--warn);
+    border-color: var(--warn);
+}
+.c-evsq--minted {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.c-evsq--accepted {
+    background: color-mix(in srgb, var(--pass) 45%, var(--bg));
+    border-color: var(--pass);
+}
+.c-evsq--rejected {
+    background: color-mix(in srgb, var(--fail) 45%, var(--bg));
+    border-color: var(--fail);
+}
+.c-evsq--retired {
+    background: var(--ink-mute);
+    border-color: var(--ink-mute);
+}
+
+/* =============================================================================
+   Cosmetic layer — the portfolio becomes the hero surface.
+   ========================================================================== */
+
+/* Statusbar: labels graduate to tracked uppercase, values get weight */
+
+.c-statusbar {
+    background: linear-gradient(180deg, var(--bg-elev), var(--bg-bar));
+}
+.c-status-key {
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    font-size: 10px;
+}
+.c-status-val {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Verdict banner: the hero — badge gets a soft wash + glow */
+
+.c-verdict-banner {
+    align-items: center;
+    border-bottom: 1px solid var(--hair);
+    box-shadow: inset 0 -1px 0 var(--hair-lit);
+}
+.c-verdict-badge {
+    border-radius: var(--radius-pill);
+    padding: 2px 10px;
+    box-shadow: 0 0 16px -6px currentColor;
+}
+.c-verdict-banner--pass {
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--pass) 10%, var(--bg-bar)),
+        var(--bg-bar) 55%
+    );
+}
+.c-verdict-banner--warn {
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--warn) 12%, var(--bg-bar)),
+        var(--bg-bar) 55%
+    );
+}
+.c-verdict-banner--fail {
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--fail) 12%, var(--bg-bar)),
+        var(--bg-bar) 55%
+    );
+}
+.c-verdict-sub {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Panels: depth + head treatments */
+
+.c-panel {
+    box-shadow: var(--shadow-card);
+}
+.c-panel-head {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+}
+
+/* Rows: rounded hover lift with an inset hairline */
+
+.c-verdict,
+.c-fact {
+    border-radius: var(--radius-row);
+}
+.c-verdict-row,
+.c-fact-row {
+    border-radius: var(--radius-row);
+    padding-left: 0.375rem;
+    padding-right: 0.375rem;
+    margin-left: -0.375rem;
+    margin-right: -0.375rem;
+    border: 1px solid transparent;
+}
+.c-verdict-row:hover,
+.c-fact-row:hover {
+    background: var(--bg-hover);
+    border-color: var(--hair);
+}
+.c-fact--open .c-fact-row,
+.c-verdict--open .c-verdict-row {
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
+}
+
+/* Status marks: shape already encodes state; violated now glows */
+
+.c-dot {
+    border-radius: 2px;
+    transform: rotate(45deg);
+    transition: box-shadow var(--speed) var(--ease);
+}
+.c-fact--violated .c-dot {
+    box-shadow: 0 0 8px 0 var(--fail);
+    background: var(--fail);
+}
+.c-fact--verified .c-dot {
+    box-shadow: 0 0 6px -1px var(--pass);
+}
+.c-conf {
+    font-variant-numeric: tabular-nums;
+}
+
+/* History squares: jewel-like */
+
+.c-evsq {
+    border-radius: 3px;
+    transition: transform var(--speed) var(--ease);
+}
+.c-evsq:hover {
+    transform: scale(1.35);
+}
+.c-evsq--violated {
+    box-shadow: 0 0 8px -1px var(--fail);
+}
+.c-evsq--minted {
+    box-shadow: 0 0 8px -2px var(--accent);
+}
+
+/* Coverage bar: taller, rounded, with segment sheen */
+
+.c-coverage-bar {
+    box-shadow: inset 0 0 0 1px var(--hair-lit);
+}
+.c-cov--covered {
+    box-shadow: inset 0 1px 0 var(--hair-lit);
+}
+.c-cov--violated {
+    box-shadow: inset 0 1px 0 var(--hair-lit), 0 0 10px -3px var(--fail);
+}
+
+/* Chips + filter */
+
+.c-chip {
+    border-radius: var(--radius-pill);
+    transition: color var(--speed) var(--ease), border-color var(--speed) var(--ease),
+        background var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+.c-chip.is-active {
+    box-shadow: 0 0 12px -5px var(--accent);
+}
+
+.c-filter {
+    border-radius: var(--radius-row);
+}
+.c-filter:focus {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 16px -6px var(--accent-dim);
+}
+
+/* Review queue: warn-washed card with glow edge */
+
+.c-review {
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card), 0 0 24px -12px var(--warn);
+}
+
+/* Action note: floats as a toast-like strip */
+
+.c-action-note {
+    border-radius: 0;
+    box-shadow: inset 0 -1px 0 var(--hair-lit);
+}
+
+/* Command strips in empty states */
+
+.c-cmd {
+    border-radius: var(--radius-row);
+    transition: border-color var(--speed) var(--ease);
+}
+.c-cmd:hover {
+    border-color: var(--hair-strong);
+}
+
+/* Degraded pill: rounded, gentle glow */
+
+.connection-degraded-pill {
+    box-shadow: var(--shadow-pop);
+}
+
+/* ---------- Triage tabs (Sentry-style reframing of one list) ---------- */
+
+.c-triage {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--hair);
+    background: var(--bg-bar);
+    margin-bottom: 0.75rem;
+}
+.c-triage-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4375rem;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--hair);
+    padding: 0.3125rem 0.75rem;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+.c-triage-tab:last-child {
+    border-right: 0;
+}
+.c-triage-tab:hover {
+    color: var(--ink-dim);
+}
+.c-triage-tab.is-active {
+    color: var(--ink);
+    background: var(--bg);
+    box-shadow: inset 0 2px 0 var(--accent);
+}
+.c-triage-n {
+    font-size: 10px;
+    color: var(--ink-faint);
+    background: var(--bg-elev);
+    border: 1px solid var(--hair);
+    padding: 0 4px;
+    font-variant-numeric: tabular-nums;
+}
+.c-triage-tab.is-active .c-triage-n {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+}
+
+.c-verdict-spark {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 2px;
+    align-items: center;
+}
+.c-verdict-spark .c-evsq {
+    width: 7px;
+    height: 7px;
+}
+
+.c-trend {
+    display: inline-flex;
+    gap: 3px;
+    align-items: flex-end;
+    margin-left: auto;
+    margin-right: 0.75rem;
+    height: 20px;
+}
+.c-verdict-spark {
+    margin-left: 0;
+}
+.c-trend-day {
+    display: inline-flex;
+    flex-direction: column-reverse;
+    align-items: center;
+    gap: 1px;
+}
+.c-trend-ok {
+    width: 5px;
+    background: var(--pass);
+    min-height: 2px;
+}
+.c-trend-bad {
+    width: 5px;
+    background: var(--fail);
+    min-height: 2px;
+    box-shadow: 0 0 6px -1px var(--fail);
+}
+.c-event-type--restored { color: var(--info); }
+.c-evsq--restored { background: var(--info); border-color: var(--info); }

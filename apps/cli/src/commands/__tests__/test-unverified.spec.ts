@@ -24,7 +24,7 @@ vi.mock("@raiken/core", async (importActual) => {
 });
 
 const { testCommand, findUnverifiedSpecs } = await import("../test");
-const { withThrowExit } = await import("../../repl/exit");
+const { withThrowExit } = await import("../../cli/exit");
 
 const MARKER = "// @raiken-unverified — drafted by raiken cover";
 

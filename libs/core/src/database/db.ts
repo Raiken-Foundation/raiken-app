@@ -16,7 +16,7 @@ import { closeDatabase, openDatabase, vacuumDatabase } from "./connection";
 import { SCHEMA_VERSION } from "./constants";
 import { AdminRepository } from "./repositories/admin.repository";
 import { CodeGraphRepository } from "./repositories/code-graph.repository";
-import { EmbeddingsRepository } from "./repositories/embeddings.repository";
+import { KeywordIndexRepository } from "./repositories/keyword-index.repository";
 import { MemoryRepository } from "./repositories/memory.repository";
 import { SymbolsRepository } from "./repositories/symbols.repository";
 import { TestOutcomesRepository } from "./repositories/test-outcomes.repository";
@@ -42,11 +42,11 @@ export class CodeGraphDB {
     private readonly projectPath: string;
 
     private readonly codeGraph: CodeGraphRepository;
-    private readonly embeddingsRepo: EmbeddingsRepository;
     private readonly memory: MemoryRepository;
     private readonly testOutcomes: TestOutcomesRepository;
     private readonly symbols: SymbolsRepository;
     private readonly admin: AdminRepository;
+    private readonly keywordIndexRepo: KeywordIndexRepository;
 
     constructor(projectPath: string, dbPath?: string) {
         const opened = openDatabase(projectPath, dbPath);
@@ -55,11 +55,11 @@ export class CodeGraphDB {
         this.projectPath = opened.projectPath;
 
         this.symbols = new SymbolsRepository(this.adapter);
-        this.embeddingsRepo = new EmbeddingsRepository(this.adapter);
         this.codeGraph = new CodeGraphRepository(this.adapter, this.symbols);
         this.memory = new MemoryRepository(this.adapter);
         this.testOutcomes = new TestOutcomesRepository(this.adapter);
         this.admin = new AdminRepository(this.adapter);
+        this.keywordIndexRepo = new KeywordIndexRepository(this.adapter);
     }
 
     getRawDatabase(): Database.Database {
@@ -134,65 +134,16 @@ export class CodeGraphDB {
         return this.admin.getTableCount(tableName);
     }
 
-    saveEmbeddings(
-        fileId: number,
-        chunks: Array<{
-            type: "function" | "class" | "file" | "type";
-            name: string;
-            text: string;
-            embedding: number[];
-        }>,
-    ): void {
-        this.embeddingsRepo.saveEmbeddings(fileId, chunks);
-    }
-
-    searchSimilar(
-        queryEmbedding: number[],
-        limit = 10,
-        chunkTypes?: Array<"function" | "class" | "file" | "type">,
-    ): Array<{
-        fileId: number;
-        filePath: string;
-        chunkType: string;
-        chunkName: string;
-        chunkText: string;
-        similarity: number;
-    }> {
-        return this.embeddingsRepo.searchSimilar(queryEmbedding, limit, chunkTypes);
-    }
-
-    getFileEmbeddings(fileId: number): Array<{
-        id: number;
-        chunkType: string;
-        chunkName: string;
-        chunkText: string;
-        createdAt: number;
-    }> {
-        return this.embeddingsRepo.getFileEmbeddings(fileId);
-    }
-
-    deleteFileEmbeddings(fileId: number): void {
-        this.embeddingsRepo.deleteFileEmbeddings(fileId);
-    }
-
-    getEmbeddingsCount(): number {
-        return this.embeddingsRepo.getEmbeddingsCount();
-    }
-
     getFileId(filePath: string): number | null {
-        return this.embeddingsRepo.getFileId(filePath);
-    }
-
-    hasEmbeddings(fileId: number): boolean {
-        return this.embeddingsRepo.hasEmbeddings(fileId);
+        return this.keywordIndexRepo.getFileId(filePath);
     }
 
     saveKeywordIndex(index: Map<string, string[]>): void {
-        this.embeddingsRepo.saveKeywordIndex(index);
+        this.keywordIndexRepo.saveKeywordIndex(index);
     }
 
     loadKeywordIndex(): Map<string, string[]> | null {
-        return this.embeddingsRepo.loadKeywordIndex();
+        return this.keywordIndexRepo.loadKeywordIndex();
     }
 
     getLastScanTime(): number {

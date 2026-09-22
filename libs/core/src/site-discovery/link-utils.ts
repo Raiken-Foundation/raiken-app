@@ -45,6 +45,30 @@ export function escapeSelectorText(value: string): string {
 }
 
 /**
+ * True when a fragment-only value looks like a client-side ROUTE (`#/stats`,
+ * `#!/login`) rather than an in-page anchor (`#section`). Hash-routed SPAs
+ * (React Router / Vue hash mode) expose their whole view graph through these
+ * links; plain anchors change scroll position, not content, and stay skipped.
+ */
+export function isHashRouteHref(value: string): boolean {
+    const v = value.trim();
+    return /^#\/.+/.test(v) || /^#!.+/.test(v);
+}
+
+/**
+ * True when a full URL's fragment looks like a hash route (`#/stats`,
+ * `#!/login`). Complements {@link isHashRouteHref} (which takes the raw
+ * fragment-only attribute value).
+ */
+export function hasHashRoute(url: string): boolean {
+    try {
+        return isHashRouteHref(new URL(url).hash);
+    } catch {
+        return false;
+    }
+}
+
+/**
  * True when a candidate attribute value looks like a navigable route
  * rather than an action label (`submit`, `true`, empty, etc.).
  */

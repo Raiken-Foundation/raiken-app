@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
     callWithTokenBudget,
+    describeModelMismatch,
+    enrichProviderModelError,
     isEmptyLengthResponse,
     listProviderModels,
     listProviders,
@@ -99,6 +101,50 @@ describe("resolveTokenBudget", () => {
     });
 });
 
+describe("describeModelMismatch", () => {
+    it("returns null for a coherent openrouter config", () => {
+        expect(describeModelMismatch("openrouter", "anthropic/claude-sonnet-4.5")).toBeNull();
+    });
+
+    it("returns null when the model is unknown to every catalog", () => {
+        expect(describeModelMismatch("openrouter", "some-custom-model-id")).toBeNull();
+    });
+
+    it("names DeepSeek when a DeepSeek model id is configured on openrouter", () => {
+        const mismatch = describeModelMismatch("openrouter", "deepseek-v4-flash");
+        expect(mismatch).toContain("deepseek-v4-flash");
+        expect(mismatch).toContain("DeepSeek");
+        expect(mismatch).toContain('provider "deepseek"');
+    });
+
+    it("catches DeepSeek alias ids too", () => {
+        const mismatch = describeModelMismatch("openrouter", "deepseek-flash");
+        expect(mismatch).toContain('provider "deepseek"');
+    });
+
+    it("does not flag a model on its own provider", () => {
+        expect(describeModelMismatch("deepseek", "deepseek-v4-flash")).toBeNull();
+        expect(describeModelMismatch("deepseek", "deepseek-flash")).toBeNull();
+    });
+});
+
+describe("enrichProviderModelError", () => {
+    const ai = aiConfig({ provider: "openrouter", model: "deepseek-v4-flash" });
+
+    it("appends provider context to a model-id rejection", () => {
+        const enriched = enrichProviderModelError(new Error("deepseek-v4-flash is not a valid model ID"), ai);
+        expect(enriched.message).toContain("deepseek-v4-flash is not a valid model ID");
+        expect(enriched.message).toContain("provider: openrouter");
+        expect(enriched.message).toContain("raiken.config.json");
+        expect(enriched.cause).toBeInstanceOf(Error);
+    });
+
+    it("leaves unrelated errors untouched", () => {
+        const original = new Error("402 This request requires more credits");
+        expect(enrichProviderModelError(original, ai)).toBe(original);
+    });
+});
+
 describe("callWithTokenBudget", () => {
     it("escalates the budget on the empty-length signature", async () => {
         let calls = 0;
@@ -159,6 +205,17 @@ describe("callWithTokenBudget", () => {
             },
         });
         expect(timeouts[0]).toBe(120_000);
+    });
+
+    it("enriches model-id rejections with the resolved provider", async () => {
+        await expect(
+            callWithTokenBudget({
+                ai: aiConfig({ model: "deepseek-v4-flash" }),
+                invoke: async () => {
+                    throw new Error("deepseek-v4-flash is not a valid model ID");
+                },
+            }),
+        ).rejects.toThrow(/deepseek-v4-flash is not a valid model ID.*provider: openrouter/s);
     });
 });
 

@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import { Header } from "../../components/header";
-import { TicketSyncBar } from "../../components/ticket-sync";
 import { TestingEditorPane } from "./testing-editor-pane";
 import { TestingResultsPane, TestingRunControls } from "./testing-results-pane";
 import { TestingSidebarPane } from "./testing-sidebar-pane";
@@ -14,16 +13,10 @@ import { useTestRun } from "./use-test-run";
 import "./testing.css";
 
 export function TestingScreen({
-    sidebarTab = "chat",
     sidebarCollapsed = false,
-    onSidebarTabChange,
-    pendingPrompt,
-    onPromptConsumed,
-    onNavigateRoute,
-    onHitlPendingChange,
+    pendingGeneratedTest,
+    onGeneratedTestConsumed,
 }: TestingViewProps) {
-    const [ticketPrompt, setTicketPrompt] = useState<string | undefined>();
-
     const codeGraph = useCodeGraph();
     const sidebar = useSidebarResize();
     const files = useTestFiles();
@@ -39,6 +32,16 @@ export function TestingScreen({
         savedContentRef: files.savedContentRef,
         handleFileClose: files.handleFileClose,
     });
+
+    // The discovery "generate test" handoff: generated spec content arrives
+    // as a prop and is saved as a real file via the same path the agent
+    // output used to take.
+    useEffect(() => {
+        if (!pendingGeneratedTest) return;
+        mutations.handleSendMessage(pendingGeneratedTest);
+        onGeneratedTestConsumed?.();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- consume-once handoff
+    }, [pendingGeneratedTest]);
 
     const run = useTestRun({
         files: files.files,
@@ -66,32 +69,15 @@ export function TestingScreen({
     return (
         <div className="testing-view" data-testing-mounted="true">
             <Header projectName={codeGraph.projectInfo?.path?.split("/").pop() || "raiken-app"} />
-            <TicketSyncBar
-                onGenerateTest={(prompt) => {
-                    onSidebarTabChange?.("chat");
-                    setTicketPrompt(prompt);
-                }}
-            />
-
             <div className="main-content">
                 <TestingSidebarPane
                     sidebarWidth={sidebar.sidebarWidth}
                     isResizing={sidebar.isResizing}
                     onMouseDown={sidebar.handleMouseDown}
                     onResizeKeyDown={sidebar.handleResizeKeyDown}
-                    onSendMessage={mutations.handleSendMessage}
                     onFileSelect={files.handleFileSelectByPath}
                     activeFilePath={files.activeFilePath}
-                    sidebarTab={sidebarTab}
                     sidebarCollapsed={sidebarCollapsed}
-                    onSidebarTabChange={onSidebarTabChange}
-                    onNavigateRoute={onNavigateRoute}
-                    onHitlPendingChange={onHitlPendingChange}
-                    initialPrompt={ticketPrompt || pendingPrompt}
-                    onInitialPromptConsumed={() => {
-                        if (ticketPrompt) setTicketPrompt(undefined);
-                        onPromptConsumed?.();
-                    }}
                 />
 
                 <TestingEditorPane

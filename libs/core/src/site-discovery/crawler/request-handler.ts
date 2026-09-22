@@ -4,8 +4,9 @@ import type { SiteKnowledgeDB } from "../db";
 import { type BlockerDetector, runBlockerPipeline } from "../detectors";
 import { looksLikeLoginUrl, looksLikeLogoutUrl } from "../detectors/auth";
 import { isSyntheticProxyStatus } from "../detectors/manual-fallback";
-import { buildLinkSelector, safeOrigin } from "../link-utils";
+import { buildLinkSelector, isHashRouteHref, safeOrigin } from "../link-utils";
 import type { BlockerCategory, DiscoveryBlocker, DiscoveryOptions, DiscoveryStats } from "../types";
+import { fragmentAwareResolvedUrl } from "../url-utils";
 import { shouldExcludeUrl } from "./exclude-patterns";
 import { extractPageForms } from "./form-extractor";
 import { extractLinksFromPage } from "./link-extraction";
@@ -268,7 +269,21 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
                 return;
             }
 
-            const resolvedUrl = response?.url() || url;
+            // Hash-route navigations are same-document: `response.url()` drops
+            // the fragment, which would collapse `/#/stats` onto `/` and
+            // overwrite the root page's snapshot. Resolve the landed URL from
+            // the live page (fragments included) for fragment requests.
+            let livePageUrl: string | null = null;
+            try {
+                livePageUrl = page.url();
+            } catch {
+                // Keep the response-derived URL below.
+            }
+            const resolvedUrl = fragmentAwareResolvedUrl(
+                url,
+                response?.url() ?? null,
+                livePageUrl,
+            );
             const resolvedNormalized = deps.normalizeUrl(resolvedUrl);
             const startOrigin = deps.getStartOrigin();
 
@@ -407,9 +422,15 @@ export function createCrawlPageProcessor(deps: CrawlPageProcessorDeps) {
 
             for (const item of extracted) {
                 const cleanedHref = item.href.trim();
-                if (
-                    cleanedHref.length === 0 ||
-                    cleanedHref.startsWith("#") ||
+                if (cleanedHref.length === 0) continue;
+
+                const isFragmentOnly = cleanedHref.startsWith("#");
+                // Hash-ROUTED SPA views (`#/stats`) are distinct crawlable pages;
+                // plain anchors (`#section`) change scroll position, not
+                // content, and are skipped.
+                if (isFragmentOnly) {
+                    if (!isHashRouteHref(cleanedHref)) continue;
+                } else if (
                     cleanedHref.startsWith("mailto:") ||
                     cleanedHref.startsWith("tel:") ||
                     cleanedHref.startsWith("javascript:")

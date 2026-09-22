@@ -30,6 +30,7 @@ import {
     maybeCaptureMissingRepairPage,
     missingScenarioExpectations,
     resolveAIConfig,
+    requestTimeoutMs,
     serializeSafeClientError,
     stillAssertsAbsentLocators,
     UNVERIFIED_MARKER,
@@ -40,7 +41,7 @@ import chalk from "chalk";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { formatUnifiedDiff } from "../diff";
 import { CLI_EXIT, exitUsage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 export interface RepairCommandOptions {
     /** Write the fix without prompting (scripts / CI). */
@@ -119,6 +120,26 @@ closest element the evidence DOES show. Never respond with the file unchanged.`;
  */
 export const REPAIR_LLM_DEADLINE_MS = 2 * 60_000;
 export const REPAIR_VERIFY_DEADLINE_MS = 3 * 60_000;
+
+/**
+ * AI-fix deadline for the resolved provider/model. A fixed 2-minute ceiling
+ * always aborts slow reasoning models (their single LLM call may legally run
+ * 2× the standard per-request timeout), while fast models never need the
+ * headroom. Floor stays REPAIR_LLM_DEADLINE_MS; reasoning models scale with
+ * their per-request timeout. Exported for unit tests.
+ */
+export function repairLlmDeadlineMs(ai: {
+    provider: string;
+    model: string;
+}): number {
+    // The repair fix ladder can make up to 3 calls, each up to the model's
+    // per-request timeout (2× for reasoning models) — the phase budget must
+    // cover the whole ladder, not one call.
+    return Math.max(
+        REPAIR_LLM_DEADLINE_MS,
+        4 * requestTimeoutMs(ai as Parameters<typeof requestTimeoutMs>[0]),
+    );
+}
 
 export class RepairDeadlineExceededError extends Error {
     readonly phase: string;
@@ -271,6 +292,9 @@ export async function repairFailedRun(input: {
     const { projectPath, file, run, options } = input;
     const app = createProjectApplication(projectPath);
     const restore = options.json ? routeDiagnosticsToStderr() : null;
+    // Reasoning models get a deadline scaled to their per-request timeout; a
+    // fixed 2-minute ceiling always aborted them mid-draft.
+    const llmDeadlineMs = repairLlmDeadlineMs(resolveAIConfig(projectPath));
     const emit = (payload: Record<string, unknown>): void =>
         emitJson({ ...payload, ...(options.runSummary ? { run: options.runSummary } : {}) });
 
@@ -491,7 +515,7 @@ export async function repairFailedRun(input: {
             .join("\n\n");
         let repair: Awaited<ReturnType<typeof app.testing.repairTestResults>>;
         try {
-            const timed = await withRepairDeadline("AI fix", REPAIR_LLM_DEADLINE_MS, (signal) =>
+            const timed = await withRepairDeadline("AI fix", llmDeadlineMs, (signal) =>
                 app.testing.repairTestResults({
                     testResults: currentResults,
                     testCode: currentCode,

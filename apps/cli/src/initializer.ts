@@ -459,17 +459,17 @@ export async function initializeProject(
         console.log(chalk.cyan("\nNext steps:"));
         console.log(
             chalk.gray(
-                '  1. Discover your app (required before cover/-p): "raiken discover http://localhost:3000 --skip-auth"',
+                '  1. Discover your app: "raiken discover http://localhost:3000 --skip-auth"',
             ),
         );
         console.log(
             chalk.gray(
-                '  2. Draft a flow: raiken cover "sign in and see the dashboard" (auto-discovers when baseURL is set)',
+                '  2. Build the contract: "raiken contract capture" then "raiken contract import --file <ac.md>"',
             ),
         );
         console.log(
             chalk.gray(
-                '  3. Run and fix: "raiken test <file>" then "raiken repair <file>" on failure',
+                '  3. Check every change: "raiken contract verify" (exit 1 on a regression)',
             ),
         );
         console.log(
@@ -567,25 +567,33 @@ async function updateGitignore(projectPath: string): Promise<void> {
         // .gitignore doesn't exist, will create it
     }
 
-    const hasRaiken = gitignoreContent.includes(".raiken/");
-    const hasRaikenConfig = gitignoreContent.includes("raiken.config.json");
-    const hasCrawleeStorage = gitignoreContent.includes("storage/");
+    // Entries raiken cares about, each appended idempotently when absent.
+    // The dependency/test-artifact entries matter as much as the raiken ones:
+    // `git add -A` on a fresh init used to commit node_modules (hundreds of
+    // files) because nothing excluded it.
+    const entries: Array<{ pattern: string; comment: string }> = [
+        { pattern: ".raiken/", comment: "# Raiken local state and credentials" },
+        { pattern: "raiken.config.json", comment: "" },
+        { pattern: "storage/", comment: "# Crawlee storage (site discovery)" },
+        { pattern: "node_modules/", comment: "# Node + Playwright artifacts" },
+        { pattern: "test-results/", comment: "" },
+        { pattern: "playwright-report/", comment: "" },
+    ];
 
-    if (!hasRaiken || !hasRaikenConfig || !hasCrawleeStorage) {
-        let raikenSection = "";
-        if (!hasRaiken || !hasRaikenConfig) {
-            raikenSection += "\n# Raiken local state and credentials\n";
-            if (!hasRaiken) raikenSection += ".raiken/\n";
-            if (!hasRaikenConfig) raikenSection += "raiken.config.json\n";
+    let section = "";
+    let lastComment = "\0";
+    for (const entry of entries) {
+        if (gitignoreContent.includes(entry.pattern)) continue;
+        if (entry.comment && entry.comment !== lastComment) {
+            if (section) section += "\n";
+            section += `${entry.comment}\n`;
+            lastComment = entry.comment;
         }
-        if (!hasCrawleeStorage) {
-            raikenSection += "# Crawlee storage (site discovery)\nstorage/\n";
-        }
-        if (!hasRaiken || !hasRaikenConfig) {
-            gitignoreContent += raikenSection;
-        } else if (!hasCrawleeStorage) {
-            gitignoreContent += `\n# Crawlee storage (site discovery)\nstorage/\n`;
-        }
+        section += `${entry.pattern}\n`;
+    }
+
+    if (section) {
+        gitignoreContent += `\n${section}`;
         await fs.writeFile(gitignorePath, gitignoreContent);
         console.log(chalk.green("✓ Updated .gitignore to exclude Raiken artifacts"));
     } else {
@@ -1011,6 +1019,31 @@ export function getPlaywrightInstallCommand(manager: PackageManager): {
 }
 
 /**
+ * Wall-clock budget for the install steps `raiken init` runs itself
+ * (`npm install @playwright/test`, `npx playwright install chromium`).
+ *
+ * The browser binary download is ~180 MB and can outlast a short timer on a
+ * slow link — the old hard-coded 2 minutes killed it at ~80% and left the
+ * project browserless. Defaults to 10 minutes; CI and slow networks can
+ * override via `RAIKEN_BROWSER_INSTALL_TIMEOUT_MS`.
+ */
+export function resolveBrowserInstallTimeoutMs(
+    env: NodeJS.ProcessEnv = process.env,
+): number {
+    const override = Number(env.RAIKEN_BROWSER_INSTALL_TIMEOUT_MS);
+    return Number.isFinite(override) && override > 0 ? override : 10 * 60_000;
+}
+
+const INSTALL_TIMEOUT_MS = resolveBrowserInstallTimeoutMs();
+
+function installTimeoutMinutes(): string {
+    const minutes = INSTALL_TIMEOUT_MS / 60_000;
+    return minutes < 1
+        ? `${Math.round(INSTALL_TIMEOUT_MS / 1000)} seconds`
+        : `${Math.round(minutes)} minutes`;
+}
+
+/**
  * Install `@playwright/test` itself (not the browser binaries — see
  * `installPlaywrightBrowsers`). Returns whether the package is usable
  * afterward, so the caller can decide whether it's safe to proceed with
@@ -1024,8 +1057,8 @@ async function installPlaywrightPackage(
     console.log(chalk.blue(`Installing @playwright/test (${cmd} ${args.join(" ")})...`));
 
     // The timeout handle must be cleared once the race settles — an uncleared
-    // 120s timer keeps the Node event loop (and so the whole `raiken init`
-    // process) alive for two minutes after the completion message.
+    // timer keeps the Node event loop (and so the whole `raiken init`
+    // process) alive after the completion message.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let child: ReturnType<typeof spawn> | undefined;
     try {
@@ -1047,8 +1080,8 @@ async function installPlaywrightPackage(
             new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                     if (child && !child.killed) child.kill("SIGTERM");
-                    reject(new Error("@playwright/test install timed out"));
-                }, 120000);
+                    reject(new Error(`@playwright/test install timed out after ${installTimeoutMinutes()}`));
+                }, INSTALL_TIMEOUT_MS);
             }),
         ]);
         return true;
@@ -1087,7 +1120,7 @@ async function installPlaywrightBrowsers(
     console.log(chalk.blue("Installing Playwright chromium browser..."));
 
     // Same un-cleared-timer pitfall as installPlaywrightPackage — without
-    // clearTimeout, the process lingers for the full two minutes.
+    // clearTimeout, the process lingers for the full install budget.
     let timer: ReturnType<typeof setTimeout> | undefined;
     let child: ReturnType<typeof spawn> | undefined;
     try {
@@ -1120,15 +1153,24 @@ async function installPlaywrightBrowsers(
                 timer = setTimeout(() => {
                     if (child && !child.killed) child.kill("SIGTERM");
                     console.log(chalk.yellow("⚠ Playwright browser installation timed out"));
-                    reject(new Error("Playwright browser installation timed out after 2 minutes"));
-                }, 120000);
+                    reject(
+                        new Error(
+                            `Playwright browser installation timed out after ${installTimeoutMinutes()}`,
+                        ),
+                    );
+                }, INSTALL_TIMEOUT_MS);
             }),
         ]);
     } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         console.log(chalk.yellow(`⚠ Playwright browser installation failed: ${message}`));
         console.log(
-            chalk.gray("  You can install them manually with: npx playwright install chromium"),
+            chalk.gray(
+                "  You can install them manually with: npx playwright install chromium\n" +
+                    chalk.gray(
+                        "  (partial downloads resume, so a retry only fetches the remainder)",
+                    ),
+            ),
         );
         // Don't re-throw - this is not critical for setup completion
     } finally {

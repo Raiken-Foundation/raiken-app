@@ -154,7 +154,7 @@ describe("CodeGraphDB facade parity", () => {
         expect(() => db2.close()).not.toThrow();
     });
 
-    it("runs graph CRUD, embeddings search, memory, selectors, outcomes, and symbols", () => {
+    it("runs graph CRUD, keyword search, memory, selectors, outcomes, and symbols", () => {
         const db = new CodeGraphDB(testDir, dbPath);
         const src = sampleNode(testDir, "src/app.ts");
         const testRel = "e2e/app.spec.ts";
@@ -189,13 +189,7 @@ describe("CodeGraphDB facade parity", () => {
         db.replaceFileEdges(src.filePath, [edge]);
         expect(db.getSymbolGraphStats().edges).toBe(1);
 
-        const fileId = db.getFileId(src.filePath);
-        if (fileId === null) throw new Error("expected file id");
-        const embedding = Array.from({ length: 384 }, () => 0.1);
-        db.saveEmbeddings(fileId, [{ type: "function", name: "fn", text: "fn()", embedding }]);
-        expect(db.searchSimilar(embedding, 3)[0]?.chunkName).toBe("fn");
-
-        // Keyword index fallback path (no vector required).
+        // Keyword index persistence (the search store after the vector cut).
         db.saveKeywordIndex(new Map([["app", [src.filePath]]]));
         expect(db.loadKeywordIndex()?.get("app")).toEqual([src.filePath]);
 

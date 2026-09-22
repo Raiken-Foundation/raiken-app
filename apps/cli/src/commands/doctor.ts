@@ -17,7 +17,7 @@ import {
     scanTests,
 } from "@raiken/core";
 import chalk from "chalk";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 interface DoctorCommandOptions {
     dir?: string;

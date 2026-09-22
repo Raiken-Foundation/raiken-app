@@ -13,8 +13,8 @@ import chalk from "chalk";
 import { dim, renderToolCall, routeDiagnosticsToStderr, splitHITL } from "../agent-stream";
 import { bootstrapProject } from "../bootstrap";
 import { CLI_EXIT, type CliExitCode, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
-import { createEventStream, nowTs } from "../repl/events";
-import { cliExit } from "../repl/exit";
+import { createEventStream, nowTs } from "../cli/events";
+import { cliExit } from "../cli/exit";
 
 export interface OneShotOptions {
     /** The request. When empty, the prompt is read from piped stdin. */
@@ -886,6 +886,26 @@ export async function runOneShotCommand(options: OneShotOptions): Promise<void> 
             );
         } else if (!ok && reason && reason !== saveError) {
             process.stderr.write(chalk.red(`\n  ✗ ${reason}\n`));
+        }
+    }
+
+    // One-shot runs are real agent sessions — persist them like the REPL does
+    // (unless --no-save) so `raiken sessions`/`raiken resume` can reach them.
+    // Best-effort: a persistence failure never changes the run's exit code.
+    if (options.save) {
+        try {
+            const { saveSession } = await import("../cli/sessions");
+            const now = Date.now();
+            saveSession(
+                projectPath,
+                prompt.length > 48 ? `${prompt.slice(0, 48).trim()}…` : prompt,
+                [
+                    { role: "user", content: prompt, timestamp: now - 1 },
+                    { role: "assistant", content: assistant.trim(), timestamp: now },
+                ],
+            );
+        } catch {
+            /* session snapshotting is non-essential */
         }
     }
 

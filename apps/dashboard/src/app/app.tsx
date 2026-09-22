@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { CommandPalette } from "../components/command-palette";
 import { NavRail } from "../components/nav-rail";
-import type { DashboardRoute } from "../utils/slash-commands";
 import { trpc } from "../utils/trpc";
 import {
     ConnectionDegraded,
@@ -8,33 +8,30 @@ import {
     ConnectionNotReady,
     deriveConnectionFlags,
 } from "./connection-status";
-// `TestingView` is *not* lazy because it owns the chat sidebar, and we
-// need to keep that subtree mounted across navigation. If we lazy-load
-// it, the very first nav to `#/discovery` (without TestingView ever
-// mounting) means the chat sidebar has nowhere to live, and we lose the
-// "I'll come back to my chat thread later" UX. See `app-shell.testing`
-// below — TestingView is rendered unconditionally and toggled via
-// display:none rather than conditional rendering.
+// `TestingView` is *not* lazy because it stays mounted across navigation so
+// editor state (open files, unsaved buffers, a run in flight) survives view
+// toggles. See `app-shell.testing` below — TestingView is rendered
+// unconditionally and toggled via display:none rather than conditional
+// rendering.
 import { TestingView } from "./testing-view";
 
-const DiscoveryView = lazy(() =>
-    import("./discovery-view").then((m) => ({ default: m.DiscoveryView })),
-);
 const QualityView = lazy(() => import("./quality-view").then((m) => ({ default: m.QualityView })));
-const SettingsView = lazy(() =>
-    import("./settings-view").then((m) => ({ default: m.SettingsView })),
+const ContractView = lazy(() =>
+    import("./contract").then((m) => ({ default: m.ContractView })),
 );
 
-type View = "testing" | "discovery" | "quality" | "settings";
-type SidebarTab = "chat" | "files";
+type View = "contract" | "testing" | "quality";
 
-const VIEWS = ["testing", "discovery", "quality", "settings"] as const;
+const VIEWS = ["contract", "testing", "quality"] as const;
 
 function getViewFromHash(): View {
     // Match the first hash segment so deep-links like #/quality/doctor still
-    // resolve to the parent view (#/quality) rather than the default fallback.
+    // resolve to the parent view (#/quality). The contract is the product —
+    // it's the landing view, not the editor. Discovery is folded into the
+    // contract as its acquisition tab: legacy #/discovery links land there.
     const seg = window.location.hash.match(/^#\/([a-z]+)/)?.[1];
-    return (VIEWS as readonly string[]).includes(seg ?? "") ? (seg as View) : "testing";
+    if (seg === "discovery") return "contract";
+    return (VIEWS as readonly string[]).includes(seg ?? "") ? (seg as View) : "contract";
 }
 
 function ViewLoader() {
@@ -61,10 +58,8 @@ const ATTENTION_POLL_MS = 30000;
 
 export function App() {
     const [currentView, setCurrentView] = useState<View>(getViewFromHash);
-    const [sidebarTab, setSidebarTab] = useState<SidebarTab>("chat");
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-    const [pendingTestPrompt, setPendingTestPrompt] = useState<string | undefined>();
-    const [hitlPending, setHitlPending] = useState(false);
+    const [pendingGeneratedTest, setPendingGeneratedTest] = useState<string | undefined>();
 
     const healthQuery = trpc.getHealth.useQuery(undefined, {
         retry: 2,
@@ -112,43 +107,37 @@ export function App() {
         return () => window.removeEventListener("hashchange", onHashChange);
     }, []);
 
-    const handleNavigate = (view: View, tab?: SidebarTab) => {
-        if (view === "testing" && tab) {
-            setSidebarTab(tab);
-            if (sidebarCollapsed) setSidebarCollapsed(false);
-        }
+    const handleNavigate = (view: View) => {
         navigateTo(view);
     };
 
+    // Discovery "generate test" handoff, post-chat: instead of seeding a
+    // composer prompt, save a real runnable smoke spec for the page and open
+    // the editor with it. Anything richer is `raiken cover` (quality view).
     const handleGenerateTest = (pageUrl: string) => {
-        setPendingTestPrompt(`Generate E2E tests for ${pageUrl}`);
-        setSidebarTab("chat");
-        if (sidebarCollapsed) setSidebarCollapsed(false);
+        const slug =
+            pageUrl
+                .replace(/^https?:\/\//, "")
+                .replace(/[^a-z0-9]+/gi, "-")
+                .replace(/^-|-$/g, "")
+                .toLowerCase() || "page";
+        const template = `import { test, expect } from "@playwright/test";
+
+test.describe("discovered page ${slug}", () => {
+    test("loads and renders", async ({ page }) => {
+        await page.goto("${pageUrl}");
+        await expect(page.locator("body")).toBeVisible();
+    });
+});
+`;
+        setPendingGeneratedTest(template);
+        setSidebarCollapsed(false);
         navigateTo("testing");
     };
 
-    const handleSlashRoute = useCallback(
-        (route: DashboardRoute) => {
-            if (route.view === "testing") {
-                if (route.tab) {
-                    setSidebarTab(route.tab);
-                    if (sidebarCollapsed) setSidebarCollapsed(false);
-                }
-                navigateTo("testing");
-                return;
-            }
-            if (route.view === "quality" && route.tool) {
-                setCurrentView("quality");
-                window.location.hash = `#/quality/${route.tool}`;
-                return;
-            }
-            navigateTo(route.view);
-        },
-        [navigateTo, sidebarCollapsed],
-    );
-
     return (
         <div className="app-shell">
+            <CommandPalette onNavigate={(v) => handleNavigate(v)} />
             {isBackendDown && <ConnectionError />}
             {isBackendNotReady && (
                 <ConnectionNotReady
@@ -162,12 +151,10 @@ export function App() {
             )}
             <NavRail
                 activeView={currentView}
-                activeSidebarTab={sidebarTab}
                 sidebarCollapsed={sidebarCollapsed}
                 onNavigate={handleNavigate}
                 onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
                 attention={{
-                    chat: hitlPending,
                     files: anyTestBroken,
                     discovery: discoveryNeedsAttention,
                 }}
@@ -175,34 +162,24 @@ export function App() {
 
             {/*
               TestingView is always mounted; we toggle visibility with
-              display:none so the chat sidebar's React state (in-flight
-              streams, pending HITL approval, locally-rendered messages
-              that haven't been persisted yet) survives a round-trip to
-              another view. Conditional rendering would unmount the
-              sidebar and abort the streaming fetch — the symptom users
-              report as "I navigated to discovery, came back, and my
-              message thread was gone".
+              display:none so the editor's React state (open files, unsaved
+              buffers, a run in flight) survives a round-trip to another
+              view.
             */}
             <div className="app-view" data-active={currentView === "testing"}>
                 <TestingView
-                    sidebarTab={sidebarTab}
                     sidebarCollapsed={sidebarCollapsed}
-                    onSidebarTabChange={setSidebarTab}
-                    pendingPrompt={pendingTestPrompt}
-                    onPromptConsumed={() => setPendingTestPrompt(undefined)}
-                    onNavigateRoute={handleSlashRoute}
-                    onHitlPendingChange={setHitlPending}
+                    pendingGeneratedTest={pendingGeneratedTest}
+                    onGeneratedTestConsumed={() => setPendingGeneratedTest(undefined)}
                 />
             </div>
 
             <Suspense fallback={<ViewLoader />}>
-                {currentView === "discovery" && (
-                    <DiscoveryView onGenerateTest={handleGenerateTest} />
-                )}
-
                 {currentView === "quality" && <QualityView />}
 
-                {currentView === "settings" && <SettingsView />}
+                {currentView === "contract" && (
+                    <ContractView onGenerateTest={handleGenerateTest} />
+                )}
             </Suspense>
 
             <style>{`
@@ -217,9 +194,8 @@ export function App() {
                  * active and is collapsed to zero (but kept mounted)
                  * when another view is showing. We use display:none on
                  * the wrapper so the entire subtree is removed from
-                 * layout and a11y trees, but React state and any
-                 * in-flight effects (streaming chat fetches, HITL
-                 * approval timers) survive untouched. */
+                 * layout and a11y trees, but React state (open files,
+                 * unsaved buffers, a run in flight) survives. */
                 .app-view {
                     display: flex;
                     flex: 1;

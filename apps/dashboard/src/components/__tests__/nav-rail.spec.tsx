@@ -4,7 +4,7 @@ import { NavRail } from "../nav-rail";
 
 const baseProps = {
     activeView: "testing" as const,
-    activeSidebarTab: "chat" as const,
+    activeSidebarTab: "files" as const,
     sidebarCollapsed: false,
     onNavigate: vi.fn(),
     onToggleCollapse: vi.fn(),
@@ -16,32 +16,32 @@ describe("NavRail attention dots", () => {
         expect(document.querySelectorAll(".rail-dot")).toHaveLength(0);
     });
 
-    it("shows a dot on chat when a HITL approval is pending", () => {
-        render(<NavRail {...baseProps} attention={{ chat: true }} />);
-        expect(document.querySelectorAll(".rail-dot")).toHaveLength(1);
-        expect(screen.getByLabelText("chat, needs attention")).toBeDefined();
-    });
-
-    it("shows a dot on files when a test is broken", () => {
+    it("shows a dot on tests when a spec is broken", () => {
         render(<NavRail {...baseProps} attention={{ files: true }} />);
-        expect(screen.getByLabelText("files, needs attention")).toBeDefined();
-        expect(screen.queryByLabelText("chat, needs attention")).toBeNull();
+        expect(screen.getByLabelText("tests, needs attention")).toBeDefined();
     });
 
-    it("shows a dot on discovery when it's paused or has unresolved blockers", () => {
+    it("shows a dot on contract when acquisition (discovery) needs attention", () => {
         render(<NavRail {...baseProps} attention={{ discovery: true }} />);
-        expect(screen.getByLabelText("discovery, needs attention")).toBeDefined();
+        expect(screen.getByLabelText("contract, needs attention")).toBeDefined();
     });
 
     it("can show multiple dots at once", () => {
-        render(<NavRail {...baseProps} attention={{ chat: true, files: true, discovery: true }} />);
-        expect(document.querySelectorAll(".rail-dot")).toHaveLength(3);
+        render(<NavRail {...baseProps} attention={{ files: true, discovery: true }} />);
+        expect(document.querySelectorAll(".rail-dot")).toHaveLength(2);
     });
 
     it("falls back to plain labels when attention is undefined", () => {
         render(<NavRail {...baseProps} attention={undefined} />);
-        expect(screen.getByLabelText("chat")).toBeDefined();
-        expect(screen.getByLabelText("files")).toBeDefined();
-        expect(screen.getByLabelText("discovery")).toBeDefined();
+        expect(screen.getByLabelText("contract")).toBeDefined();
+        expect(screen.getByLabelText("tests")).toBeDefined();
+        expect(screen.getByLabelText("quality")).toBeDefined();
+    });
+
+    it("leads with the contract button", () => {
+        render(<NavRail {...baseProps} />);
+        const buttons = Array.from(document.querySelectorAll(".rail-btn"));
+        const labels = buttons.map((b) => b.getAttribute("aria-label"));
+        expect(labels.indexOf("contract")).toBe(0);
     });
 });

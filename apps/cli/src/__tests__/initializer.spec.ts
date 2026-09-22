@@ -10,7 +10,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectAIProviderFromEnv, getPlaywrightInstallCommand } from "../initializer";
+import {
+    detectAIProviderFromEnv,
+    getPlaywrightInstallCommand,
+    resolveBrowserInstallTimeoutMs,
+} from "../initializer";
 
 const ALL_ENV_VARS = [
     "OPENROUTER_API_KEY",
@@ -111,5 +115,29 @@ describe("getPlaywrightInstallCommand", () => {
             cmd: "bun",
             args: ["add", "-d", "@playwright/test"],
         });
+    });
+});
+
+describe("resolveBrowserInstallTimeoutMs", () => {
+    it("defaults to 10 minutes when the env var is unset", () => {
+        expect(resolveBrowserInstallTimeoutMs({})).toBe(10 * 60_000);
+    });
+
+    it("honours a positive numeric override", () => {
+        expect(resolveBrowserInstallTimeoutMs({ RAIKEN_BROWSER_INSTALL_TIMEOUT_MS: "15000" })).toBe(
+            15_000,
+        );
+    });
+
+    it("ignores non-numeric, zero, and negative overrides", () => {
+        expect(resolveBrowserInstallTimeoutMs({ RAIKEN_BROWSER_INSTALL_TIMEOUT_MS: "soon" })).toBe(
+            10 * 60_000,
+        );
+        expect(resolveBrowserInstallTimeoutMs({ RAIKEN_BROWSER_INSTALL_TIMEOUT_MS: "0" })).toBe(
+            10 * 60_000,
+        );
+        expect(resolveBrowserInstallTimeoutMs({ RAIKEN_BROWSER_INSTALL_TIMEOUT_MS: "-5" })).toBe(
+            10 * 60_000,
+        );
     });
 });

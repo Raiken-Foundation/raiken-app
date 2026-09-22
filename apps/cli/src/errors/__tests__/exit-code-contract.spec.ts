@@ -30,10 +30,6 @@ const UNSAFE_ERROR_PATTERN =
     /(?:err|error) instanceof Error\s*\?\s*(?:err|error)\.message|String\(\s*err\s*\)|detail:\s*String\(/;
 const ERROR_BOUNDARY_FILES = [
     ...PRODUCTION_COMMAND_FILES,
-    "apps/cli/src/repl/chat/agent-turn.ts",
-    "apps/cli/src/repl/chat/hitl.ts",
-    "apps/cli/src/repl/chat/run-chat-repl.ts",
-    "apps/cli/src/repl/chat/slash/handlers/discovery.ts",
 ];
 /** Bin wrappers must not pin exit codes — typed errors map via mapErrorToCliExitCode. */
 const HANDLE_CLI_EXIT_OVERRIDE = /handleCliError\([\s\S]*?exitCode\s*:/;

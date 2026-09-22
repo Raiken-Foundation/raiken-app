@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 export function ConnectionNotReady({ checks }: { checks?: Record<string, string> }) {
     const blocking = checks
         ? Object.entries(checks)
@@ -81,30 +83,64 @@ export function ConnectionNotReady({ checks }: { checks?: Record<string, string>
 }
 
 export function ConnectionDegraded({ checks }: { checks?: Record<string, string> }) {
+    const [dismissed, setDismissed] = useState(false);
     const hints = checks
         ? Object.entries(checks)
               .filter(([, v]) => v !== "ok" && v !== "idle" && v !== "not_configured")
               .map(([k, v]) => `${k}: ${v}`)
               .join(" · ")
         : "";
+    if (dismissed) return null;
     return (
-        <output className="connection-degraded-banner" aria-live="polite">
+        <output className="connection-degraded-pill" aria-live="polite">
             <span className="q-sev q-sev--warn">DEGRADED</span>
-            <span>
-                backend is up but some capabilities are limited
-                {hints ? ` (${hints})` : ""}
+            <span className="connection-degraded-text">
+                limited capabilities{hints ? ` (${hints})` : ""}
             </span>
+            <button
+                type="button"
+                className="connection-degraded-close"
+                aria-label="dismiss degraded notice"
+                onClick={() => setDismissed(true)}
+            >
+                ×
+            </button>
             <style>{`
-                .connection-degraded-banner {
+                /* Pinned pill, not a layout participant: the degraded state is
+                   a warning, not a blocker, so it must never push or squeeze
+                   the app shell (which is a horizontal flex row). */
+                .connection-degraded-pill {
+                    position: fixed;
+                    right: 1rem;
+                    bottom: 1rem;
+                    z-index: 9990;
                     display: flex;
                     align-items: center;
                     gap: 0.5rem;
-                    padding: 0.375rem 0.75rem;
-                    background: color-mix(in srgb, var(--warn) 12%, var(--bg-bar));
-                    border-bottom: 1px solid var(--hair);
+                    padding: 0.375rem 0.5rem 0.375rem 0.75rem;
+                    background: color-mix(in srgb, var(--warn) 12%, var(--bg-elev));
+                    border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--hair));
                     font-family: var(--mono);
                     font-size: 11px;
                     color: var(--ink-dim);
+                    max-width: min(480px, calc(100vw - 2rem));
+                }
+                .connection-degraded-text {
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+                .connection-degraded-close {
+                    background: transparent;
+                    border: 0;
+                    color: var(--ink-faint);
+                    font-size: 14px;
+                    cursor: pointer;
+                    padding: 0 2px;
+                    line-height: 1;
+                }
+                .connection-degraded-close:hover {
+                    color: var(--ink);
                 }
             `}</style>
         </output>

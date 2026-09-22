@@ -14,8 +14,8 @@ import { TestingRunControls } from "../testing-results-pane";
 import { TestingSidebarPane } from "../testing-sidebar-pane";
 import { isFileDirty } from "../use-test-files";
 
-vi.mock("../../../components/sidebar", () => ({
-    Sidebar: (props: Record<string, unknown>) => (
+vi.mock("../../../components/files-sidebar", () => ({
+    FilesSidebar: (props: Record<string, unknown>) => (
         <div data-testid="testing-sidebar" data-collapsed={String(props.collapsed)} />
     ),
 }));

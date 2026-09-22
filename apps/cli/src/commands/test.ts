@@ -14,7 +14,7 @@ import {
 import chalk from "chalk";
 import { dim, routeDiagnosticsToStderr } from "../agent-stream";
 import { CLI_EXIT, exitUsage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 import { type RepairRunResult, repairFailedRun } from "./repair";
 import { partitionSuiteSpecs, quarantineSkipNotice } from "./run-scope";
 

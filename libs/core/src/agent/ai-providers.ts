@@ -69,6 +69,13 @@ export interface ProviderDefinition {
     recommendedModels: ModelInfo[];
     /** Capabilities assumed for any model of this provider not listed above. */
     defaultCapabilities?: ModelCapabilities;
+    /**
+     * Model ids the provider's API accepts that are deliberately NOT shown in
+     * pickers — server-side aliases mapped to the canonical catalog id they
+     * resolve to. Consulted for mismatch detection and capability lookup so an
+     * alias still gets its canonical model's reasoning/timeout treatment.
+     */
+    modelAliases?: Record<string, string>;
 }
 
 export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
@@ -227,13 +234,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "llama-3.3-70b-versatile",
                 name: "Llama 3.3 70B Versatile",
-                description: "Default Groq model",
-                source: "recommended",
-            },
-            {
-                id: "llama-3.1-8b-instant",
-                name: "Llama 3.1 8B Instant",
-                description: "Very fast low-latency model",
+                description: "Default Groq model (list more via the live catalog)",
                 source: "recommended",
             },
         ],
@@ -252,13 +253,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "mistral-large-latest",
                 name: "Mistral Large",
-                description: "Default Mistral model",
-                source: "recommended",
-            },
-            {
-                id: "codestral-latest",
-                name: "Codestral",
-                description: "Code-focused Mistral model",
+                description: "Default Mistral model (list more via the live catalog)",
                 source: "recommended",
             },
         ],
@@ -279,7 +274,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "deepseek-v4-flash",
                 name: "DeepSeek V4 Flash",
-                description: "Fast V4 reasoning model",
+                description: "Fast V4 reasoning model (list more via the live catalog)",
                 source: "recommended",
                 capabilities: { vision: false, structuredOutput: false, reasoning: true },
             },
@@ -291,6 +286,12 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
                 capabilities: { vision: false, structuredOutput: false, reasoning: true },
             },
         ],
+        // Server-side aliases (not shown in pickers): the API accepts these ids
+        // and resolves them to the canonical catalog entries.
+        modelAliases: {
+            "deepseek-flash": "deepseek-v4-flash",
+            "deepseek-chat": "deepseek-v4-flash",
+        },
     },
     xai: {
         id: "xai",
@@ -325,13 +326,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
                 name: "Llama 3.3 70B Instruct Turbo",
-                description: "Default Together model",
-                source: "recommended",
-            },
-            {
-                id: "Qwen/Qwen2.5-Coder-32B-Instruct",
-                name: "Qwen 2.5 Coder 32B",
-                description: "Code-focused open model",
+                description: "Default Together model (list more via the live catalog)",
                 source: "recommended",
             },
         ],
@@ -350,13 +345,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "sonar",
                 name: "Sonar",
-                description: "Default Perplexity model",
-                source: "recommended",
-            },
-            {
-                id: "sonar-pro",
-                name: "Sonar Pro",
-                description: "Higher-capability Perplexity model",
+                description: "Default Perplexity model (list more via the live catalog)",
                 source: "recommended",
             },
         ],
@@ -374,13 +363,7 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
             {
                 id: "llama3.2",
                 name: "Llama 3.2",
-                description: "Common local Ollama model",
-                source: "recommended",
-            },
-            {
-                id: "qwen2.5-coder",
-                name: "Qwen 2.5 Coder",
-                description: "Common local code model",
+                description: "Common local Ollama model (list more via the live catalog)",
                 source: "recommended",
             },
         ],
@@ -406,7 +389,10 @@ export const AI_PROVIDERS: Record<AIProviderId, ProviderDefinition> = {
 export function getModelCapabilities(provider: AIProviderId, model: string): ModelCapabilities {
     const definition = AI_PROVIDERS[provider] as ProviderDefinition | undefined;
     if (!definition) return {};
-    const entry = definition.recommendedModels.find((m) => m.id === model);
+    // Server-side aliases resolve to their canonical catalog entry, so an
+    // alias still gets its model's reasoning/timeout treatment.
+    const canonical = definition.modelAliases?.[model] ?? model;
+    const entry = definition.recommendedModels.find((m) => m.id === canonical);
     return { ...definition.defaultCapabilities, ...entry?.capabilities };
 }
 
@@ -568,17 +554,79 @@ export function resolveAIConfig(
         }
     }
 
+    const model = override?.model ?? configFromFile.model ?? provider.defaultModel;
+
+    // A model id from a DIFFERENT provider's catalog produces an opaque
+    // "not a valid model ID" 400 from the active provider. Say it plainly at
+    // resolve time — once per process, since resolveAIConfig runs on hot paths
+    // (status, config listing, every command).
+    const mismatch = describeModelMismatch(provider.id, model);
+    const mismatchKey = `${provider.id}:${model}`;
+    if (mismatch && !modelMismatchWarned.has(mismatchKey)) {
+        modelMismatchWarned.add(mismatchKey);
+        console.warn(`⚠ ${mismatch}. Check ai.provider / ai.model in raiken.config.json.`);
+    }
+
     return {
         provider: provider.id,
         apiKey,
         apiKeySource,
         apiKeyEnvVar,
-        model: override?.model ?? configFromFile.model ?? provider.defaultModel,
+        model,
         baseURL: override?.baseURL ?? configFromFile.baseURL ?? provider.defaultBaseURL,
         maxTokens: override?.maxTokens ?? configFromFile.maxTokens ?? defaultConfig.ai.maxTokens,
         temperature:
             override?.temperature ?? configFromFile.temperature ?? defaultConfig.ai.temperature,
     };
+}
+
+const modelMismatchWarned = new Set<string>();
+
+/**
+ * When `model` belongs to another provider's catalog but not the active
+ * provider's, the active provider rejects it with a baffling "not a valid
+ * model ID" 400. Detect the mismatch in the user's terms: name the provider
+ * the model actually belongs to. Returns null when the config is coherent
+ * (or the model is unknown to every catalog, which we cannot judge).
+ */
+export function describeModelMismatch(provider: AIProviderId, model: string): string | null {
+    if (!model.trim()) return null;
+    for (const candidate of AI_PROVIDER_IDS) {
+        if (candidate === provider) continue;
+        const def = AI_PROVIDERS[candidate];
+        const known =
+            def.defaultModel === model ||
+            def.recommendedModels.some((m) => m.id === model) ||
+            Object.prototype.hasOwnProperty.call(def.modelAliases ?? {}, model);
+        if (known) {
+            return (
+                `model "${model}" is a ${def.label} model, but the active provider is ` +
+                `"${provider}" — ${def.label} models need provider "${candidate}"`
+            );
+        }
+    }
+    return null;
+}
+
+/**
+ * Model-id rejection errors arrive as an opaque message from whichever
+ * provider received the request ("X is not a valid model ID"), with no hint
+ * about the configured provider/baseURL that caused it. Append that context
+ * so a provider/model mismatch is diagnosable from the error alone. Errors
+ * that are not model-id rejections pass through untouched.
+ */
+export function enrichProviderModelError(error: unknown, ai: ResolvedAIConfig): Error {
+    if (!(error instanceof Error)) {
+        return error instanceof Error ? error : new Error(String(error));
+    }
+    if (!/not a valid model|model .*(?:not found|does not exist|doesn't exist|is invalid)/i.test(error.message)) {
+        return error;
+    }
+    return new Error(
+        `${error.message} (provider: ${ai.provider}, baseURL: ${ai.baseURL} — check ` +
+            `ai.provider / ai.model in raiken.config.json)`,
+        { cause: error },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1080,21 @@ export function isEmptyLengthResponse(response: unknown): boolean {
  * produced nothing usable. If the retry also exhausts, a distinct error is
  * thrown instead of a broken result being handed to the caller.
  */
+/**
+ * True for provider/network failures worth one immediate retry: request
+ * timeouts, aborted requests, and dropped connections. Deliberately excludes
+ * auth (401/403), credit (402), and validation (400) failures — retrying
+ * those just doubles the error. Not exported; used by
+ * {@link callWithTokenBudget}.
+ */
+function isTransientProviderError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    if ((error as NodeJS.ErrnoException).code === "ABORT_ERR") return true;
+    return /timeout|timed out|aborted|abort|econnreset|econnrefused|etimedout|epipe|socket hang up|fetch failed|terminated|other side closed/i.test(
+        `${error.name} ${error.message}`,
+    );
+}
+
 export async function callWithTokenBudget<T>(options: {
     ai: ResolvedAIConfig;
     temperature?: number;
@@ -1045,8 +1108,31 @@ export async function callWithTokenBudget<T>(options: {
     let maxTokens = resolveTokenBudget(options.ai);
     const timeoutMs = requestTimeoutMs(options.ai);
     const build = () => createLangChainModel({ ...options.ai, temperature, maxTokens });
+    // Model-id rejections ("X is not a valid model ID") name the provider in
+    // the enriched error so a provider/model mismatch is fixable from the CLI.
+    const invokeOrEnrich = async (llm: ReturnType<typeof build>, ms: number) => {
+        try {
+            return await options.invoke(llm, ms);
+        } catch (error) {
+            throw enrichProviderModelError(error, options.ai);
+        }
+    };
+    // Long drafts on reasoning models occasionally die on a transient
+    // timeout/abort ("This operation was aborted") with nothing produced —
+    // the same prompt succeeds on a plain retry. Retry exactly once; a second
+    // failure surfaces unchanged.
+    const invokeWithTransientRetry = async () => {
+        try {
+            return await invokeOrEnrich(build(), timeoutMs);
+        } catch (error) {
+            if (isTransientProviderError(error)) {
+                return await invokeOrEnrich(build(), timeoutMs);
+            }
+            throw error;
+        }
+    };
 
-    let result = await options.invoke(build(), timeoutMs);
+    let result = await invokeWithTransientRetry();
     // Escalate only on the empty-length signature: the model was cut off at its
     // output-token cap mid-reasoning, so give it more room rather than calling
     // it a failure. Doubles the budget each retry up to a hard cost ceiling.
@@ -1054,7 +1140,7 @@ export async function callWithTokenBudget<T>(options: {
     // one call — the escalation is free for them.
     while (isExhausted(result) && maxTokens < MAX_TOKEN_BUDGET) {
         maxTokens = Math.min(maxTokens * 2, MAX_TOKEN_BUDGET);
-        result = await options.invoke(build(), timeoutMs);
+        result = await invokeWithTransientRetry();
     }
     if (isExhausted(result)) {
         throw new Error(

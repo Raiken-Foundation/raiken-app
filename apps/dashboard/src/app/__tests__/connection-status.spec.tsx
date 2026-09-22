@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
     ConnectionDegraded,
@@ -14,10 +14,12 @@ describe("connection status UI", () => {
         expect(screen.getByText(/config: invalid/)).toBeTruthy();
     });
 
-    it("shows DEGRADED banner for non-blocking capability limits", () => {
+    it("shows a dismissible DEGRADED pill for non-blocking capability limits", () => {
         render(<ConnectionDegraded checks={{ ai: "degraded", config: "missing" }} />);
         expect(screen.getByText("DEGRADED")).toBeTruthy();
         expect(screen.getByText(/ai: degraded/)).toBeTruthy();
+        fireEvent.click(screen.getByLabelText("dismiss degraded notice"));
+        expect(screen.queryByText("DEGRADED")).toBeNull();
     });
 
     it("shows OFFLINE overlay when backend is unreachable", () => {

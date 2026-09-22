@@ -7,7 +7,7 @@ import {
     validationError,
 } from "@raiken/core";
 import { describe, expect, it, vi } from "vitest";
-import { withThrowExit } from "../../repl/exit";
+import { withThrowExit } from "../../cli/exit";
 import {
     CLI_EXIT,
     handleCliError,

@@ -19,7 +19,7 @@ import {
 import { loadIntegrationsConfig } from "@raiken/shared/server";
 import chalk from "chalk";
 import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 import { repairFailedRun } from "./repair";
 
 interface CoverCommandOptions {

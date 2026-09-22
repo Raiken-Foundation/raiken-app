@@ -18,7 +18,7 @@ import { resolveAuthStorageStatePath } from "@raiken/shared/server";
 import chalk from "chalk";
 import ora from "ora";
 import { exitUsage, mapErrorToCliExitCode, printCliError } from "../errors";
-import { CliExitError, cliExit } from "../repl/exit";
+import { CliExitError, cliExit } from "../cli/exit";
 
 export { getResumeContext, resolveAuthBlockersWithState };
 
@@ -247,13 +247,13 @@ export function buildForegroundUx(params: {
                 console.log(chalk.cyan("Next:"));
                 console.log(
                     chalk.dim("  1."),
-                    chalk.white('raiken cover "sign in and open …"'),
-                    chalk.dim("— draft a test from this knowledge"),
+                    chalk.white("raiken contract capture"),
+                    chalk.dim("— observe the app, mint facts with evidence"),
                 );
                 console.log(
                     chalk.dim("  2."),
-                    chalk.white("raiken test <file>"),
-                    chalk.dim("— run it"),
+                    chalk.white("raiken contract import --file <ac.md>"),
+                    chalk.dim("— add the requirements side"),
                 );
                 console.log(
                     chalk.dim("  3."),
@@ -399,7 +399,7 @@ async function startDiscovery(
                     maxDepth: options.maxDepth,
                     timeout: options.timeout,
                     skipAuth: options.skipAuth,
-                    storageStatePath,
+                            storageStatePath,
                 },
                 resolveStorageState: false,
                 storageStatePath,
@@ -467,7 +467,7 @@ async function continueDiscovery(projectPath: string, options: DiscoverOptions):
                     maxDepth: options.maxDepth,
                     timeout: options.timeout,
                     skipAuth: options.skipAuth,
-                    storageStatePath,
+                            storageStatePath,
                 },
                 resolveStorageState: false,
                 storageStatePath,

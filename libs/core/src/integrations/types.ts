@@ -20,8 +20,9 @@ export interface TicketInfo {
     status: string;
     /** URL to the ticket in the provider's UI */
     url: string;
-    /** Which provider this came from */
-    provider: "github" | "jira" | "linear";
+    /** Which provider this came from (built-ins: github | jira | linear;
+     *  registered adapters may use their own id) */
+    provider: string;
     /** For PRs: files changed in the diff */
     changedFiles?: ChangedFile[];
     /** For PRs/issues: linked issue IDs */
@@ -90,7 +91,9 @@ export interface TicketSuggestion {
 }
 
 export interface TicketProvider {
-    readonly name: "github" | "jira" | "linear";
+    /** Provider id — built-ins are "github" | "jira" | "linear"; adapters
+     *  registered via registerTicketProvider use their own id. */
+    readonly name: string;
 
     /**
      * Fetch a single ticket by ID.

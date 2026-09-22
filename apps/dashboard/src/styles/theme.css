@@ -1117,3 +1117,140 @@ kbd.q-kbd {
         grid-column: 1;
     }
 }
+
+/* =============================================================================
+   Cosmetic layer — depth, motion, radiance (2026-09 pass).
+   The flat aesthetic stays; what it gains is hierarchy you can feel:
+   layered surfaces, hairline top-highlights, 120ms micro-interactions,
+   and glow reserved strictly for state. All additive overrides.
+   ========================================================================== */
+
+:root {
+    --radius-card: 0px;
+    --radius-row: 0px;
+    --radius-pill: 0px;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.25);
+    --shadow-pop: 0 2px 6px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.35);
+    --hair-lit: rgba(255, 255, 255, 0.065);
+    --speed: 120ms;
+    --ease: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}
+
+/* ---------- Cards & panels gain depth ---------- */
+
+.q-card,
+.c-panel {
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+    transition: border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+.q-card,
+.c-panel {
+    border-top-color: var(--hair-lit);
+}
+
+
+
+/* ---------- Buttons & tabs feel physical ---------- */
+
+.q-btn {
+    border-radius: var(--radius-row);
+    transition: background var(--speed) var(--ease), border-color var(--speed) var(--ease),
+        transform var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+.q-btn:active:not(:disabled) {
+    transform: translateY(0.5px);
+}
+.q-btn--primary:not(:disabled) {
+    box-shadow: 0 0 0 1px var(--accent-dim), 0 0 14px -4px var(--accent-dim);
+}
+.q-btn--primary:hover:not(:disabled) {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 18px -4px var(--accent-dim);
+}
+
+.q-tab {
+    transition: color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.q-tabs {
+    gap: 2px;
+}
+.q-tab.is-active::before {
+    box-shadow: 0 0 10px -2px var(--accent-dim);
+}
+
+/* ---------- Rows lift on hover ---------- */
+
+.q-table tbody tr,
+.c-verdict-row,
+.c-fact-row,
+.c-review-row {
+    transition: background var(--speed) var(--ease);
+}
+.q-table tbody tr:hover {
+    background: var(--bg-hover);
+}
+
+/* ---------- Status color gets a breath of light ---------- */
+
+.q-dot--fail,
+.q-dot--warn {
+    box-shadow: 0 0 8px -1px currentColor;
+}
+.q-sev--fail {
+    box-shadow: 0 0 12px -6px var(--fail);
+}
+.q-sev--warn {
+    box-shadow: 0 0 12px -6px var(--warn);
+}
+
+/* ---------- Command strips & banners ---------- */
+
+.q-cmd,
+.q-banner {
+    border-radius: var(--radius-row);
+}
+.q-cmd .q-run {
+    transition: background var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+
+/* ---------- Inputs ---------- */
+
+.q-field-control,
+.q-textarea,
+.q-input,
+.q-select {
+    transition: border-color var(--speed) var(--ease), box-shadow var(--speed) var(--ease);
+}
+.q-field-control:focus-within {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 16px -6px var(--accent-dim);
+}
+
+/* ---------- Skeleton shimmer (for loading panels) ---------- */
+
+.q-skel,
+.c-skel {
+    background: linear-gradient(
+        100deg,
+        var(--bg-elev) 40%,
+        var(--bg-hover) 50%,
+        var(--bg-elev) 60%
+    );
+    background-size: 200% 100%;
+    animation: q-shimmer 1.4s var(--ease) infinite;
+    border-radius: var(--radius-row);
+}
+@keyframes q-shimmer {
+    to {
+        background-position: -200% 0;
+    }
+}

@@ -2,6 +2,39 @@
 // Must stay the first import: installs the console filter before any module
 // whose init code nags (baseline-browser-mapping fires at import time).
 import "./upstream-warnings";
+
+// Native-module ABI guard — before anything heavy initializes. The bundled
+// better-sqlite3 is compiled for one Node major; under a different major every
+// DB-backed command dies later with an opaque "A database operation failed".
+// Fail here with the fix instead. (Exit 3 = config error per the exit-code
+// contract; nothing about the project is wrong, the binary can't run.)
+if (typeof require === "function") {
+    try {
+        // Constructing (not merely requiring) loads the native addon —
+        // better-sqlite3 binds lazily at first Database, so a bare require
+        // passes even under an incompatible Node.
+        const Database = require("better-sqlite3");
+        new Database(":memory:").close();
+    } catch (abiError) {
+        const message = abiError instanceof Error ? abiError.message : String(abiError);
+        if (
+            /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|was compiled against a different/i.test(
+                message,
+            )
+        ) {
+            console.error(
+                `✗ This raiken build's native modules were compiled for a different Node.js\n` +
+                    `  version than the one running it (Node ${process.versions.node}).\n` +
+                    `  Switch to the Node version raiken was built with (e.g. \`nvm use 22\`)\n` +
+                    `  or reinstall raiken under the current Node.\n` +
+                    `  Underlying error: ${message.split("\n")[0]}`,
+            );
+            process.exit(CLI_EXIT.CONFIG_AUTH);
+        }
+        throw abiError;
+    }
+}
+
 import fs from "node:fs";
 import path from "node:path";
 import { getRaikenVersion } from "@raiken/shared";
@@ -10,7 +43,7 @@ import { Command, CommanderError, Help } from "commander";
 import dotenv from "dotenv";
 import { CLI_EXIT, exitUsage, handleCliError } from "./errors";
 import { renderMainHelp } from "./help-text";
-import { cliExit } from "./repl/exit";
+import { cliExit } from "./cli/exit";
 
 // Load .env from the current working directory (where the user runs raiken).
 // Cheap (a local file read) so it stays eager, unlike the heavy imports below.
@@ -36,16 +69,16 @@ if (result.error) {
  * (help, resume, cwd) instead of a wall of shortcuts.
  */
 async function printBanner(version: string): Promise<void> {
-    const { renderBox, boxWidth } = await import("./repl/box");
+    const { renderBox, boxWidth } = await import("./cli/box");
     const p = chalk.hex("#a78bfa");
     const dim = chalk.gray;
     const width = boxWidth();
 
     const lines = [
         `${p("✻")} ${chalk.bold("Welcome to Raiken")} ${dim(`v${version}`)}`,
-        dim("AI QA agent for developers"),
+        dim("The behavior contract: what the app does vs what the tickets asked"),
         "",
-        `${dim("/help")} for commands  ${dim("·")}  ${dim("raiken resume")} to pick up a saved thread`,
+        `${dim('raiken -p "<request>"')} one-shot agent  ${dim("·")}  ${dim("raiken --help")} for commands`,
         dim(`cwd: ${shortenPath(process.cwd(), width - 9)}`),
     ];
 
@@ -79,7 +112,7 @@ async function checkApiKey(): Promise<void> {
     console.warn(chalk.yellow(`⚠ No ${provider.label} API key found. AI features will not work.`));
     console.warn(
         chalk.dim(
-            `   Set ${envHint} in .env, run \`raiken config\`, or configure in Settings → AI Provider.`,
+            `   Set ${envHint} in .env, run \`raiken config\`, or put it in this project’s .env file.`,
         ),
     );
     if (provider.apiKeyUrl) {
@@ -91,7 +124,9 @@ const program = new Command();
 program
     .name("raiken")
     .usage("[command] [options]")
-    .description("AI QA agent for Playwright — draft, run, and repair browser tests.")
+    .description(
+        "The two-sided behavior contract: what your app actually does vs what the tickets asked for. Playwright specs materialize on demand.",
+    )
     .version(getRaikenVersion(), "-v, --version");
 
 // Throw instead of process.exit on argv-shape errors (unknown option, missing
@@ -143,40 +178,77 @@ program
         }
     });
 
-// Default action: bare `raiken` launches the interactive testing agent (live
-// browser). One-shot (`raiken -p`) is intercepted before commander parses.
+// Default action: bare `raiken`. The interactive chat REPL was removed — the
+// agent surfaces are `raiken -p "<request>"` (one-shot), the individual
+// commands (cover/repair/discover/…), and `raiken start` (dashboard). Print
+// the banner and point at those instead of launching a chat loop.
 program.action(async () => {
     await printBanner(getRaikenVersion());
-    await checkApiKey();
-    try {
-        const { chatCommand } = await import("./commands/chat");
-        await chatCommand();
-    } catch (error) {
-        handleCliError(error, {
-            label: "Failed to start Raiken",
-        });
-    }
+    console.log(
+        chalk.dim(
+            'Where to start:\n' +
+                '  raiken -p "<request>"    one-shot agent (drives a live browser)\n' +
+                "  raiken contract          the behavior contract (capture · import · verify)\n" +
+                "  raiken cover|test|repair …   direct commands — see `raiken --help`\n" +
+                "  raiken start             dashboard at http://localhost:7101\n",
+        ),
+    );
+    process.exitCode = CLI_EXIT.USAGE;
 });
 
 program
-    .command("resume [name]")
-    .description("Resume a saved interactive session (latest if name omitted)")
-    .action(async (name: string | undefined) => {
-        await printBanner(getRaikenVersion());
-        await checkApiKey();
+    .command("contract [subcommand] [args...]")
+    .description(
+        "The two-sided behavior contract: observed facts vs ticket/AC requirements " +
+            "(show | coverage | capture | mint | import | export | diff | verify | review | history | search | explore | materialize | routes | snapshot | record | watch)",
+    )
+    .option("--json", "Emit machine-readable output", false)
+    .option("--file <path>", "import: requirements markdown/text file")
+    .option("--text <requirements>", "import: inline requirements text")
+    .option("--ticket <id>", "import: ticket id (uses the configured provider)")
+    .option("--all", "verify: re-observe the full contract, not just changed-scoped facts", false)
+    .option("--base <ref>", "verify: git base for change scoping", "HEAD")
+    .option("--out <dir>", "materialize: output directory", ".raiken/materialized")
+    .option("--base-url <url>", "verify/materialize: override the app base URL")
+    .option("--accept <id>", "review: accept a behavior change (retires the old fact)")
+    .option("--reject <id>", "review: reject a behavior change (keeps the regression)")
+    .option("--undo <id>", "review: undo an accept \u2014 restores the retired fact")
+    .option("--every <seconds>", "watch: seconds between verification cycles (min 30)")
+    .option("--webhook <url>", "watch: POST alerts here on new verified→violated regressions")
+    .option("--format <fmt>", "verify: output format — use 'github' for PR annotations")
+    .action(
+        async (
+            subcommand: string | undefined,
+            args: string[] | undefined,
+            options: Record<string, unknown>,
+        ) => {
+            try {
+                const { contractCommand } = await import("./commands/contract");
+                await contractCommand(subcommand, {
+                    ...(options as Record<string, unknown>),
+                    args: args ?? [],
+                });
+            } catch (error) {
+                handleCliError(error, { label: "raiken contract failed" });
+            }
+        },
+    );
+
+program
+    .command("mcp")
+    .description("Model Context Protocol stdio server exposing the behavior contract as tools")
+    .action(async () => {
         try {
-            const { chatCommand } = await import("./commands/chat");
-            await chatCommand({ resume: name?.trim() ? name.trim() : true });
+            const { mcpCommand } = await import("./commands/mcp");
+            await mcpCommand();
         } catch (error) {
-            handleCliError(error, {
-                label: "Failed to resume session",
-            });
+            handleCliError(error, { label: "raiken mcp failed" });
         }
     });
 
 program
     .command("sessions")
-    .description("List saved interactive sessions (resumable with `raiken resume <name>`)")
+    .description("List saved agent sessions (one-shot runs; see `raiken -p`)")
     .option("--json", "Emit the session list as JSON", false)
     .action(async (options) => {
         try {
@@ -372,27 +444,6 @@ program
     });
 
 program
-    .command("organize")
-    .description(
-        "Propose (and, on confirmation, apply) an AI-assisted reorganization of the test " +
-            "directory into feature/suite folders, plus a raiken.config.json cleanup",
-    )
-    .option("-y, --yes", "Apply without prompting for confirmation", false)
-    .option("--tests-only", "Only propose test-file reorganization, skip config cleanup", false)
-    .option("--config-only", "Only propose raiken.config.json cleanup, skip test files", false)
-    .option("--json", "Emit the plan (and, if applied, the result) as JSON", false)
-    .action(async (options) => {
-        try {
-            const { organizeCommand } = await import("./commands/organize");
-            await organizeCommand(options);
-        } catch (error) {
-            handleCliError(error, {
-                label: "raiken organize failed",
-            });
-        }
-    });
-
-program
     .command("eval")
     .description(
         "Run agent eval scenarios: 'playground' (fixture ground-truth suite, from the raiken " +
@@ -493,56 +544,6 @@ program
         }
     });
 
-const hooks = program
-    .command("hooks")
-    .description("Install / uninstall git hooks that run raiken locally");
-
-hooks
-    .command("install")
-    .description("Install a git hook that runs raiken on commit/push")
-    .option("--type <type>", "Hook type: pre-commit | pre-push", "pre-commit")
-    .option("--skip-run", "Don't actually run tests in the hook (impact only)")
-    .option("--husky", "Force install under .husky/ even if no husky setup exists")
-    .action(async (options) => {
-        try {
-            const { hooksInstallCommand } = await import("./commands/hooks");
-            await hooksInstallCommand(options);
-        } catch (error) {
-            handleCliError(error, {
-                label: "raiken hooks install failed",
-            });
-        }
-    });
-
-hooks
-    .command("uninstall")
-    .description("Remove the raiken-managed block from a git hook")
-    .option("--type <type>", "Hook type: pre-commit | pre-push", "pre-commit")
-    .action(async (options) => {
-        try {
-            const { hooksUninstallCommand } = await import("./commands/hooks");
-            await hooksUninstallCommand(options);
-        } catch (error) {
-            handleCliError(error, {
-                label: "raiken hooks uninstall failed",
-            });
-        }
-    });
-
-hooks
-    .command("status")
-    .description("Show which git hooks are installed and which are raiken-managed")
-    .action(async () => {
-        try {
-            const { hooksStatusCommand } = await import("./commands/hooks");
-            await hooksStatusCommand();
-        } catch (error) {
-            handleCliError(error, {
-                label: "raiken hooks status failed",
-            });
-        }
-    });
-
 program
     .command("status")
     .description(
@@ -562,9 +563,8 @@ program
 
 program
     .command("index")
-    .description("Build the code graph (and, with --embeddings, the semantic search index)")
-    .option("--embeddings", "Also generate the vector index that powers `raiken search`", false)
-    .option("--force", "Regenerate embeddings even if they already exist", false)
+    .description("Build the code graph and keyword search index")
+    .option("--force", "Rebuild even if unchanged files would be skipped", false)
     .action(async (options) => {
         try {
             const { indexCommand } = await import("./commands/indexer");
@@ -578,7 +578,7 @@ program
 
 program
     .command("search <query>")
-    .description("Semantic (embeddings) code search — find code by meaning")
+    .description("Keyword code search over the code-graph index")
     .option("--limit <number>", "Maximum results", "10")
     .option("--type <type>", "Restrict to a chunk type: function | class | file | type")
     .option("--json", "Emit results as JSON", false)

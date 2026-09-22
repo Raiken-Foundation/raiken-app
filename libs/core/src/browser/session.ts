@@ -585,8 +585,8 @@ export class BrowserSession {
         // stale references so isActive() is honest — a closed page still
         // answers page.url(), which used to make the session look healthy
         // while every action failed "Target closed" (review finding).
-        this.context = undefined;
-        this.page = undefined;
+        this.context = null;
+        this.page = null;
         try {
             this.context = await this.browser.newContext({
                 viewport: {

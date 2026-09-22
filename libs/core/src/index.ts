@@ -19,6 +19,7 @@ export * from "./config/index";
 // Project context (raiken.ctx.md generator)
 export * from "./context/index";
 // Cover (headless test drafter)
+export * from "./contract/index";
 export * from "./cover/index";
 // Database module
 export * from "./database/index";
@@ -41,7 +42,6 @@ export {
     runOrchestrator,
 } from "./orchestrator/index";
 // Organize (AI-assisted test/config reorganization)
-export * from "./organize/index";
 // Run traces (JSONL agent-run trajectories under .raiken/traces/)
 export * from "./run-traces/index";
 // Site Discovery module

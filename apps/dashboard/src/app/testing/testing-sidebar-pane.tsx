@@ -1,54 +1,34 @@
 import type { KeyboardEvent } from "react";
-import { Sidebar } from "../../components/sidebar";
-import type { DashboardRoute } from "../../utils/slash-commands";
+import { FilesSidebar } from "../../components/files-sidebar";
+import "../../components/files-sidebar.css";
 
 interface TestingSidebarPaneProps {
     sidebarWidth: number;
     isResizing: boolean;
     onMouseDown: () => void;
     onResizeKeyDown: (e: KeyboardEvent<HTMLDivElement>) => void;
-    onSendMessage: (content: string) => void;
     onFileSelect: (filePath: string) => void;
     activeFilePath: string;
-    sidebarTab: "chat" | "files";
     sidebarCollapsed: boolean;
-    onSidebarTabChange?: (tab: "chat" | "files") => void;
-    onNavigateRoute?: (route: DashboardRoute) => void;
-    onHitlPendingChange?: (pending: boolean) => void;
-    initialPrompt?: string;
-    onInitialPromptConsumed?: () => void;
 }
 
-/** Sidebar + resize handle — always rendered so chat/HITL state survives view toggles. */
+/** Sidebar + resize handle. The sidebar is the spec tree; agent actions live
+ *  in the editor and results panes as scoped buttons, not a composer. */
 export function TestingSidebarPane({
     sidebarWidth,
     isResizing,
     onMouseDown,
     onResizeKeyDown,
-    onSendMessage,
     onFileSelect,
     activeFilePath,
-    sidebarTab,
     sidebarCollapsed,
-    onSidebarTabChange,
-    onNavigateRoute,
-    onHitlPendingChange,
-    initialPrompt,
-    onInitialPromptConsumed,
 }: TestingSidebarPaneProps) {
     return (
         <div className="sidebar-container" style={{ width: `${sidebarWidth}px` }}>
-            <Sidebar
-                onSendMessage={onSendMessage}
-                onFileSelect={onFileSelect}
-                activeFilePath={activeFilePath}
-                activeTab={sidebarTab}
+            <FilesSidebar
                 collapsed={sidebarCollapsed}
-                onTabChange={onSidebarTabChange}
-                onNavigateRoute={onNavigateRoute}
-                onHitlPendingChange={onHitlPendingChange}
-                initialPrompt={initialPrompt}
-                onInitialPromptConsumed={onInitialPromptConsumed}
+                activeFilePath={activeFilePath}
+                onFileSelect={onFileSelect}
             />
             {/* biome-ignore lint/a11y/useSemanticElements: WAI-ARIA window splitter pattern */}
             <div

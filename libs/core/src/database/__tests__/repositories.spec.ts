@@ -13,7 +13,7 @@ import type { CodeNode, GraphEdge, ParsedSymbol } from "../../types";
 import { closeDatabase, openDatabase } from "../connection";
 import { AdminRepository } from "../repositories/admin.repository";
 import { CodeGraphRepository } from "../repositories/code-graph.repository";
-import { EmbeddingsRepository } from "../repositories/embeddings.repository";
+import { KeywordIndexRepository } from "../repositories/keyword-index.repository";
 import { MemoryRepository } from "../repositories/memory.repository";
 import { SymbolsRepository } from "../repositories/symbols.repository";
 import { TestOutcomesRepository } from "../repositories/test-outcomes.repository";
@@ -86,31 +86,19 @@ describe("database repositories", () => {
         expect(loaded?.nodes.get(filePath)?.relativePath).toBe("src/a.ts");
     });
 
-    it("EmbeddingsRepository stores vectors and keyword index", () => {
+    it("KeywordIndexRepository persists the keyword index", () => {
         const opened = openDatabase(testDir, dbPath);
         const symbols = new SymbolsRepository(opened.adapter);
-        const embeddingsRepo = new EmbeddingsRepository(opened.adapter);
+        const keywordIndexRepo = new KeywordIndexRepository(opened.adapter);
         const graph = new CodeGraphRepository(opened.adapter, symbols);
 
         const filePath = path.join(testDir, "src/embed.ts");
         graph.upsertFile(makeNode({ filePath, relativePath: "src/embed.ts" }));
-        const fileId = embeddingsRepo.getFileId(filePath);
+        const fileId = keywordIndexRepo.getFileId(filePath);
         expect(fileId).not.toBeNull();
 
-        const vector = Array.from({ length: 384 }, (_, i) => (i % 10) / 10);
-        if (fileId === null) throw new Error("expected file id");
-        embeddingsRepo.saveEmbeddings(fileId, [
-            { type: "function", name: "foo", text: "function foo() {}", embedding: vector },
-        ]);
-        expect(embeddingsRepo.hasEmbeddings(fileId)).toBe(true);
-        expect(embeddingsRepo.getEmbeddingsCount()).toBe(1);
-
-        const hits = embeddingsRepo.searchSimilar(vector, 5);
-        expect(hits.length).toBeGreaterThan(0);
-        expect(hits[0]?.chunkName).toBe("foo");
-
-        embeddingsRepo.saveKeywordIndex(new Map([["login", [filePath]]]));
-        const index = embeddingsRepo.loadKeywordIndex();
+        keywordIndexRepo.saveKeywordIndex(new Map([["login", [filePath]]]));
+        const index = keywordIndexRepo.loadKeywordIndex();
         expect(index?.get("login")).toEqual([filePath]);
     });
 

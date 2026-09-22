@@ -17,7 +17,7 @@ import type { SymbolsRepository } from "./symbols.repository";
  *
  * `INSERT OR REPLACE` would delete the conflicting row and insert a new one
  * with a fresh autoincrement id, which cascades away that file's embeddings
- * and strands its `vec_embeddings` rows (a virtual table gets no FK cascade).
+ * (the legacy embeddings rows cascade via FK with files).
  */
 const UPSERT_FILE_SQL = `
     INSERT INTO files (
@@ -53,27 +53,6 @@ export class CodeGraphRepository {
      * Drop a file's embeddings from both the main table and the vector table.
      * Must run inside a transaction owned by the caller.
      */
-    private purgeEmbeddingsInTransaction(filePath: string): void {
-        const embeddingIds = (
-            this.adapter.db
-                .prepare(`
-        SELECT e.id FROM embeddings e
-        JOIN files f ON e.file_id = f.id
-        WHERE f.project_path = ? AND f.file_path = ?
-      `)
-                .all(this.adapter.projectPath, filePath) as Array<{ id: number }>
-        ).map((row) => row.id);
-
-        if (embeddingIds.length === 0) return;
-
-        const deleteVec = this.adapter.db.prepare(`DELETE FROM vec_embeddings WHERE rowid = ?`);
-        const deleteEmbedding = this.adapter.db.prepare(`DELETE FROM embeddings WHERE id = ?`);
-        for (const id of embeddingIds) {
-            deleteVec.run(id);
-            deleteEmbedding.run(id);
-        }
-    }
-
     saveGraph(
         nodes: Map<string, CodeNode>,
         entryPoints: Array<{ file: string; framework?: string; role: string; type: string }>,
@@ -286,7 +265,6 @@ export class CodeGraphRepository {
                 // tables) only when the file actually changed, so an unchanged
                 // re-index keeps its vectors instead of silently losing them.
                 if (this.hasFileChanged(node.filePath, node.hash)) {
-                    this.purgeEmbeddingsInTransaction(node.filePath);
                 }
 
                 this.adapter.db
@@ -357,26 +335,6 @@ export class CodeGraphRepository {
     removeFile(filePath: string): void {
         this.adapter.runWithRetry(() => {
             const transaction = this.adapter.db.transaction(() => {
-                // Clean vec_embeddings before deleting the file (no FK cascade on virtual table)
-                const embeddingIds = (
-                    this.adapter.db
-                        .prepare(`
-        SELECT e.id FROM embeddings e
-        JOIN files f ON e.file_id = f.id
-        WHERE f.project_path = ? AND f.file_path = ?
-      `)
-                        .all(this.adapter.projectPath, filePath) as Array<{ id: number }>
-                ).map((r) => r.id);
-
-                if (embeddingIds.length > 0) {
-                    const deleteVec = this.adapter.db.prepare(
-                        `DELETE FROM vec_embeddings WHERE rowid = ?`,
-                    );
-                    for (const id of embeddingIds) {
-                        deleteVec.run(id);
-                    }
-                }
-
                 this.adapter.db
                     .prepare(`DELETE FROM files WHERE project_path = ? AND file_path = ?`)
                     .run(this.adapter.projectPath, filePath);
@@ -663,26 +621,6 @@ export class CodeGraphRepository {
     clearProject(): void {
         this.adapter.runWithRetry(() => {
             const transaction = this.adapter.db.transaction(() => {
-                // Clean vec_embeddings before deleting files (no FK cascade on virtual table)
-                const embeddingIds = (
-                    this.adapter.db
-                        .prepare(`
-        SELECT e.id FROM embeddings e
-        JOIN files f ON e.file_id = f.id
-        WHERE f.project_path = ?
-      `)
-                        .all(this.adapter.projectPath) as Array<{ id: number }>
-                ).map((r) => r.id);
-
-                if (embeddingIds.length > 0) {
-                    const deleteVec = this.adapter.db.prepare(
-                        `DELETE FROM vec_embeddings WHERE rowid = ?`,
-                    );
-                    for (const id of embeddingIds) {
-                        deleteVec.run(id);
-                    }
-                }
-
                 this.adapter.db
                     .prepare("DELETE FROM files WHERE project_path = ?")
                     .run(this.adapter.projectPath);

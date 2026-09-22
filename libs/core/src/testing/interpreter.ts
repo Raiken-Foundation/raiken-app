@@ -28,7 +28,13 @@
  */
 
 import { generateText, streamText } from "ai";
-import { buildAISdkModel, modelSupportsVision } from "../agent/ai-providers";
+import {
+    buildAISdkModel,
+    MAX_TOKEN_BUDGET,
+    modelSupportsVision,
+    resolveTokenBudget,
+    type ResolvedAIConfig,
+} from "../agent/ai-providers";
 import { EVIDENCE_POLICY } from "../agent/prompt-messages";
 import { describeTemplateSelectors } from "../analysis/markup-selectors";
 import type { DOMContext } from "../browser/dom-capture";
@@ -127,7 +133,9 @@ export interface InterpretationConfig {
 // for cheaper models if cost/latency becomes an issue.
 // ---------------------------------------------------------------------------
 
-const TEST_CODE_BUDGET_CHARS = 6000;
+// Multi-step specs exceed 6k easily; a head-only cut made the model's
+// SEARCH/REPLACE snippets uncopyable (the tail it must edit was gone).
+const TEST_CODE_BUDGET_CHARS = 16_000;
 const SOURCE_CODE_BUDGET_CHARS = 2500;
 const RAW_OUTPUT_BUDGET_CHARS = 6000;
 const ERROR_MESSAGE_BUDGET_CHARS = 4000;
@@ -165,6 +173,108 @@ function truncateTail(input: string, budget: number): string {
 function truncateHead(input: string, budget: number): string {
     if (input.length <= budget) return input;
     return `${input.slice(0, budget)}\n…[truncated ${input.length - budget} trailing chars]…`;
+}
+
+/**
+ * Head+tail truncation for long specs: keep the opening (imports/setup) AND
+ * the closing steps (where failures live), cutting only the middle. A
+ * head-only cut makes SEARCH blocks for late steps uncopyable — the exact
+ * failure mode behind empty/unusable repair fixes on multi-step specs.
+ */
+function truncateHeadTail(input: string, budget: number): string {
+    if (input.length <= budget) return input;
+    const head = Math.ceil(budget * 0.6);
+    const tail = budget - head;
+    return (
+        input.slice(0, head) +
+        `\n…[truncated ${input.length - budget} middle chars]…\n` +
+        input.slice(-tail)
+    );
+}
+
+/**
+ * Chunk a spec for repair: imports, top-level setup, and ONLY the test
+ * blocks containing the failing lines — everything else collapses to an
+ * omission marker. The slice is verbatim (real lines, real text), so
+ * SEARCH/REPLACE snippets copied from it apply cleanly to the full file.
+ *
+ * This is the small-context-model fix: a 10-test file with one failure
+ * sends ~15 lines instead of the whole spec, and smaller-context models
+ * stop choking (observed: empty fixes on 16k-char spec prompts).
+ * Exported for unit tests.
+ */
+export function chunkTestCodeForRepair(testCode: string, failureLines: number[]): string {
+    const lines = testCode.split("\n");
+    const keep = new Set<number>();
+
+    for (let i = 0; i < lines.length; i++) {
+        if (/^\s*import\s+/.test(lines[i])) keep.add(i);
+    }
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (/^(test\.use|test\.beforeEach|test\.beforeAll|test\.afterEach)\s*\(/.test(trimmed)) {
+            keep.add(i);
+        }
+    }
+
+    let blocksFound = 0;
+    for (const line of failureLines) {
+        const start = findTestStart(lines, line - 1);
+        if (start < 0) continue;
+        blocksFound++;
+        const describe = findDescribeStart(lines, start);
+        if (describe >= 0) keep.add(describe);
+        const end = findTestEnd(lines, start);
+        for (let i = start; i <= end; i++) keep.add(i);
+    }
+    // No failing block identified (line numbers stale, no test() syntax) —
+    // the import-only slice would be useless; send the file as-is.
+    if (blocksFound === 0) {
+        return testCode.length <= TEST_CODE_BUDGET_CHARS ? testCode : truncateHeadTail(testCode, TEST_CODE_BUDGET_CHARS);
+    }
+
+    const out: string[] = [];
+    let lastKept = -2;
+    for (let i = 0; i < lines.length; i++) {
+        if (!keep.has(i)) continue;
+        if (i > lastKept + 1) {
+            out.push(`// …[${i - lastKept - 1} line(s) omitted — other tests]…`);
+        }
+        out.push(lines[i]);
+        lastKept = i;
+    }
+    if (lastKept < lines.length - 1) {
+        out.push(`// …[${lines.length - 1 - lastKept} line(s) omitted — other tests]…`);
+    }
+    const joined = out.join("\n");
+    return joined.length <= TEST_CODE_BUDGET_CHARS ? joined : truncateHeadTail(joined, TEST_CODE_BUDGET_CHARS);
+}
+
+function findTestStart(lines: string[], from: number): number {
+    for (let i = Math.min(from, lines.length - 1); i >= 0; i--) {
+        if (/^\s*(test|it)\s*\(/.test(lines[i])) return i;
+    }
+    return -1;
+}
+
+function findDescribeStart(lines: string[], testStart: number): number {
+    for (let i = testStart - 1; i >= 0; i--) {
+        if (/^\s*test\.describe\s*\(/.test(lines[i])) return i;
+    }
+    return -1;
+}
+
+function findTestEnd(lines: string[], start: number): number {
+    let depth = 0;
+    let opened = false;
+    for (let i = start; i < lines.length; i++) {
+        const open = (lines[i].match(/\{/g) ?? []).length;
+        const close = (lines[i].match(/\}/g) ?? []).length;
+        depth += open - close;
+        if (open > 0) opened = true;
+        if (opened && depth <= 0) return i;
+    }
+    return lines.length - 1;
 }
 
 /**
@@ -242,7 +352,7 @@ export function buildInterpretationPrompt(context: InterpretationContext): strin
     // Test code, pinned to a path so the model can flag mismatch.
     lines.push(`# Test code${testFilePath ? ` (\`${testFilePath}\`)` : ""}`);
     lines.push("```typescript");
-    lines.push(truncateHead(testCode, TEST_CODE_BUDGET_CHARS));
+    lines.push(truncateHeadTail(testCode, TEST_CODE_BUDGET_CHARS));
     lines.push("```");
     lines.push("");
 
@@ -590,7 +700,21 @@ export function buildRepairPrompt(
 
     lines.push(`# Failing test file${testFilePath ? ` (\`${testFilePath}\`)` : ""}`);
     lines.push("```typescript");
-    lines.push(truncateHead(testCode, TEST_CODE_BUDGET_CHARS));
+    // Edits mode chunks the spec down to the failing test block(s) so
+    // smaller-context models work on ~15 lines instead of a 16k dump.
+    // Full-rewrite mode keeps the whole file: the model must regenerate it.
+    if (mode === "edits" && failedTests.length > 0) {
+        const failureLines = failedTests
+            .map((t) => t.error?.location?.line)
+            .filter((l): l is number => typeof l === "number" && l > 0);
+        if (failureLines.length > 0) {
+            lines.push(chunkTestCodeForRepair(testCode, failureLines));
+        } else {
+            lines.push(truncateHeadTail(testCode, TEST_CODE_BUDGET_CHARS));
+        }
+    } else {
+        lines.push(truncateHeadTail(testCode, TEST_CODE_BUDGET_CHARS));
+    }
     lines.push("```");
     lines.push("");
 
@@ -792,6 +916,64 @@ export function buildRepairPrompt(
  * provider handling of {@link streamInterpretation} so the fix uses whatever
  * AI provider the user configured (OpenAI, Anthropic, OpenRouter, Ollama…).
  */
+type RepairBudgetAi = Pick<
+    ResolvedAIConfig,
+    "provider" | "model" | "baseURL" | "apiKey" | "apiKeySource" | "maxTokens" | "temperature"
+>;
+
+/**
+ * One repair LLM call with escalation: on an empty response retry once; when
+ * the empty came with a length/max-tokens finish reason (reasoning models
+ * spending the whole budget thinking), retry at 2× up to the cost ceiling.
+ * The pre-fix code hard-coded 8192 and treated one empty answer as failure —
+ * "The model's fix empty response" on every multi-step spec.
+ */
+async function generateRepairText(
+    model: ReturnType<typeof buildAISdkModel>,
+    signal: AbortSignal | undefined,
+    opts: {
+        system: string;
+        prompt: string;
+        temperature: number;
+        budgetAi: RepairBudgetAi;
+        messages?: Parameters<typeof generateText>[0] extends { messages?: infer M } ? M : never;
+    },
+): Promise<{ text: string; finishReason?: string }> {
+    // Three calls max: floor budget → 2× → the 32k ceiling. Each reasoning
+    // call can take ~2× the standard timeout, so the repair deadline (see
+    // repairLlmDeadlineMs) must leave headroom for the whole ladder.
+    let maxOutputTokens = resolveTokenBudget(opts.budgetAi);
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const args: Record<string, unknown> = {
+            model,
+            system: opts.system,
+            temperature: opts.temperature,
+            maxOutputTokens,
+            ...(signal ? { abortSignal: signal } : {}),
+        };
+        if (opts.messages) {
+            (args as Record<string, unknown>)["messages"] = opts.messages;
+        } else {
+            args["prompt"] = opts.prompt;
+        }
+        const result = (await generateText(
+            args as Parameters<typeof generateText>[0],
+        )) as { text: string; finishReason?: string };
+        if ((result.text ?? "").trim().length > 0) return result;
+        const finish = result.finishReason ?? "";
+        if (/length|max_tokens|MAX_TOKENS/i.test(finish)) {
+            if (maxOutputTokens >= MAX_TOKEN_BUDGET) return result;
+            maxOutputTokens = Math.min(maxOutputTokens * 2, MAX_TOKEN_BUDGET);
+            continue;
+        }
+        if (attempt === 0) continue; // plain empty — one retry, then surface it
+        return result;
+    }
+    throw new Error(
+        `Repair generation exhausted ${maxOutputTokens} output tokens with no usable fix.`,
+    );
+}
+
 export async function getTestRepair(
     context: RepairContext,
     config: InterpretationConfig,
@@ -806,6 +988,19 @@ export async function getTestRepair(
         baseURL: config.baseURL,
         model: config.model || "anthropic/claude-sonnet-4.5",
     });
+    // Config-aware token budget for the repair calls: reasoning models get
+    // their raised floor, and the escalation loop below doubles on the
+    // empty-length signature (the old hard-coded 8192 made reasoning models
+    // burn the whole budget on chain-of-thought and return "empty response").
+    const budgetAi = {
+        provider: config.provider ?? "openrouter",
+        model: config.model || "anthropic/claude-sonnet-4.5",
+        baseURL: config.baseURL ?? "",
+        apiKey: config.apiKey,
+        apiKeySource: "env" as const,
+        maxTokens: 8192,
+        temperature: 0.4,
+    };
 
     // When failure screenshots are available AND the model is vision-capable,
     // send them as image parts so the fix is grounded in what the page actually
@@ -823,14 +1018,14 @@ export async function getTestRepair(
         );
     const generate = async (mode: "edits" | "full") => {
         const prompt = buildRepairPrompt(context, mode);
+        const system = `Repair test mechanics while preserving asserted requirements. ${EVIDENCE_POLICY}`;
         if (hasImages) {
             try {
-                return await generateText({
-                    model,
-                    system: `Repair test mechanics while preserving asserted requirements. ${EVIDENCE_POLICY}`,
-                    temperature: 0.2,
-                    maxOutputTokens: 8192,
-                    abortSignal: context.signal,
+                return await generateRepairText(model, context.signal, {
+                    system,
+                    prompt,
+                    temperature: 0.4,
+                    budgetAi,
                     messages: [
                         {
                             role: "user",
@@ -856,13 +1051,11 @@ export async function getTestRepair(
                 );
             }
         }
-        return await generateText({
-            model,
-            system: `Repair test mechanics while preserving asserted requirements. ${EVIDENCE_POLICY}`,
+        return await generateRepairText(model, context.signal, {
+            system,
             prompt,
-            temperature: 0.2,
-            maxOutputTokens: 8192,
-            abortSignal: context.signal,
+            temperature: 0.4,
+            budgetAi,
         });
     };
 

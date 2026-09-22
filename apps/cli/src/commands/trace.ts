@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { queryTrace, type TraceResult } from "@raiken/core";
 import chalk from "chalk";
 import { CLI_EXIT } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 interface TraceCommandOptions {
     file?: string;

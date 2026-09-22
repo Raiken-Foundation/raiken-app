@@ -1,5 +1,6 @@
 import { chatHitlRouter } from "./chat-hitl";
 import { configRouter } from "./config";
+import { contractRouter } from "./contract";
 import { discoveryRouter } from "./discovery";
 import { indexingRouter } from "./indexing";
 import { qualitySupportRouter } from "./quality-support";
@@ -9,6 +10,7 @@ import { t } from "./trpc";
 /** Composed tRPC router — procedure names and shapes are the public contract. */
 export const appRouter = t.router({
     ...configRouter,
+    ...contractRouter,
     ...chatHitlRouter,
     ...indexingRouter,
     ...testingRouter,

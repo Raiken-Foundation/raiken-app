@@ -18,6 +18,7 @@ import type {
     LinkStatus,
     SessionStatus,
 } from "./types";
+import { hasHashRoute } from "./link-utils";
 import { normalizeUrl } from "./url-utils";
 
 /**
@@ -996,7 +997,15 @@ export class SiteKnowledgeDB {
     // ==========================================================================
 
     private normalizeUrl(url: string): string {
-        return normalizeUrl(url, { preserveQueryParams: this.preserveQueryParams });
+        return normalizeUrl(url, {
+            preserveQueryParams: this.preserveQueryParams,
+            // Hash-route URLs (`/#/stats`) are distinct crawlable pages and must
+            // stay distinct here too — stripping their fragment would collapse
+            // them onto the root row and overwrite its snapshot. Only
+            // route-shaped fragments qualify; plain `#anchor` URLs never reach
+            // savePage anyway (the crawler skips them).
+            preserveHashRoutes: hasHashRoute(url),
+        });
     }
 
     /**

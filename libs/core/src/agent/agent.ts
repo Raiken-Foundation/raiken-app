@@ -7,7 +7,6 @@ import { ProjectContext } from "../analysis/project-context";
 import { loadAutonomyConfig, loadTestDirectory } from "../config";
 import type { AIProviderId } from "../config/schema";
 import { CodeGraphDB } from "../database/db";
-import { EmbeddingsGenerator } from "../database/embeddings";
 import {
     authError,
     cancelledError,
@@ -231,20 +230,22 @@ export async function gatherContext(
         }
     }
 
-    // Use semantic search to find relevant files
+    // Keyword search over the code-graph index finds relevant files without
+    // the embeddings model (removed with the sqlite-vec/xenova dependency
+    // cut). Ranked by the keyword index; same downstream file shape.
     try {
-        // Generate embedding for the prompt
-        const embGen = EmbeddingsGenerator.getInstance();
-        await embGen.initialize();
-        const queryEmbedding = await embGen.generateEmbedding(prompt);
+        const { ProjectContext } = await import("../analysis/project-context");
+        const projectContext = ProjectContext.getInstance(projectPath);
+        if (!projectContext.isInitialized()) {
+            await projectContext.initialize();
+        }
+        const ranked = projectContext.findRelevantFiles(prompt, 10);
 
-        const results = db.searchSimilar(queryEmbedding, 10);
-
-        for (const result of results) {
+        for (const filePath of ranked) {
             // Skip if we already have this file
-            if (files.some((f) => f.path === result.filePath)) continue;
+            if (files.some((f) => f.path === filePath)) continue;
 
-            const file = db.getFileByRelativePath(result.filePath);
+            const file = db.getFileByRelativePath(filePath);
 
             if (file?.ast) {
                 try {
@@ -261,7 +262,8 @@ export async function gatherContext(
                         classes: parsed.classes || [],
                         imports: parsed.imports || [],
                         fullContext: searchableText.slice(0, 3000),
-                        relevanceScore: result.similarity,
+                        // Rank order as score: first hit most relevant.
+                        relevanceScore: 1 - ranked.indexOf(filePath) / (ranked.length * 2),
                         ...(parsed.templateSelectors?.length
                             ? { templateSelectors: parsed.templateSelectors }
                             : {}),
@@ -273,7 +275,7 @@ export async function gatherContext(
                 }
             } else {
                 // Fallback: Try to read raw file content from disk
-                const absolutePath = path.join(projectPath, result.filePath);
+                const absolutePath = path.join(projectPath, filePath);
 
                 if (fs.existsSync(absolutePath)) {
                     try {
@@ -284,12 +286,12 @@ export async function gatherContext(
 
                         const templateSelectors = readTemplateSelectors(file?.parsed_ast);
                         files.push({
-                            path: result.filePath,
+                            path: filePath,
                             functions: [],
                             classes: [],
                             imports: [],
                             fullContext: buildFallbackContext(rawContent, templateSelectors),
-                            relevanceScore: result.similarity * 0.9, // Slightly lower score for raw content
+                            relevanceScore: 0.5, // Lower score for raw content
                             ...(templateSelectors.length ? { templateSelectors } : {}),
                         });
 
@@ -301,7 +303,7 @@ export async function gatherContext(
             }
         }
     } catch (error) {
-        console.warn("Semantic search failed:", error);
+        console.warn("Keyword search failed:", error);
         // Continue with whatever files we have
     }
 

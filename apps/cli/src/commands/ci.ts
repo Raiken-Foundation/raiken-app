@@ -12,7 +12,7 @@
 import { type CiEvent, type CiResult, GitError, runCi } from "@raiken/core";
 import chalk from "chalk";
 import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
-import { cliExit } from "../repl/exit";
+import { cliExit } from "../cli/exit";
 
 interface CiCommandOptions {
     base?: string;

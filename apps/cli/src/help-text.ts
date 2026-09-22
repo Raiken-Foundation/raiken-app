@@ -3,7 +3,7 @@
  *
  * Commander prints subcommands as one flat list in registration order. At 25
  * commands that reads as an inventory rather than a way in: `cover` and
- * `doctor` — the two a newcomer needs on day one — sit between `organize` and
+ * `doctor` — the two a newcomer needs on day one — sit between `ci` and
  * `eval` with equal weight, and nothing says which order to run anything in.
  *
  * Groups below are named after the task the reader has, not the module the
@@ -42,7 +42,17 @@ export const HELP_GROUPS: HelpGroup[] = [
             entry("discover [url]", "Crawl the app; record pages, links, and forms"),
             entry("auth", "Log in, save the session, and crawl behind it"),
             entry("knowledge", "Inspect what discovery recorded (alias: kb)"),
-            entry("index [--embeddings]", "Build the code graph and semantic search index"),
+            entry("index", "Build the code graph and keyword search index"),
+        ],
+    },
+    {
+        title: "The behavior contract",
+        entries: [
+            entry(
+                "contract",
+                "Observed behavior vs ticket requirements: capture, import, verify, materialize",
+            ),
+            entry("mcp", "Expose the contract as MCP tools for coding agents"),
         ],
     },
     {
@@ -56,13 +66,8 @@ export const HELP_GROUPS: HelpGroup[] = [
         ],
     },
     {
-        title: "Work interactively",
-        entries: [
-            entry("raiken", "Chat agent driving a live browser"),
-            entry("start", "Dashboard at http://localhost:7101"),
-            entry("sessions", "List saved interactive sessions"),
-            entry("resume [name]", "Reopen a session (latest when omitted)"),
-        ],
+        title: "Dashboard",
+        entries: [entry("start", "Dashboard at http://localhost:7101")],
     },
     {
         title: "CI and analysis",
@@ -79,8 +84,7 @@ export const HELP_GROUPS: HelpGroup[] = [
         title: "Housekeeping",
         entries: [
             entry("memory", "What the agent has learned about this project"),
-            entry("organize", "Propose a tidier test-directory layout"),
-            entry("hooks", "Git hooks that run raiken on commit/push"),
+            entry("sessions", "List saved one-shot agent sessions (see `raiken -p`)"),
         ],
     },
 ];
@@ -127,13 +131,16 @@ export function renderMainHelp(): string {
                 "raiken init",
                 "raiken doctor --fix",
                 "raiken discover http://localhost:3000",
-                'raiken cover "user can add an item to the cart"',
-                "raiken test e2e/<draft>.spec.ts",
+                "raiken contract capture http://localhost:3000",
+                "raiken contract import --file requirements.md",
+                "raiken contract verify",
             ]
                 .map((line) => `  ${chalk.dim(line)}`)
                 .join("\n") +
             `\n\n  ${chalk.dim(
                 "Anything behind a login: run `raiken auth` first — it crawls the signed-in app too.",
+            )}\n  ${chalk.dim(
+                "Need a classic spec? `raiken cover \"user can add an item to the cart\"` then `raiken test e2e/<draft>.spec.ts`.",
             )}\n  ${chalk.dim("`raiken <command> --help` for that command's flags.")}`,
     );
 

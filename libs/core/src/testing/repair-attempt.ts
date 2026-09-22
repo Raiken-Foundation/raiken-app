@@ -179,19 +179,51 @@ Rules:
 - Output ONLY the corrected test file in a single \`\`\`typescript fence. No prose outside the fence.`;
 
     try {
-        const response = await dependencies.model.invoke(
-            buildPromptMessages(
-                systemPrompt,
-                evidence,
-                "Repair the test mechanics without changing its requirements.",
-            ),
-            { timeout: LLM_REQUEST_TIMEOUT_MS, signal: input.signal },
-        );
-        const raw = Array.isArray(response.content)
+        // Retry-once on empty responses: a reasoning model can return an empty
+        // completion (chain-of-thought consumed the budget) and the invoke
+        // resolves instead of throwing — one retry halves that failure class
+        // before it surfaces as "no usable test code".
+        let response: Awaited<ReturnType<typeof dependencies.model.invoke>>;
+        try {
+            response = await dependencies.model.invoke(
+                buildPromptMessages(
+                    systemPrompt,
+                    evidence,
+                    "Repair the test mechanics without changing its requirements.",
+                ),
+                { timeout: LLM_REQUEST_TIMEOUT_MS, signal: input.signal },
+            );
+        } catch (error) {
+            if (input.signal?.aborted) throw error;
+            response = await dependencies.model.invoke(
+                buildPromptMessages(
+                    systemPrompt,
+                    evidence,
+                    "Repair the test mechanics without changing its requirements.",
+                ),
+                { timeout: LLM_REQUEST_TIMEOUT_MS, signal: input.signal },
+            );
+        }
+        let raw = Array.isArray(response.content)
             ? response.content
                   .map((part) => (typeof part === "string" ? part : part?.text || ""))
                   .join("")
             : response.content;
+        if (!raw.trim()) {
+            const retry = await dependencies.model.invoke(
+                buildPromptMessages(
+                    systemPrompt,
+                    evidence,
+                    "Repair the test mechanics without changing its requirements.",
+                ),
+                { timeout: LLM_REQUEST_TIMEOUT_MS, signal: input.signal },
+            );
+            raw = Array.isArray(retry.content)
+                ? retry.content
+                      .map((part) => (typeof part === "string" ? part : part?.text || ""))
+                      .join("")
+                : retry.content;
+        }
         const extracted = extractRepairCodeDetailed(raw);
         const fixedCode = extracted.code;
         if (!fixedCode) {

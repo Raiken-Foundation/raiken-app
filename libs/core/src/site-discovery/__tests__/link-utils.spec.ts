@@ -11,12 +11,37 @@ import { describe, expect, it } from "vitest";
 import {
     buildLinkSelector,
     escapeSelectorText,
+    isHashRouteHref,
     isLikelyRouteHref,
     mergeBlockedUrlIntoQueue,
     resolveRouteHref,
     safeOrigin,
     stripControlChars,
 } from "../link-utils";
+
+describe("isHashRouteHref", () => {
+    it("accepts hash-ROUTED SPA links", () => {
+        expect(isHashRouteHref("#/stats")).toBe(true);
+        expect(isHashRouteHref("#/notes/42")).toBe(true);
+        expect(isHashRouteHref("#!/login")).toBe(true);
+    });
+
+    it("rejects plain in-page anchors", () => {
+        expect(isHashRouteHref("#section")).toBe(false);
+        expect(isHashRouteHref("#")).toBe(false);
+        expect(isHashRouteHref("#/")).toBe(false);
+        expect(isHashRouteHref("")).toBe(false);
+    });
+
+    it("rejects non-fragment hrefs", () => {
+        expect(isHashRouteHref("/stats")).toBe(false);
+        expect(isHashRouteHref("https://example.com/#/x")).toBe(false);
+    });
+
+    it("trims before matching", () => {
+        expect(isHashRouteHref("  #/stats  ")).toBe(true);
+    });
+});
 
 describe("stripControlChars", () => {
     it("replaces ASCII control chars with spaces", () => {

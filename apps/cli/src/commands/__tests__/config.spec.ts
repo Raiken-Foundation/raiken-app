@@ -13,7 +13,7 @@ import * as path from "node:path";
 import type { ModelInfo } from "@raiken/core";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { withThrowExit } from "../../repl/exit";
+import { withThrowExit } from "../../cli/exit";
 
 const mockListProviderModels = vi.fn(async () => ({ models: [] as ModelInfo[] }));
 

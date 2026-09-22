@@ -1,5 +1,6 @@
 import { ChatApplication } from "./chat";
 import { ConfigApplication } from "./config";
+import { ContractApplication } from "./contract";
 import { DiscoveryApplication, isDiscoveryActive } from "./discovery";
 import {
     canonicalProjectPath,
@@ -16,6 +17,7 @@ export interface ProjectApplication {
     readonly projectPath: string;
     readonly chat: ChatApplication;
     readonly config: ConfigApplication;
+    readonly contract: ContractApplication;
     readonly discovery: DiscoveryApplication;
     readonly hitl: HitlApplication;
     readonly indexing: IndexingApplication;
@@ -28,6 +30,7 @@ class ProjectApplicationBundle implements ProjectApplication {
     readonly projectPath: string;
     readonly chat: ChatApplication;
     readonly config: ConfigApplication;
+    readonly contract: ContractApplication;
     readonly discovery: DiscoveryApplication;
     readonly hitl: HitlApplication;
     readonly indexing: IndexingApplication;
@@ -38,6 +41,7 @@ class ProjectApplicationBundle implements ProjectApplication {
         this.projectPath = projectPath;
         this.chat = new ChatApplication(projectPath);
         this.config = new ConfigApplication(projectPath);
+        this.contract = new ContractApplication(projectPath);
         this.discovery = new DiscoveryApplication(projectPath);
         this.hitl = new HitlApplication(projectPath);
         this.indexing = new IndexingApplication(projectPath);

@@ -3,7 +3,8 @@
  * state for IDE-side AI agents (Cursor, Claude, Copilot) to consume.
  */
 
-import { formatBytes, writeProjectContext } from "@raiken/core";
+import * as path from "node:path";
+import { createProjectApplication, emitAgentsSection, formatBytes, writeProjectContext } from "@raiken/core";
 import chalk from "chalk";
 
 interface ContextCommandOptions {
@@ -57,4 +58,17 @@ export async function contextCommand(options: ContextCommandOptions): Promise<vo
                 "about tests, coverage, or recent failures.",
         ),
     );
+
+    // AGENTS.md emission: the contract lands where coding agents already read.
+    const agentsResult = emitAgentsSection(
+        projectPath,
+        createProjectApplication(projectPath).contract.view(),
+    );
+    if (agentsResult.filePath) {
+        console.log(
+            chalk.green(
+                `✓ ${agentsResult.refreshed ? "Refreshed" : "Appended"} the Raiken contract section in ${path.basename(agentsResult.filePath)}`,
+            ),
+        );
+    }
 }

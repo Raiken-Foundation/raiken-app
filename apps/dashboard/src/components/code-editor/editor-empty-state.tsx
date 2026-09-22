@@ -8,7 +8,7 @@ export function EditorEmptyState({ onNewFile }: { onNewFile?: () => void }) {
                     $ raiken — no file open
                 </pre>
                 <p className="ce-empty-hint">
-                    Open a spec from the sidebar
+                    Pick a spec from the files list
                     {onNewFile && (
                         <>
                             {" "}
@@ -18,7 +18,8 @@ export function EditorEmptyState({ onNewFile }: { onNewFile?: () => void }) {
                             </button>
                         </>
                     )}
-                    .
+                    . To draft one from a scenario, run{" "}
+                    <code>raiken cover "user can log in"</code> in your terminal.
                 </p>
             </div>
         </div>

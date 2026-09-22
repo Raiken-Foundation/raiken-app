@@ -36,7 +36,7 @@ const {
     withRepairDeadline,
     RepairDeadlineExceededError,
 } = await import("../repair");
-const { withThrowExit } = await import("../../repl/exit");
+const { withThrowExit } = await import("../../cli/exit");
 
 const AI_ENV_VARS = [
     "OPENROUTER_API_KEY",

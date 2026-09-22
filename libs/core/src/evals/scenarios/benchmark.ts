@@ -406,6 +406,8 @@ interface GroundingOutput {
     correctLocatorIsClean: boolean;
     /** Contradictions the hand-written golden suite produces (must be zero). */
     goldenContradictions: string[];
+    /** True when the golden suite file was absent — the gate must fail loudly. */
+    goldenMissing: boolean;
 }
 
 const WRONG_MODAL_LOCATOR =

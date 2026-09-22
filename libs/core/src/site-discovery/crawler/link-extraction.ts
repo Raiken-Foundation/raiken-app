@@ -30,8 +30,13 @@ export async function extractLinksFromPage(page: Page): Promise<ExtractedLink[]>
             const isLikelyRoute = (value: string): boolean => {
                 const v = value.trim();
                 if (!v) return false;
+                if (v.startsWith("#")) {
+                    // Hash-ROUTED SPA views (`#/stats`) are distinct crawlable
+                    // pages; plain anchors (`#section`) change scroll position,
+                    // not content. Mirrors isHashRouteHref in link-utils.ts.
+                    return /^#\/.+/.test(v) || /^#!.+/.test(v);
+                }
                 if (
-                    v.startsWith("#") ||
                     v.startsWith("mailto:") ||
                     v.startsWith("tel:") ||
                     v.startsWith("javascript:") ||

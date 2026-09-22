@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withThrowExit } from "../../repl/exit";
+import { withThrowExit } from "../../cli/exit";
 import { evalCommand } from "../eval";
 
 describe("evalCommand", () => {

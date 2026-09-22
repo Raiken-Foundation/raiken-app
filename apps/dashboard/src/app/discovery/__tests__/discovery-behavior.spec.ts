@@ -8,7 +8,6 @@ import {
 } from "../constants";
 import { parseOptionalPositiveInt, safeHttpUrl } from "../helpers";
 import {
-    buildGenerateTestPrompt,
     buildGenerateTestToast,
     canContinueDiscovery,
     canStartDiscovery,
@@ -233,10 +232,9 @@ describe("discovery form helpers", () => {
 });
 
 describe("generate-test handoff", () => {
-    it("builds toast and chat prefill prompt from page url", () => {
+    it("builds a toast that names the drafted spec", () => {
         const url = "https://example.com/login";
-        expect(buildGenerateTestToast(url)).toBe(`Sending to AI Agent: ${url}`);
-        expect(buildGenerateTestPrompt(url)).toBe(`Generate E2E tests for ${url}`);
+        expect(buildGenerateTestToast(url)).toBe(`Drafting a smoke spec: ${url}`);
     });
 
     it("keeps the handoff delay constant for navigation UX", () => {

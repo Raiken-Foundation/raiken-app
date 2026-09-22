@@ -1,6 +1,5 @@
 import * as path from "node:path";
 import { CodeGraphDB } from "../database/db";
-import { EmbeddingsGenerator } from "../database/embeddings";
 import type { CodeNode, UpdateEvent } from "../types";
 import { fullAstToSearchableText } from "./ast-parser";
 import { CodeGraph } from "./code-graph";
@@ -510,7 +509,6 @@ export class ProjectContext {
                 const node = this.graph?.getNode(event.filePath);
                 if (node) {
                     db.upsertFile(node, "watch");
-                    this.updateEmbeddingForFile(db, event.filePath);
                 }
             }
 
@@ -531,60 +529,6 @@ export class ProjectContext {
         } finally {
             db.close();
         }
-    }
-
-    /**
-     * Regenerate the embedding for a single file that just changed.
-     */
-    private updateEmbeddingForFile(db: CodeGraphDB, filePath: string): void {
-        const fileId = db.getFileId(filePath);
-        if (fileId === null) return;
-
-        const fileRecord = db.getFile(filePath);
-        if (!fileRecord?.ast) return;
-
-        let ast: unknown;
-        try {
-            ast = JSON.parse(fileRecord.ast);
-        } catch {
-            return;
-        }
-
-        const searchableText = fullAstToSearchableText(ast, fileRecord.relative_path);
-        if (!searchableText || searchableText.trim().length === 0) return;
-
-        const embGen = EmbeddingsGenerator.getInstance();
-        if (!embGen.isReady()) return;
-
-        const chunks = [
-            { type: "file" as const, name: fileRecord.relative_path, text: searchableText },
-        ];
-        embGen
-            .generateEmbeddingsBatch(chunks.map((c) => c.text))
-            .then((embeddings) => {
-                const withEmbeddings = chunks
-                    .map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }))
-                    .filter(
-                        (chunk): chunk is typeof chunk & { embedding: number[] } =>
-                            chunk.embedding !== null && chunk.embedding !== undefined,
-                    );
-                if (withEmbeddings.length === 0) {
-                    console.warn(`[ProjectContext] Embedding generation failed for ${filePath}`);
-                    return;
-                }
-                const freshDb = new CodeGraphDB(this.projectPath);
-                try {
-                    freshDb.saveEmbeddings(fileId, withEmbeddings);
-                } finally {
-                    freshDb.close();
-                }
-            })
-            .catch((err) => {
-                console.warn(
-                    `[ProjectContext] Embedding update failed for ${filePath}:`,
-                    err instanceof Error ? err.message : err,
-                );
-            });
     }
 
     /**

@@ -1,6 +1,5 @@
 import type { DiffReview, TestFile } from "../../components/code-editor";
 import type { TestResult, TestSummary } from "../../components/test-results";
-import type { DashboardRoute } from "../../utils/slash-commands";
 
 export type { DiffReview, TestFile, TestResult, TestSummary };
 
@@ -34,14 +33,11 @@ export interface DashboardRunResult {
 export type RunDisposition = "busy" | "cancelled" | "passed" | "failed";
 
 export interface TestingViewProps {
-    sidebarTab?: "chat" | "files";
     sidebarCollapsed?: boolean;
-    onSidebarTabChange?: (tab: "chat" | "files") => void;
-    pendingPrompt?: string;
-    onPromptConsumed?: () => void;
-    onNavigateRoute?: (route: DashboardRoute) => void;
-    /** Bubbled straight up from `Sidebar` — see its prop of the same name. */
-    onHitlPendingChange?: (pending: boolean) => void;
+    /** Generated spec content waiting to be saved as a file on mount (the
+     *  discovery "generate test" handoff — no chat involved). */
+    pendingGeneratedTest?: string;
+    onGeneratedTestConsumed?: () => void;
 }
 
 export type InterpretationSource = "disk" | "client-snapshot" | "client-snapshot-fallback" | null;

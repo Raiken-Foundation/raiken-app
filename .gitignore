@@ -54,10 +54,11 @@ raiken.ctx.md
 # Playwright and test runner output
 playwright-report/
 **/playwright-report/
-test-results/
-**/test-results/
-test-reports/
-**/test-reports/
+# Playwright OUTPUT dirs, anchored to the root — an unanchored "test-results/"
+# would also swallow the dashboard SOURCE dir
+# apps/dashboard/src/components/test-results/ (it did, once).
+/test-results/
+/test-reports/
 
 # Generated exploratory tests
 **/tests/generated/

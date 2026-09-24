@@ -139,6 +139,12 @@ export async function bootstrapProject(
                 const { skippedFiles } = db.saveGraph(nodes, dbEntryPoints);
                 filesIndexed = allFiles.length - skippedFiles.length;
                 log(`Code graph built: ${filesIndexed} files indexed`);
+                const graphStatus = graph.getGraphStatus();
+                if (!graphStatus.available) {
+                    warn(
+                        `Code graph unavailable — files are indexed, but symbols, call edges, and impact analysis are off: ${graphStatus.reason}`,
+                    );
+                }
                 if (skippedFiles.length > 0) {
                     warn(
                         `${skippedFiles.length} file(s) could not be added to the code graph and were skipped (e.g. ${skippedFiles[0]?.path}).`,

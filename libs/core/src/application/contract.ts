@@ -295,7 +295,7 @@ export class ContractApplication implements ProjectApplicationContext {
         const allFacts = this.withStore((store) => store.listBehaviorFacts());
         const scope = input.verifyAll
             ? { scoper: "all" as const, scoped: allFacts, reasons: [], globalReason: "--all", unmapped: [] }
-            : this.scope(allFacts, input.changedFiles ?? []);
+            : await this.scope(allFacts, input.changedFiles ?? []);
         if (scope.scoped.length === 0) {
             return { verdicts: [], scoped: 0, total: allFacts.length, scope };
         }
@@ -344,8 +344,8 @@ export class ContractApplication implements ProjectApplicationContext {
      * each fact carries the path that put it in scope; without one, fall back
      * to matching changed-file names against routes.
      */
-    scope(facts: BehaviorFact[], changedFiles: string[]): ContractScope {
-        const graph = loadDependentsGraph(this.projectPath);
+    async scope(facts: BehaviorFact[], changedFiles: string[]): Promise<ContractScope> {
+        const graph = await loadDependentsGraph(this.projectPath);
         if (graph) {
             const bindings = extractRouteBindings(this.projectPath);
             if (bindings.length > 0) {

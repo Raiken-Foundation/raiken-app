@@ -130,8 +130,8 @@ export interface CodeNode {
     ast?: unknown; // Complete Babel AST - for test generation
     /** Symbols extracted from the file (functions, classes, routes, ...). */
     symbols?: ParsedSymbol[];
-    /** Structural edges declared inside this file (extends/implements). */
-    intraFileEdges?: GraphEdge[];
+    /** Symbol-level edges out of this file (calls, extends, implements, renders). */
+    edges?: GraphEdge[];
     imports: string[]; // Files this imports (absolute paths)
     importedBy: string[]; // Files that import this (absolute paths)
     depth: number; // Distance from entry point
@@ -179,6 +179,11 @@ export interface CodeGraphOptions {
      * Default 2MB, which comfortably covers real hand-written source files.
      */
     maxFileSizeBytes?: number;
+    /**
+     * Produce the code graph (symbols + edges) for the project root. Defaults
+     * to building it with graft; tests inject a fixed graph.
+     */
+    loadGraph?: (root: string) => Promise<import("./analysis/graft").GraftIndex>;
 }
 
 // ============================================================================

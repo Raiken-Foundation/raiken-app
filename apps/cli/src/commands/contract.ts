@@ -288,7 +288,7 @@ export async function contractCommand(
             const opts0 = options as Record<string, unknown>;
             const { getChangedFiles } = await import("../git-changed");
             const changedFiles = await getChangedFiles(projectPath, String(opts0["base"] ?? "HEAD"));
-            const scope = contract.scope(contract.view().observed, changedFiles);
+            const scope = await contract.scope(contract.view().observed, changedFiles);
             if (opts0["json"]) {
                 process.stdout.write(
                     `${JSON.stringify({ changedFiles, ...scope, scoped: scope.scoped.map((f) => f.factKey) }, null, 2)}\n`,
@@ -686,7 +686,7 @@ export async function contractCommand(
 }
 
 function printScope(scope: ContractScope): void {
-    const label = { graph: "code graph (graft)", names: "file names (no graft graph found)", all: "--all" }[scope.scoper];
+    const label = { graph: "code graph (graft)", names: "file names (code graph unavailable)", all: "--all" }[scope.scoper];
     console.log(dim(`  Scoped by ${label}`));
     if (scope.globalReason) console.log(dim(`  Whole contract in scope: ${scope.globalReason}`));
     const seen = new Set<string>();

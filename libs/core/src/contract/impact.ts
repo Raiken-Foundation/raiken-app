@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as parser from "@babel/parser";
 import * as t from "@babel/types";
+import { CodeGraph } from "../analysis/code-graph";
+import type { GraftIndex } from "../analysis/graft";
 import type { BehaviorFact } from "./types";
 
 /**
@@ -332,92 +333,29 @@ function walkSourceFiles(root: string): string[] {
 }
 
 // ==========================================================================
-// The code graph: graft's wiring.json, reduced to file-level reverse edges
+// The code graph: file-level reverse edges from graft
 // ==========================================================================
 
 export interface DependentsGraph {
-    /** Absolute root the graph's repo-relative paths resolve against. */
-    root: string;
     /** file → files that import, call, or reference something in it. */
-    dependents: Map<string, Set<string>>;
+    dependents: ReadonlyMap<string, ReadonlySet<string>>;
     /** Every file the graph indexed. */
-    indexed: Set<string>;
+    indexed: ReadonlySet<string>;
 }
 
-interface WiringJson {
-    nodes: Array<{ id: string; path: string; kind: string }>;
-    edges: Array<{ source: string; target: string; relation: string }>;
-}
-
-/** Nearest ancestor of `from` holding a graft graph. */
-export function findGraftRoot(from: string): string | null {
-    let dir = path.resolve(from);
-    for (;;) {
-        if (fs.existsSync(path.join(dir, "graft", ".graph", "wiring.json"))) return dir;
-        const parent = path.dirname(dir);
-        if (parent === dir) return null;
-        dir = parent;
-    }
+export function dependentsFromIndex(index: GraftIndex): DependentsGraph {
+    return { dependents: index.dependentsMap(), indexed: index.indexedFiles() };
 }
 
 /**
- * Load the dependents graph, refreshing it first so it describes the working
- * tree (graft rebuilds incrementally, ~1s, no model). Returns null when graft
- * is unavailable — callers fall back to name-based scoping.
+ * Load the dependents graph for a project: graft rebuilds it incrementally
+ * (~1s, no model) so it describes the working tree, and path-alias imports
+ * are resolved on top. Null when the graph is unavailable — callers fall back
+ * to name-based scoping and say so.
  */
-export function loadDependentsGraph(
-    projectPath: string,
-    options: { refresh?: boolean } = {},
-): DependentsGraph | null {
-    const root = findGraftRoot(projectPath);
-    if (!root) return null;
-    if (options.refresh !== false) {
-        try {
-            execFileSync("graft", ["build", root], {
-                cwd: root,
-                stdio: "ignore",
-                timeout: 120_000,
-                // Raiken is local-first: never let the graph step phone home.
-                env: { ...process.env, DO_NOT_TRACK: "1", GRAFT_NO_STATUSLINE: "1" },
-            });
-        } catch {
-            // graft missing or the refresh failed: a stale graph is still far
-            // better evidence than file names, so read what is on disk.
-        }
-    }
-    let wiring: WiringJson;
-    try {
-        wiring = JSON.parse(
-            fs.readFileSync(path.join(root, "graft", ".graph", "wiring.json"), "utf-8"),
-        );
-    } catch {
-        return null;
-    }
-    return dependentsFromWiring(root, wiring);
-}
-
-export function dependentsFromWiring(root: string, wiring: WiringJson): DependentsGraph {
-    const pathOf = new Map<string, string>();
-    const indexed = new Set<string>();
-    for (const node of wiring.nodes) {
-        const abs = path.join(root, node.path);
-        pathOf.set(node.id, abs);
-        indexed.add(abs);
-    }
-    const dependents = new Map<string, Set<string>>();
-    for (const edge of wiring.edges) {
-        if (edge.relation === "contains") continue;
-        const from = pathOf.get(edge.source);
-        const to = pathOf.get(edge.target);
-        if (!from || !to || from === to) continue; // unresolved module, or intra-file
-        let set = dependents.get(to);
-        if (!set) {
-            set = new Set();
-            dependents.set(to, set);
-        }
-        set.add(from);
-    }
-    return { root, dependents, indexed };
+export async function loadDependentsGraph(projectPath: string): Promise<DependentsGraph | null> {
+    const index = await new CodeGraph(projectPath).loadDependencyGraph();
+    return index ? dependentsFromIndex(index) : null;
 }
 
 // ==========================================================================

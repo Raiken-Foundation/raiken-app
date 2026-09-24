@@ -13,14 +13,44 @@ import type {
     UpdateEvent,
 } from "../types";
 import { isBinaryFile, isTestDirectory, isTestFile } from "../utils";
-import { isMarkupFile } from "./markup-selectors";
-import { analyzeSourceFile } from "./source-analysis";
-import { extractSymbolsFromAst } from "./symbol-extractor";
+import { CodeGraphUnavailableError, GraftIndex } from "./graft";
+import { analyzeSourceFile, classifySourceFile } from "./source-analysis";
+
+/**
+ * Languages graft parses beyond JS/TS. Files in these languages become graph
+ * nodes with symbols and edges from graft; Babel-only extras (selectors,
+ * client routes) apply to JS/TS/SFC/markup files alone.
+ */
+const GRAFT_LANGUAGE_EXTENSIONS = [
+    ".py",
+    ".go",
+    ".java",
+    ".kt",
+    ".kts",
+    ".php",
+    ".swift",
+    ".r",
+    ".R",
+    ".rs",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".scala",
+    ".ex",
+    ".exs",
+    ".sol",
+    ".dart",
+    ".lua",
+];
 
 export class CodeGraph {
     private rootPath: string;
     private nodes = new Map<string, CodeNode>();
-    private options: Required<Omit<CodeGraphOptions, "onUpdate" | "excludeDirs">> & {
+    private options: Required<Omit<CodeGraphOptions, "onUpdate" | "excludeDirs" | "loadGraph">> & {
         onUpdate?: (event: UpdateEvent) => void;
         excludeDirs?: string[];
     };
@@ -31,8 +61,12 @@ export class CodeGraph {
     private importCache = new Map<string, string[]>();
     private fileExistsCache = new Map<string, boolean>();
     private cachedKeywordIndex: Map<string, string[]> | null = null;
-    /** Per-file intra-file edges (extends/implements) collected during parse. */
-    private intraFileEdges = new Map<string, GraphEdge[]>();
+    /** Symbols and cross-file edges, from graft. Null when the graph is unavailable. */
+    private graft: GraftIndex | null = null;
+    private graphStatus: CodeGraphStatus = { available: false, reason: "not built yet" };
+    private graphRefresh: Promise<void> | null = null;
+    private graphRefreshQueued: Promise<void> | null = null;
+    private readonly loadGraph: (root: string) => Promise<GraftIndex>;
 
     // Cache size limits to prevent unbounded memory growth
     private static readonly CACHE_MAX_SIZE = 5000;
@@ -56,6 +90,7 @@ export class CodeGraph {
                 ".cts",
                 ".vue",
                 ".svelte",
+                ...GRAFT_LANGUAGE_EXTENSIONS,
             ],
             excludeDirs: options.excludeDirs,
             includeTests: options.includeTests ?? true,
@@ -65,7 +100,75 @@ export class CodeGraph {
             maxFileSizeBytes: options.maxFileSizeBytes ?? 2 * 1024 * 1024,
         };
 
+        this.loadGraph = options.loadGraph ?? ((root) => GraftIndex.load(root));
         this.loadPathAliases();
+    }
+
+    /**
+     * The project's code graph on its own — without reading every file —
+     * with path-alias imports resolved (graft leaves `@/x` unresolved). For
+     * impact walks that need dependents, not a full index. Null when the
+     * graph is unavailable; `getGraphStatus()` says why.
+     */
+    async loadDependencyGraph(): Promise<GraftIndex | null> {
+        await this.refreshGraph();
+        const graft = this.graft;
+        if (!graft) return null;
+        for (const file of Array.from(graft.indexedFiles())) {
+            const unresolved = graft.unresolvedImportsFor(file);
+            if (unresolved.length === 0) continue;
+            for (const target of await this.resolveUnresolvedImports(unresolved, file)) {
+                graft.addFileDependency(file, target);
+            }
+        }
+        return graft;
+    }
+
+    /** Whether symbols/edges are available, and why not when they are not. */
+    getGraphStatus(): CodeGraphStatus {
+        return this.graphStatus;
+    }
+
+    /**
+     * Rebuild graft's graph and reload it. Concurrent callers share one run;
+     * a call that arrives mid-run queues exactly one follow-up, so a change
+     * made after a build started is never answered from that build.
+     */
+    private refreshGraph(): Promise<void> {
+        if (!this.graphRefresh) {
+            this.graphRefresh = this.runGraphRefresh().finally(() => {
+                this.graphRefresh = null;
+            });
+            return this.graphRefresh;
+        }
+        if (!this.graphRefreshQueued) {
+            this.graphRefreshQueued = this.graphRefresh.then(() => {
+                this.graphRefreshQueued = null;
+                return this.refreshGraph();
+            });
+        }
+        return this.graphRefreshQueued;
+    }
+
+    private async runGraphRefresh(): Promise<void> {
+        try {
+            this.graft = await this.loadGraph(this.rootPath);
+            this.graphStatus = { available: true };
+        } catch (error) {
+            const reason =
+                error instanceof CodeGraphUnavailableError
+                    ? error.reason
+                    : error instanceof Error
+                      ? error.message
+                      : String(error);
+            if (this.graphStatus.reason !== reason) {
+                console.warn(
+                    `[CodeGraph] Code graph unavailable — symbols, call edges, and impact analysis are disabled: ${reason}`,
+                );
+            }
+            this.graft = null;
+            this.graphStatus = { available: false, reason };
+        }
     }
 
     /**
@@ -392,6 +495,7 @@ export class CodeGraph {
 
     // Initialize from entry points (follow imports)
     async initialize(entryPoints: string[]): Promise<void> {
+        await this.refreshGraph();
         const resolvedEntries = entryPoints.map((ep) => path.resolve(this.rootPath, ep));
 
         for (const entryPoint of resolvedEntries) {
@@ -421,6 +525,7 @@ export class CodeGraph {
 
     // Scan entire project (find all files)
     async scanProject(): Promise<void> {
+        await this.refreshGraph();
         const ignoreMatcher = await this.getIgnoreMatcher();
 
         await this.traverseDirectory(this.rootPath, {
@@ -519,7 +624,7 @@ export class CodeGraph {
             const BATCH_SIZE = 10;
             for (let i = 0; i < files.length; i += BATCH_SIZE) {
                 const batch = files.slice(i, i + BATCH_SIZE);
-                await Promise.all(batch.map((file) => this.updateFile(file)));
+                await Promise.all(batch.map((file) => this.indexFile(file)));
             }
 
             // Process directories sequentially to control memory usage
@@ -539,7 +644,14 @@ export class CodeGraph {
     // Incremental Updates (React-like Diffing)
     // ============================================================================
 
+    /** Re-index a changed file: refresh the code graph, then re-read the file. */
     async updateFile(filePath: string): Promise<UpdateEvent> {
+        await this.refreshGraph();
+        return this.indexFile(filePath);
+    }
+
+    /** Index one file against the current graph (no graph refresh). */
+    private async indexFile(filePath: string): Promise<UpdateEvent> {
         const resolvedPath = path.resolve(filePath);
         const existingNode = this.nodes.get(resolvedPath);
 
@@ -729,23 +841,20 @@ export class CodeGraph {
 
             const extension = path.extname(filePath);
             const fileName = path.basename(filePath);
-            const isCodeFile = this.isParseableFile(filePath);
             const code = await fs.readFile(filePath, "utf-8");
             const lineCount = code ? code.split("\n").length : 0;
 
             let parsed: ParsedFile = emptyParsed;
             let ast: unknown | undefined;
-            let resolvedImports: string[] = [];
-            let symbols: ParsedSymbol[] = [];
-            let intraFileEdges: GraphEdge[] = [];
 
-            // Markup files carry no code but do carry selectors, which is the
-            // only source-side grounding a repo whose backend we cannot parse
-            // will ever contribute.
-            if (isCodeFile || isMarkupFile(filePath)) {
+            // Raiken's own pass: selectors, client routes, and the searchable
+            // AST — testing knowledge graft does not extract. JS/TS, SFCs, and
+            // markup only (markup carries no code, but its selectors are the
+            // only source-side grounding a backend we cannot parse contributes).
+            if (classifySourceFile(filePath) || this.isConfiguredScript(filePath)) {
                 try {
                     const result = analyzeSourceFile(code, filePath, {
-                        unknownAsScript: isCodeFile,
+                        unknownAsScript: this.isConfiguredScript(filePath),
                     });
                     parsed = result?.parsed ?? emptyParsed;
                     ast = result?.ast;
@@ -756,35 +865,30 @@ export class CodeGraph {
                             `[CodeGraph] Script block in ${rel} did not parse (${result.parseError}); indexed its template only.`,
                         );
                     }
-
-                    resolvedImports = await this.resolveImports(
-                        parsed.imports.map((imp) => imp.source),
-                        filePath,
-                    );
-
-                    try {
-                        if (ast) {
-                            const extracted = extractSymbolsFromAst(ast, filePath);
-                            symbols = extracted.symbols;
-                            intraFileEdges = extracted.intraFileEdges;
-                        }
-                    } catch (symErr) {
-                        // Always warn (not just under DEBUG) — a file silently
-                        // ending up with zero symbols looks identical to a
-                        // legitimately empty file otherwise, and the agent has
-                        // no way to know its context for this file is missing.
-                        const rel = path.relative(this.rootPath, filePath);
-                        console.warn(
-                            `[CodeGraph] Symbol extraction failed for ${rel}:`,
-                            (symErr as Error).message,
-                        );
-                    }
                 } catch (error) {
                     const rel = path.relative(this.rootPath, filePath);
                     console.warn(`[CodeGraph] Parse failed for ${rel}:`, (error as Error).message);
                     parsed = emptyParsed;
                     ast = undefined;
-                    resolvedImports = [];
+                }
+            }
+
+            // The graph: symbols, imports, and symbol-level edges from graft.
+            let symbols: ParsedSymbol[] = [];
+            let edges: GraphEdge[] = [];
+            let resolvedImports: string[] = [];
+            if (this.graft) {
+                symbols = this.graft.symbolsFor(filePath);
+                edges = this.graft.edgesFor(filePath);
+                const aliased = await this.resolveUnresolvedImports(
+                    this.graft.unresolvedImportsFor(filePath),
+                    filePath,
+                );
+                for (const target of aliased) this.graft.addFileDependency(filePath, target);
+                resolvedImports = Array.from(new Set([...this.graft.importsFor(filePath), ...aliased]));
+                // Languages Babel does not read get their outline from graft.
+                if (!ast && parsed === emptyParsed && symbols.length > 0) {
+                    parsed = outlineFromSymbols(symbols);
                 }
             }
 
@@ -794,7 +898,7 @@ export class CodeGraph {
                 parsed,
                 ast,
                 symbols,
-                intraFileEdges,
+                edges,
                 imports: resolvedImports,
                 importedBy: [],
                 depth,
@@ -813,11 +917,6 @@ export class CodeGraph {
                 },
             };
 
-            // Attach intra-file edges via a non-enumerable side channel so
-            // serialization paths don't accidentally pick them up. Persistence
-            // reads node.intraFileEdges directly (buildEdgesForNode).
-            this.intraFileEdges.set(filePath, intraFileEdges);
-
             return node;
         } catch (error) {
             const rel = path.relative(this.rootPath, filePath);
@@ -827,63 +926,39 @@ export class CodeGraph {
     }
 
     /**
-     * Resolve import paths to actual file paths.
-     *
-     * PERFORMANCE: Uses caching to avoid redundant file system checks.
-     * Cache key format: "fromFile|source" ensures context-specific caching.
+     * Resolve the import specifiers graft left unresolved. graft resolves
+     * relative imports itself but does not read tsconfig `paths` or bundler
+     * aliases, so `@/components/x` arrives here as a bare string. Package
+     * imports stay unresolved (they are not project files).
      */
-    private async resolveImports(importSources: string[], fromFile: string): Promise<string[]> {
-        const resolved: string[] = [];
+    private async resolveUnresolvedImports(importSources: string[], fromFile: string): Promise<string[]> {
         const fromDir = path.dirname(fromFile);
+        const results = await Promise.all(
+            importSources.map(async (source) => {
+                const cacheKey = `${fromFile}|${source}`;
+                const cached = this.importCache.get(cacheKey);
+                if (cached) return cached;
 
-        // Batch all file existence checks for parallel execution
-        const resolutionPromises = importSources.map(async (source) => {
-            // Check cache first
-            const cacheKey = `${fromFile}|${source}`;
-            const cached = this.importCache.get(cacheKey);
-            if (cached) {
-                return cached;
-            }
+                let possiblePaths: string[] = [];
+                if (source.startsWith(".") || source.startsWith("/")) {
+                    possiblePaths = this.generatePossiblePaths(source, fromDir);
+                } else if (this.isAliasImport(source)) {
+                    const aliasResolved = this.resolveAlias(source);
+                    if (aliasResolved) possiblePaths = this.generatePossiblePaths(aliasResolved, this.rootPath);
+                }
 
-            // Skip node_modules
-            if (!source.startsWith(".") && !source.startsWith("/") && !this.isAliasImport(source)) {
+                for (const possiblePath of possiblePaths) {
+                    if (await this.fileExists(possiblePath)) {
+                        const result = [possiblePath];
+                        this.setCacheWithLimit(this.importCache, cacheKey, result);
+                        return result;
+                    }
+                }
+                this.setCacheWithLimit(this.importCache, cacheKey, []);
                 return [];
-            }
-
-            let possiblePaths: string[] = [];
-
-            if (source.startsWith(".") || source.startsWith("/")) {
-                possiblePaths = this.generatePossiblePaths(source, fromDir);
-            } else if (this.isAliasImport(source)) {
-                const aliasResolved = this.resolveAlias(source);
-                if (aliasResolved) {
-                    possiblePaths = this.generatePossiblePaths(aliasResolved, this.rootPath);
-                }
-            }
-
-            // Try each possible path
-            for (const possiblePath of possiblePaths) {
-                if (await this.fileExists(possiblePath)) {
-                    const result = [possiblePath];
-                    this.setCacheWithLimit(this.importCache, cacheKey, result);
-                    return result;
-                }
-            }
-
-            // Cache empty result
-            this.setCacheWithLimit(this.importCache, cacheKey, []);
-            return [];
-        });
-
-        // Wait for all resolutions in parallel
-        const results = await Promise.all(resolutionPromises);
-
-        // Flatten results
-        for (const result of results) {
-            resolved.push(...result);
-        }
-
-        return resolved;
+            }),
+        );
+        return results.flat();
     }
 
     /**
@@ -947,9 +1022,18 @@ export class CodeGraph {
         return possibilities;
     }
 
-    private isParseableFile(filePath: string): boolean {
+    /**
+     * A configured extension no analyzer recognizes (and graft does not own)
+     * is parsed as a plain script, so a project indexing an unusual JS
+     * extension keeps working.
+     */
+    private isConfiguredScript(filePath: string): boolean {
         const ext = path.extname(filePath);
-        return this.options.extensions.includes(ext);
+        return (
+            this.options.extensions.includes(ext) &&
+            !GRAFT_LANGUAGE_EXTENSIONS.includes(ext) &&
+            classifySourceFile(filePath) === null
+        );
     }
 
     private toIgnorePath(relativePath: string, isDir: boolean): string {
@@ -1549,4 +1633,47 @@ export class CodeGraph {
             .split(/\s+/)
             .filter((w) => w.length > 2);
     }
+}
+
+export interface CodeGraphStatus {
+    available: boolean;
+    /** Why the graph is unavailable (and how to fix it), when it is. */
+    reason?: string;
+}
+
+/** A Babel-shaped file outline built from graft symbols (non-JS languages). */
+function outlineFromSymbols(symbols: ParsedSymbol[]): ParsedFile {
+    const methodsOf = new Map<string, string[]>();
+    for (const sym of symbols) {
+        if (sym.kind === "method" && sym.parent) {
+            methodsOf.set(sym.parent, [...(methodsOf.get(sym.parent) ?? []), sym.name]);
+        }
+    }
+    return {
+        functions: symbols
+            .filter((s) => s.kind === "function" || s.kind === "component")
+            .map((s) => ({
+                name: s.name,
+                params: [],
+                isAsync: Boolean(s.isAsync),
+                isExported: s.isExported,
+                line: s.startLine,
+            })),
+        classes: symbols
+            .filter((s) => s.kind === "class")
+            .map((s) => ({
+                name: s.name,
+                methods: methodsOf.get(s.name) ?? [],
+                properties: [],
+                isExported: s.isExported,
+                line: s.startLine,
+            })),
+        types: symbols.flatMap((s) =>
+            s.kind === "interface" || s.kind === "type" || s.kind === "enum"
+                ? [{ name: s.name, kind: s.kind, isExported: s.isExported, line: s.startLine }]
+                : [],
+        ),
+        imports: [],
+        exports: symbols.filter((s) => s.isExported && s.kind !== "method").map((s) => s.name),
+    };
 }

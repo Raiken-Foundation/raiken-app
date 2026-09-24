@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { buildEdgesForNode } from "../../analysis/symbol-extractor";
+import { buildEdgesForNode } from "../../analysis/graph-edges";
 import type {
     CodeNode,
     DBDependency,
@@ -171,7 +171,7 @@ export class CodeGraphRepository {
                                 now,
                             );
                         }
-                        const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
+                        const edges = buildEdgesForNode(node);
                         if (edges.length > 0) {
                             this.symbols.replaceFileEdgesInTransaction(filePath, edges, now);
                         }
@@ -318,7 +318,7 @@ export class CodeGraphRepository {
                         .run(this.adapter.projectPath, node.filePath);
                 }
 
-                const edges = buildEdgesForNode(node, node.intraFileEdges ?? []);
+                const edges = buildEdgesForNode(node);
                 this.symbols.replaceFileEdgesInTransaction(node.filePath, edges, now);
 
                 // Recalculate stats

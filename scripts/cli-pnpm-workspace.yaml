@@ -5,10 +5,22 @@ packages: []
 overrides:
   sharp: ^0.33.5
 
+# The code graph (@nanonets/graft) parses with tree-sitter: the runtime and each
+# grammar install a native addon (prebuilt where one exists; Kotlin compiles).
 onlyBuiltDependencies:
+  - '@davisvaughan/tree-sitter-r'
   - '@swc/core'
   - better-sqlite3
   - esbuild
   - nx
   - protobufjs
+  - tree-sitter
+  - tree-sitter-go
+  - tree-sitter-java
+  - tree-sitter-javascript
+  - tree-sitter-kotlin
+  - tree-sitter-php
+  - tree-sitter-python
+  - tree-sitter-swift
+  - tree-sitter-typescript
   - unrs-resolver

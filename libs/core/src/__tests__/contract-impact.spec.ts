@@ -2,9 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { GraftIndex } from "../analysis/graft";
 import {
     type DependentsGraph,
-    dependentsFromWiring,
+    dependentsFromIndex,
     extractRouteBindings,
     scopeFactsByImpact,
 } from "../contract/impact";
@@ -99,12 +100,27 @@ describe("contract impact scoping", () => {
             fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
             fs.writeFileSync(path.join(dir, rel), content);
         }
-        graph = dependentsFromWiring(dir, {
-            nodes: Object.keys(FILES).map((rel) => ({ id: rel, path: rel, kind: "file" })),
-            edges: Object.entries(IMPORTS).flatMap(([source, targets]) =>
-                targets.map((target) => ({ source, target, relation: "imports" })),
-            ),
-        });
+        graph = dependentsFromIndex(
+            new GraftIndex(dir, {
+                nodes: Object.keys(FILES).map((rel) => ({
+                    id: rel,
+                    name: path.basename(rel),
+                    kind: "file",
+                    path: rel,
+                    span: "L1-L1",
+                    signature: null,
+                    exported: true,
+                })),
+                edges: Object.entries(IMPORTS).flatMap(([source, targets]) =>
+                    targets.map((target) => ({
+                        source,
+                        target,
+                        relation: "imports",
+                        confidence: "extracted",
+                    })),
+                ),
+            }),
+        );
     });
 
     afterEach(() => {

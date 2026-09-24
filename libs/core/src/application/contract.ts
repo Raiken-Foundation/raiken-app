@@ -210,6 +210,11 @@ export class ContractApplication implements ProjectApplicationContext {
         return this.withStore((store) => store.resolveReview(reviewId, accept));
     }
 
+    /** Remove a junk/duplicate fact (see store.forgetFact). */
+    forgetFact(factKey: string): { forgotten: boolean; reason?: string } {
+        return this.withStore((store) => store.forgetFact(factKey));
+    }
+
     /** Undo an accepted review — the retired fact returns as unverified. */
     restoreReview(reviewId: number): boolean {
         return this.withStore((store) => store.restoreReview(reviewId));
@@ -237,6 +242,20 @@ export class ContractApplication implements ProjectApplicationContext {
         return { markdownPath, jsonPath };
     }
 
+    /** Where the app lives, best-effort: explicit arg > playwright config >
+     *  the origin the facts were actually observed at. The last fallback is
+     *  what makes verify work on projects with no playwright.config.ts. */
+    private discoveredBaseURLFallback(): string | null {
+        const first = this.withStore((store) => store.listBehaviorFacts()[0]);
+        if (!first) return null;
+        try {
+            const u = new URL(first.route);
+            return `${u.protocol}//${u.host}`;
+        } catch {
+            return null;
+        }
+    }
+
     /**
      * Verify facts against the live app. When `changedFiles` is provided,
      * only facts scoped to the change set are re-observed; `verifyAll` forces
@@ -250,7 +269,10 @@ export class ContractApplication implements ProjectApplicationContext {
         storageStatePath?: string | null;
     }): Promise<{ verdicts: FactVerdict[]; scoped: number; total: number }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath));
+        const baseURL =
+            input.baseURL ??
+            (await readPlaywrightBaseURL(this.projectPath)) ??
+            this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
@@ -357,7 +379,7 @@ export class ContractApplication implements ProjectApplicationContext {
         storageStatePath?: string | null;
     }): Promise<{ recorded: number; filePath: string }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath));
+        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
@@ -398,7 +420,7 @@ export class ContractApplication implements ProjectApplicationContext {
         storageStatePath?: string | null;
     }): Promise<{ captured: string[]; failed: Array<{ route: string; reason: string }>; total: number; coverage: number; sources: number }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath));
+        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
@@ -464,7 +486,7 @@ export class ContractApplication implements ProjectApplicationContext {
         coverage: ReturnType<typeof computeCoverage>;
     }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath));
+        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }

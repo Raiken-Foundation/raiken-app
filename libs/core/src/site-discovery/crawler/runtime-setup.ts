@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Configuration, MemoryStorage, PlaywrightCrawler, type RequestQueue } from "crawlee";
+import { Configuration, log as crawleeLog, MemoryStorage, PlaywrightCrawler, type RequestQueue } from "crawlee";
 import { looksLikeLoginUrl } from "../detectors/auth";
 import { summariseNavigationFailure } from "./failure-summary";
 import type { FailedRequestRecord } from "./types";
@@ -100,6 +100,9 @@ export type CrawlerRuntimeSetupResult = {
 };
 
 export function installFreshCrawleeStorage(projectPath: string): string {
+    // INFO-level crawler chatter is machine noise on a human channel; keep
+    // warnings and errors only (clig.dev: "saying just enough").
+    crawleeLog.setLevel(crawleeLog.LEVELS.WARNING);
     const crawleeDir = path.join(projectPath, ".raiken", "crawlee");
     fs.mkdirSync(crawleeDir, { recursive: true });
     process.env["CRAWLEE_STORAGE_DIR"] = crawleeDir;

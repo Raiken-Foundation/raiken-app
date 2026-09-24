@@ -1,4 +1,19 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import {
+    Archive,
+    Check,
+    CircleCheck,
+    CircleDashed,
+    CirclePlus,
+    CircleX,
+    Copy,
+    Link2,
+    RotateCcw,
+    Trash2,
+    UserCheck,
+    UserX,
+    type LucideIcon,
+} from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Logo } from "../../components/logo";
 import "./contract.css";
 import { trpc } from "../../utils/trpc";
@@ -24,13 +39,103 @@ interface ContractScreenProps {
 
 const FACTS_SHOWN = 40;
 
+/** "[Add to cart, Add to cart, Add to cart]" -> "[Add to cart x3]" — display only. */
+function condenseLists(text: string): string {
+    return text.replace(/\[([^\]]+)\]/g, (_m, inner: string) => {
+        const items = String(inner).split(/,\s*/);
+        const counts = new Map<string, number>();
+        for (const it of items) counts.set(it, (counts.get(it) ?? 0) + 1);
+        const parts = [...counts.entries()].map(
+            ([name, n]) => (n > 1 ? `${name} \u00d7${n}` : name),
+        );
+        return `[${parts.join(", ")}]`;
+    }).replace(/\s*~\s*/g, " \u00b7 ");
+}
+
+interface LedgerEvent {
+    eventType: string;
+    occurredAt: number;
+    detail?: string | null;
+}
+
+/** Collapse runs of identical events ("verified" x11) into one ranged row. Input newest-first. */
+function groupLedgerEvents(
+    events: LedgerEvent[],
+): Array<LedgerEvent & { count: number; first: number; last: number }> {
+    const out: Array<LedgerEvent & { count: number; first: number; last: number }> = [];
+    for (const e of events) {
+        const prev = out[out.length - 1];
+        if (prev && prev.eventType === e.eventType) {
+            prev.count += 1;
+            prev.first = e.occurredAt;
+            if (!prev.detail) prev.detail = e.detail;
+        } else {
+            out.push({ ...e, count: 1, first: e.occurredAt, last: e.occurredAt });
+        }
+    }
+    return out;
+}
+
+/** Recede URLs inside evidence text so the prose reads first. */
+function dimUrls(text: string): ReactNode {
+    return text
+        .split(/(https?:\/\/\S+)/g)
+        .map((part, i) =>
+            /^https?:\/\//.test(part) ? (
+                <span key={i} className="c-url">
+                    {part}
+                </span>
+            ) : (
+                part
+            ),
+        );
+}
+
+/**
+ * Event-type glyphs. The ledger is a log, so it scans by symbol first and word
+ * second — the icon never replaces the label, it only reinforces it. Same
+ * shapes the history squares use, one size up.
+ */
+const EVENT_ICON: Record<string, LucideIcon> = {
+    minted: CirclePlus,
+    verified: CircleCheck,
+    violated: CircleX,
+    unverified: CircleDashed,
+    retired: Archive,
+    accepted: UserCheck,
+    rejected: UserX,
+    restored: RotateCcw,
+    forgotten: Trash2,
+};
+
+function EventMark({ type }: { type: string }) {
+    const Icon = EVENT_ICON[type] ?? CircleDashed;
+    return (
+        <Icon
+            className="c-event-icon"
+            size={12}
+            strokeWidth={2}
+            aria-hidden="true"
+        />
+    );
+}
+
+function absolute(ts: number): string {
+    return new Date(ts).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+}
+
 function timeAgo(ts: number | null | undefined): string {
-    if (!ts) return "never";
+    if (!ts) return "\u2014";
     const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
+    return s < 7 * 86400 ? `${Math.floor(s / 86400)}d ago` : absolute(ts!);
 }
 
 function Cmd({ flags, args }: { flags: string; args?: string }) {
@@ -109,11 +214,25 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
     const [expandedKey, setExpandedKey] = useState<string | null>(null);
     const [expandedFact, setExpandedFact] = useState<string | null>(null);
     const [factFilter, setFactFilter] = useState("");
-    const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "violated" | "unverified">(
-        "all",
+    const [statusFilter, setStatusFilterState] = useState<"all" | "verified" | "violated" | "unverified">(
+        () => {
+            const v = typeof localStorage !== "undefined" ? localStorage.getItem("raiken.lens.status") : null;
+            return v === "verified" || v === "violated" || v === "unverified" ? v : "all";
+        },
     );
-    const [reqTab, setReqTab] = useState<"attention" | "all">("attention");
+    const setStatusFilter = (t: "all" | "verified" | "violated" | "unverified") => {
+        setStatusFilterState(t);
+        try { localStorage.setItem("raiken.lens.status", t); } catch { /* private mode */ }
+    };
+    const [reqTab, setReqTabState] = useState<"attention" | "all">(
+        () => (typeof localStorage !== "undefined" && localStorage.getItem("raiken.lens.reqTab") === "all" ? "all" : "attention"),
+    );
+    const setReqTab = (t: "attention" | "all") => {
+        setReqTabState(t);
+        try { localStorage.setItem("raiken.lens.reqTab", t); } catch { /* private mode */ }
+    };
     const [actionNote, setActionNote] = useState<string | null>(null);
+    const [bannerFlash, setBannerFlash] = useState(false);
 
     const reviews = trpc.contractReviews.useQuery(
         { status: "pending" },
@@ -125,6 +244,12 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
             void utils.contractView.invalidate();
         },
     });
+    const forgetFact = trpc.contractForgetFact.useMutation({
+        onSettled: () => {
+            void utils.contractView.invalidate();
+            void utils.contractEvents.invalidate();
+        },
+    });
     const restoreReview = trpc.contractRestoreReview.useMutation({
         onSettled: () => {
             void utils.contractReviews.invalidate();
@@ -133,6 +258,9 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
         },
     });
     const [undoable, setUndoable] = useState<{ id: number } | null>(null);
+    const [confirmForget, setConfirmForget] = useState<string | null>(null);
+    const [copiedKey, setCopiedKey] = useState<string | null>(null);
+    const [hoverKey, setHoverKey] = useState<string | null>(null);
 
     const factEvents = trpc.contractEvents.useQuery(
         { factKey: expandedFact ?? undefined },
@@ -190,6 +318,10 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
             const pending = reviews.data ?? [];
             if (pending.length === 0) return;
             const k = e.key.toLowerCase();
+            if (k === "v") {
+                verify.mutate({});
+                return;
+            }
             if (k === "a") {
                 resolveReview.mutate({ reviewId: pending[0].id, accept: true });
                 setUndoable({ id: pending[0].id });
@@ -398,17 +530,19 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                               ? "gaps"
                               : "passing"}
                     </span>
-                    <span className="c-verdict-summary">
-                        {coverage.violated > 0
-                            ? `${coverage.violated} requirement(s) violated — accept the change or fix the app`
-                            : coverage.uncovered > 0
-                              ? `${coverage.uncovered} requirement(s) not yet observed — explore or capture`
-                              : "every requirement is backed by a verified fact"}
+                    <span className="c-verdict-text">
+                        <span className="c-verdict-msg">
+                            {coverage.violated > 0
+                                ? `${coverage.violated} requirement${coverage.violated === 1 ? "" : "s"} violated — accept the change or fix the app`
+                                : coverage.uncovered > 0
+                                  ? `${coverage.uncovered} requirement${coverage.uncovered === 1 ? "" : "s"} not yet observed — explore or capture`
+                                  : "every requirement is backed by a verified fact"}
+                        </span>
                         <span className="c-verdict-sub">
-                            {" "}· {coverage.covered}/{coverage.total} covered · checked{" "}
-                            {timeAgo(lastChecked)}
+                            {coverage.covered}/{coverage.total} covered · {observed.length} facts
                         </span>
                     </span>
+                    <span className="c-verdict-viz" title="daily verified/violated (7d) and recent events">
                     <span className="c-trend" aria-label="verified vs violated per day, last 7 days">
                         {(() => {
                             const days = Array.from({ length: 7 }, (_, i) => {
@@ -438,14 +572,15 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                             });
                         })()}
                     </span>
-                    <span className="c-verdict-spark" aria-label="recent verification history">
-                        {(recentEvents.data ?? []).slice(0, 40).reverse().map((e) => (
-                            <span
-                                key={`b-${e.id ?? e.occurredAt}`}
-                                className={`c-evsq c-evsq--${e.eventType}`}
-                                title={`${e.eventType} · ${timeAgo(e.occurredAt)}`}
-                            />
-                        ))}
+                        <span className="c-verdict-spark" aria-label="recent events, newest right">
+                            {(recentEvents.data ?? []).slice(0, 24).reverse().map((e) => (
+                                <span
+                                    key={`b-${e.id ?? e.occurredAt}`}
+                                    className={`c-evsq c-evsq--${e.eventType}`}
+                                    title={`${e.eventType} · ${absolute(e.occurredAt)}`}
+                                />
+                            ))}
+                        </span>
                     </span>
                 </div>
             ) : null}
@@ -464,7 +599,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                         {r.route} — {r.action}
                                     </span>
                                     <span className="c-review-expected">
-                                        expected: {r.expectedObservable}
+                                        expected: {condenseLists(r.expectedObservable)}
                                     </span>
                                     <span className="c-review-observed">{r.observed}</span>
                                 </span>
@@ -594,7 +729,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                             );
                                         })}
                                     </div>
-                                    <ul className="c-list">
+                                    <ul className={`c-list ${reqTab === "attention" ? "c-list--attention" : ""}`}>
                                         {(reqTab === "attention"
                                             ? coverage.entries.filter((e) => e.verdict !== "covered")
                                             : coverage.entries
@@ -612,6 +747,13 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                             setExpandedKey(isOpen ? null : entry.intent.requirementKey)
                                                         }
                                                         aria-expanded={isOpen}
+                                                        onMouseEnter={() => {
+                                                            window.setTimeout(
+                                                                () => setHoverKey(entry.intent.requirementKey),
+                                                                150,
+                                                            );
+                                                        }}
+                                                        onMouseLeave={() => setHoverKey(null)}
                                                     >
                                                         <span className="c-mark">
                                                             {entry.verdict === "covered"
@@ -640,6 +782,19 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                             ) : null}
                                                         </span>
                                                     </button>
+                                                    {hoverKey === entry.intent.requirementKey && !isOpen && entry.matches[0] ? (
+                                                        <span className="c-hovercard" role="tooltip">
+                                                            <span className="c-fact-route">
+                                                                {entry.matches[0].fact.route} · {Math.round(entry.matches[0].score * 100)}% match
+                                                            </span>
+                                                            <span className="c-fact-action">
+                                                                {dimUrls(entry.matches[0].fact.action)} → {condenseLists(entry.matches[0].fact.expectedObservable)}
+                                                            </span>
+                                                            <span className="c-fact-meta">
+                                                                {entry.matches[0].fact.status} · {Math.round(entry.matches[0].fact.confidence * 100)}% · {entry.matches[0].fact.verifiedCount}✓/{entry.matches[0].fact.violatedCount}✗
+                                                            </span>
+                                                        </span>
+                                                    ) : null}
                                                     {entry.verdict === "uncovered" ? (
                                                         <div className="c-req-actions">
                                                             <button
@@ -689,7 +844,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                                         </span>
                                                                         <span className="c-fact-action">
                                                                             {m.fact.action} →{" "}
-                                                                            {m.fact.expectedObservable}
+                                                                            {condenseLists(m.fact.expectedObservable)}
                                                                         </span>
                                                                         {m.fact.evidence?.snapshotExcerpt ? (
                                                                             <span className="c-evidence">
@@ -787,41 +942,169 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                             title={`${fact.status} · ${fact.verifiedCount} verified, ${fact.violatedCount} violated · confidence from verification history`}
                                         >
                                             <span className="c-dot" aria-hidden="true" />
-                                            <span className="c-conf">
-                                                {Math.round(fact.confidence * 100)}%
-                                            </span>
                                             <span className="c-fact-body">
-                                                <span className="c-fact-line">
-                                                    <span className="c-fact-action">{fact.action}</span>
-                                                    <span className="c-fact-arrow"> → </span>
+                                                <span className="c-fact-action">
+                                                    {dimUrls(fact.action)}
+                                                </span>
+                                                <span className="c-fact-out">
+                                                    <span className="c-fact-arrow" aria-hidden="true">
+                                                        →
+                                                    </span>
                                                     <span className="c-fact-obs">
-                                                        {fact.expectedObservable}
+                                                        {condenseLists(fact.expectedObservable)}
                                                     </span>
                                                 </span>
                                                 <span className="c-fact-meta">
-                                                    {fact.route}
-                                                    {fact.precondition ? ` · ${fact.precondition}` : ""}
-                                                    {" · "}
-                                                    {fact.verifiedCount}✓/{fact.violatedCount}✗ · checked{" "}
-                                                    {timeAgo(fact.lastVerifiedAt)}
+                                                    {fact.action.includes(fact.route) ? null : (
+                                                        <span className="c-fact-route">
+                                                            {fact.route}
+                                                        </span>
+                                                    )}
+                                                    {fact.precondition ? (
+                                                        <span className="c-fact-when">
+                                                            when {fact.precondition}
+                                                        </span>
+                                                    ) : null}
+                                                    <span
+                                                        className="c-counts"
+                                                        title={`${fact.verifiedCount} verified, ${fact.violatedCount} violated`}
+                                                    >
+                                                        <span
+                                                            className={`c-count ${fact.verifiedCount > 0 ? "c-count--ok" : "c-count--mute"}`}
+                                                        >
+                                                            {fact.verifiedCount}✓
+                                                        </span>
+                                                        <span
+                                                            className={`c-count ${fact.violatedCount > 0 ? "c-count--bad" : "c-count--mute"}`}
+                                                        >
+                                                            {fact.violatedCount}✗
+                                                        </span>
+                                                    </span>
+                                                    {Math.round(fact.confidence * 100) < 100 ? (
+                                                        <span className="c-fact-conf">
+                                                            {Math.round(fact.confidence * 100)}% confidence
+                                                        </span>
+                                                    ) : null}
+                                                    <span className="c-fact-checked">
+                                                        checked {timeAgo(fact.lastVerifiedAt)}
+                                                    </span>
                                                 </span>
                                             </span>
                                         </button>
                                         {isOpen ? (
                                             <div className="c-ledger">
+                                                <div className="c-ledger-head">
                                                 <span className="c-ledger-title">
-                                                    evidence ledger · {fact.factKey.slice(0, 12)}
+                                                    evidence ledger
+                                                </span>
+                                                <button
+                                                        type="button"
+                                                        className={`q-btn q-btn--sm ${confirmForget === fact.factKey ? "q-btn--danger" : "q-btn--ghost"}`}
+                                                        disabled={forgetFact.isPending}
+                                                        title="Remove this fact from the contract (junk/duplicate cleanup)"
+                                                        onClick={() => {
+                                                            if (confirmForget !== fact.factKey) {
+                                                                setConfirmForget(fact.factKey);
+                                                                return;
+                                                            }
+                                                            forgetFact.mutate(
+                                                                { factKey: fact.factKey },
+                                                                {
+                                                                    onSuccess: (r) => {
+                                                                        setConfirmForget(null);
+                                                                        setExpandedFact(null);
+                                                                        setActionNote(
+                                                                            r.forgotten
+                                                                                ? `fact ${fact.factKey.slice(0, 8)} forgotten`
+                                                                                : `cannot forget: ${r.reason}`,
+                                                                        );
+                                                                    },
+                                                                },
+                                                            );
+                                                        }}
+                                                    >
+                                                        {confirmForget === fact.factKey ? null : (
+                                                            <Trash2
+                                                                size={11}
+                                                                strokeWidth={2}
+                                                                aria-hidden="true"
+                                                            />
+                                                        )}
+                                                        {confirmForget === fact.factKey
+                                                            ? "confirm forget?"
+                                                            : "forget"}
+                                                    </button>
+                                                </div>
+                                                <span className="c-ledger-sub">
+                                                    key{" "}
+                                                    <button
+                                                        type="button"
+                                                        className="c-key-copy"
+                                                        title="copy the full fact key — paste into: raiken contract forget <key>"
+                                                        aria-label="copy fact key"
+                                                        onClick={() => {
+                                                            void navigator.clipboard
+                                                                .writeText(fact.factKey)
+                                                                .then(
+                                                                    () => {
+                                                                        setCopiedKey(fact.factKey);
+                                                                        window.setTimeout(
+                                                                            () => setCopiedKey(null),
+                                                                            1400,
+                                                                        );
+                                                                    },
+                                                                    () =>
+                                                                        setActionNote(
+                                                                            "clipboard unavailable",
+                                                                        ),
+                                                                );
+                                                        }}
+                                                    >
+                                                        <span className="c-ledger-key">
+                                                            {fact.factKey.slice(0, 12)}
+                                                        </span>
+                                                        {copiedKey === fact.factKey ? (
+                                                            <Check
+                                                                size={11}
+                                                                strokeWidth={2}
+                                                                aria-hidden="true"
+                                                            />
+                                                        ) : (
+                                                            <Copy
+                                                                size={11}
+                                                                strokeWidth={2}
+                                                                aria-hidden="true"
+                                                            />
+                                                        )}
+                                                    </button>
+                                                    {(factEvents.data ?? []).length > 0
+                                                        ? ` · ${(factEvents.data ?? []).length} event${(factEvents.data ?? []).length === 1 ? "" : "s"}`
+                                                        : ""}
                                                 </span>
                                                 {fact.evidence?.observedUrl ? (
-                                                    <span className="c-evidence">
-                                                        observed at {fact.evidence.observedUrl}
+                                                    <span className="c-event c-event--source">
+                                                        <span className="c-event-when">
+                                                            <Link2
+                                                                className="c-event-icon"
+                                                                size={11}
+                                                                strokeWidth={2}
+                                                                aria-hidden="true"
+                                                            />
+                                                            observed at
+                                                        </span>
+                                                        <span className="c-event-detail">
+                                                            {fact.evidence.observedUrl}
+                                                        </span>
                                                     </span>
                                                 ) : null}
-                                                {(factEvents.data ?? []).length > 0 ? (
+                                                {(factEvents.data ?? []).length > 12 ? (
                                                     <span
                                                         className="c-strip-events"
                                                         aria-label="verification history"
                                                     >
+                                                        <span className="c-strip-label">
+                                                            last {Math.min((factEvents.data ?? []).length, 12)}
+                                                        </span>
                                                         {(factEvents.data ?? [])
                                                             .slice(0, 12)
                                                             .reverse()
@@ -829,7 +1112,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                                 <span
                                                                     key={`sq-${e.id ?? e.occurredAt}`}
                                                                     className={`c-evsq c-evsq--${e.eventType}`}
-                                                                    title={`${e.eventType} · ${timeAgo(e.occurredAt)}`}
+                                                                    title={`${e.eventType} · ${absolute(e.occurredAt)}`}
                                                                 />
                                                             ))}
                                                     </span>
@@ -839,19 +1122,51 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                         no events recorded yet — verify to start the ledger
                                                     </span>
                                                 ) : (
-                                                    (factEvents.data ?? []).slice(0, 12).map((e) => (
-                                                        <span key={e.id ?? e.occurredAt} className="c-event">
-                                                            <span className="c-event-when">
-                                                                {timeAgo(e.occurredAt)}
+                                                    groupLedgerEvents(
+                                                        (factEvents.data ?? []).slice(0, 12),
+                                                    ).map((g) => (
+                                                        <span
+                                                            key={`${g.eventType}-${g.last}`}
+                                                            className="c-event"
+                                                        >
+                                                            <span className="c-event-head">
+                                                                <span
+                                                                    className="c-event-when"
+                                                                    title={
+                                                                        g.count > 1
+                                                                            ? `${g.count} events, ${absolute(g.first)} → ${absolute(g.last)}`
+                                                                            : absolute(g.last)
+                                                                    }
+                                                                >
+                                                                    {g.count > 1 &&
+                                                                    timeAgo(g.first) !== timeAgo(g.last)
+                                                                        ? `${timeAgo(g.first).replace(/ ago$/, "")}\u2013${timeAgo(g.last)}`
+                                                                        : timeAgo(g.last)}
+                                                                </span>
+                                                                <span
+                                                                    className={`c-event-type c-event-type--${g.eventType}`}
+                                                                >
+                                                                    <EventMark type={g.eventType} />
+                                                                    {g.eventType}
+                                                                    {g.count > 1 ? ` ×${g.count}` : ""}
+                                                                </span>
                                                             </span>
-                                                            <span
-                                                                className={`c-event-type c-event-type--${e.eventType}`}
-                                                            >
-                                                                {e.eventType}
-                                                            </span>
-                                                            <span className="c-event-detail">
-                                                                {e.detail ?? ""}
-                                                            </span>
+                                                            {g.detail ? (
+                                                                <span className="c-event-detail">
+                                                                    {dimUrls(
+                                                                        condenseLists(
+                                                                            g.detail.startsWith(
+                                                                                `${fact.route}: `,
+                                                                            )
+                                                                                ? g.detail.slice(
+                                                                                      fact.route.length +
+                                                                                          2,
+                                                                                  )
+                                                                                : g.detail,
+                                                                        ),
+                                                                    )}
+                                                                </span>
+                                                            ) : null}
                                                         </span>
                                                     ))
                                                 )}

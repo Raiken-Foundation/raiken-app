@@ -22,7 +22,7 @@
     height: 28px;
     padding: 0 0.875rem;
     background: var(--bg-bar);
-    border-bottom: 1px solid var(--hair);
+    border-bottom: 1px solid var(--rule);
     font-size: 11px;
     color: var(--ink-dim);
     flex-shrink: 0;
@@ -52,7 +52,7 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem;
-    padding: 1rem 1.25rem 3rem;
+    padding: 1rem 1.25rem 4.5rem;
     overflow-y: auto;
     align-items: start;
     min-height: 0;
@@ -75,7 +75,7 @@
     justify-content: space-between;
     padding: 0.5rem 0.75rem;
     background: var(--bg-bar);
-    border-bottom: 1px solid var(--hair);
+    border-bottom: 1px solid var(--rule);
     font-size: 11px;
     color: var(--ink-faint);
     letter-spacing: 0.04em;
@@ -156,15 +156,25 @@
 }
 
 .c-verdict {
+    position: relative;
     display: flex;
     gap: 0.625rem;
     align-items: baseline;
     padding: 0.4375rem 0;
-    border-bottom: 1px solid var(--hair-soft);
     font-size: 12px;
 }
-.c-verdict:last-child {
-    border-bottom: 0;
+.c-verdict::after {
+    content: "";
+    position: absolute;
+    left: 1.5rem;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: var(--rule);
+}
+.c-verdict:last-child::after,
+.c-verdict--open::after {
+    content: none;
 }
 
 .c-mark {
@@ -206,15 +216,26 @@
 /* ---------- Fact rows ---------- */
 
 .c-fact {
+    position: relative;
     display: flex;
-    gap: 0.625rem;
-    align-items: baseline;
+    flex-direction: column;
     padding: 0.4375rem 0;
-    border-bottom: 1px solid var(--hair-soft);
     font-size: 12px;
 }
-.c-fact:last-child {
-    border-bottom: 0;
+/* The row divider is inset to the text column so it never crosses the status
+   gutter, and it is suppressed on the open row: the ledger below is part of it. */
+.c-fact::after {
+    content: "";
+    position: absolute;
+    left: 1.25rem;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: var(--rule);
+}
+.c-fact:last-child::after,
+.c-fact--open::after {
+    content: none;
 }
 
 .c-dot {
@@ -222,7 +243,8 @@
     height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
-    align-self: center;
+    align-self: flex-start;
+    margin-top: 0.4rem;
     background: var(--ink-faint);
 }
 .c-fact--verified .c-dot {
@@ -235,16 +257,6 @@
     background: var(--warn);
 }
 
-.c-conf {
-    color: var(--accent);
-    font-size: 11.5px;
-    font-variant-numeric: tabular-nums;
-    font-weight: 500;
-    width: 3em;
-    text-align: right;
-    flex-shrink: 0;
-}
-
 .c-fact-body {
     display: flex;
     flex-direction: column;
@@ -252,16 +264,25 @@
     min-width: 0;
 }
 
-.c-fact-line {
+.c-url {
+    color: var(--ink-mute);
+}
+
+.c-fact-action {
+    display: block;
+    line-height: 1.4;
+}
+
+.c-fact-out {
     display: flex;
-    gap: 0;
+    gap: 0.375rem;
     align-items: baseline;
-    flex-wrap: wrap;
     min-width: 0;
 }
 
 .c-fact-arrow {
     color: var(--ink-faint);
+    flex-shrink: 0;
 }
 
 .c-fact-route {
@@ -474,12 +495,7 @@
     box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.c-verdict--open {
-    background: var(--bg-bar);
-    margin: 0 -0.5rem;
-    padding: 0 0.5rem;
-    border-bottom: 1px solid var(--hair);
-}
+
 
 .c-req-actions {
     display: flex;
@@ -534,9 +550,39 @@
 }
 
 .c-fact-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 0.5rem;
+    margin-top: 2px;
     color: var(--ink-faint);
-    font-size: 10.5px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
+}
+
+.c-counts {
+    font-weight: 600;
+}
+
+.c-fact-meta > * + *::before {
+    content: "· ";
+    color: var(--ink-mute);
+    margin-right: 0.25rem;
+}
+
+.c-counts {
+    display: inline-flex;
+    gap: 0.375rem;
+}
+
+.c-count--ok {
+    color: var(--pass);
+}
+.c-count--bad {
+    color: var(--fail);
+}
+.c-count--mute {
+    color: var(--ink-mute);
 }
 
 /* ---------- Facts toolbar ---------- */
@@ -555,18 +601,21 @@
 }
 
 .c-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
     background: transparent;
-    border: 1px solid var(--hair);
+    border: 1px solid transparent;
     color: var(--ink-dim);
     font-family: var(--mono);
     font-size: 10.5px;
-    padding: 1px 6px;
+    padding: 1px 7px;
     cursor: pointer;
     font-variant-numeric: tabular-nums;
 }
 .c-chip:hover {
     color: var(--ink);
-    border-color: var(--hair-strong);
+    background: var(--bg-hover);
 }
 .c-chip.is-active {
     color: var(--accent);
@@ -578,7 +627,7 @@
     flex: 1;
     min-width: 140px;
     background: var(--bg);
-    border: 1px solid var(--hair);
+    border: 1px solid var(--hair-strong);
     color: var(--ink);
     font-family: var(--mono);
     font-size: 11.5px;
@@ -612,42 +661,102 @@
     box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.c-fact--open {
-    background: var(--bg-bar);
-    margin: 0 -0.5rem;
-    padding: 0 0.5rem;
-    border-bottom: 1px solid var(--hair);
+.c-fact--open,
+.c-verdict--open {
+    background: color-mix(in srgb, var(--accent) 5%, var(--bg-elev));
+    box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* The open fact and its ledger are ONE region: the row's accent bar runs the
+   full height behind both, and the ledger's content aligns to the text column. */
 .c-ledger {
-    margin: 0 0 0 3.2rem;
-    border-left: 1px solid var(--hair-strong);
-    padding: 0.375rem 0.625rem;
+    position: relative;
+    margin: 0;
+    padding: 0.4375rem 0.625rem 0.5rem 1.25rem;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
+}
+
+/* Boundary between the fact and its evidence, inset like the row dividers. */
+.c-ledger::before {
+    content: "";
+    position: absolute;
+    left: 1.25rem;
+    right: 0.625rem;
+    top: 0;
+    height: 1px;
+    background: var(--rule);
 }
 .c-ledger-title {
     color: var(--ink-faint);
     font-size: 10px;
     letter-spacing: 0.05em;
+}
+
+.c-ledger-sub {
+    font-size: 10px;
+    color: var(--ink-faint);
     margin-bottom: 2px;
+}
+
+.c-key-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0 2px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--ink-mute);
+    font: inherit;
+    cursor: pointer;
+}
+
+.c-key-copy:hover {
+    color: var(--ink-dim);
+    border-color: var(--hair);
+}
+
+.c-key-copy:focus-visible {
+    outline: 0;
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.c-ledger-key {
+    color: inherit;
+    font-variant-numeric: tabular-nums;
 }
 .c-event {
     display: flex;
-    gap: 0.5rem;
-    align-items: baseline;
+    flex-direction: column;
+    gap: 1px;
     font-size: 11px;
+    padding: 2px 0;
 }
+
+.c-event-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 0.5rem;
+    align-items: baseline;
+}
+/* Timestamps and type labels stay on one line each — a phrase that breaks
+   ("1d ago –" / "2d ago") reads as two different events. */
 .c-event-when {
     color: var(--ink-faint);
-    width: 5.5em;
-    flex-shrink: 0;
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
 }
 .c-event-type {
-    width: 5.5em;
-    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+/* Icons sit on the text baseline, one size down from the label. */
+.c-event-icon {
+    display: inline-block;
+    vertical-align: -0.16em;
+    margin-right: 0.3125rem;
 }
 .c-event-type--verified { color: var(--pass); }
 .c-event-type--violated { color: var(--fail); }
@@ -656,6 +765,7 @@
 .c-event-detail {
     color: var(--ink-dim);
     overflow-wrap: anywhere;
+    line-height: 1.45;
 }
 
 /* ---------- Review queue (behavior changes awaiting a decision) ---------- */
@@ -671,7 +781,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 0.375rem 0.625rem;
-    border-bottom: 1px solid var(--hair);
+    border-bottom: 1px solid var(--rule);
     font-size: 11px;
     color: var(--warn);
     letter-spacing: 0.04em;
@@ -724,7 +834,7 @@
     align-items: baseline;
     gap: 0.625rem;
     padding: 0.5rem 1.25rem;
-    border-bottom: 1px solid var(--hair);
+    border-bottom: 1px solid var(--rule);
     flex-shrink: 0;
     font-family: var(--mono);
 }
@@ -828,7 +938,7 @@
 
 .c-verdict-banner {
     align-items: center;
-    border-bottom: 1px solid var(--hair);
+    border-bottom: 1px solid var(--rule);
     box-shadow: inset 0 -1px 0 var(--hair-lit);
 }
 .c-verdict-badge {
@@ -912,9 +1022,6 @@
 .c-fact--verified .c-dot {
     box-shadow: 0 0 6px -1px var(--pass);
 }
-.c-conf {
-    font-variant-numeric: tabular-nums;
-}
 
 /* History squares: jewel-like */
 
@@ -995,7 +1102,7 @@
 /* ---------- Triage tabs (Sentry-style reframing of one list) ---------- */
 
 .c-triage {
-    display: flex;
+    display: inline-flex; /* hugs its tabs — a segmented control, not an empty bar */
     gap: 0;
     border: 1px solid var(--hair);
     background: var(--bg-bar);
@@ -1007,16 +1114,15 @@
     gap: 0.4375rem;
     background: transparent;
     border: 0;
-    border-right: 1px solid var(--hair);
-    padding: 0.3125rem 0.75rem;
+    padding: 0.3125rem 0.8125rem;
     color: var(--ink-faint);
     font-family: var(--mono);
     font-size: 11px;
     cursor: pointer;
     transition: color var(--speed) var(--ease), background var(--speed) var(--ease);
 }
-.c-triage-tab:last-child {
-    border-right: 0;
+.c-triage-tab + .c-triage-tab {
+    border-left: 1px solid var(--rule);
 }
 .c-triage-tab:hover {
     color: var(--ink-dim);
@@ -1029,9 +1135,7 @@
 .c-triage-n {
     font-size: 10px;
     color: var(--ink-faint);
-    background: var(--bg-elev);
-    border: 1px solid var(--hair);
-    padding: 0 4px;
+    padding: 0;
     font-variant-numeric: tabular-nums;
 }
 .c-triage-tab.is-active .c-triage-n {
@@ -1080,3 +1184,126 @@
 }
 .c-event-type--restored { color: var(--info); }
 .c-evsq--restored { background: var(--info); border-color: var(--info); }
+
+.c-event-type--forgotten { color: var(--ink-faint); }
+.c-evsq--forgotten { background: var(--ink-mute); border-color: var(--ink-faint); }
+.c-ledger-title { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+/* ---------- Wave A/B cosmetics ---------- */
+
+.c-status-cell--tile {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+}
+.c-tile-trend {
+    display: inline-flex;
+    gap: 2px;
+}
+.c-tile-trend .c-evsq {
+    width: 5px;
+    height: 5px;
+    border-radius: 1px;
+}
+.c-status-kbd {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.375rem;
+}
+@keyframes c-banner-flash {
+    0% { filter: brightness(1.6); }
+    100% { filter: brightness(1); }
+}
+.c-verdict-banner--flash {
+    animation: c-banner-flash 700ms ease 1;
+}
+.c-list--attention .c-verdict--covered {
+    opacity: 0.62;
+    transition: opacity var(--speed, 120ms) ease;
+}
+.c-list--attention .c-verdict--covered:hover,
+.c-list--attention .c-verdict--covered:focus-within {
+    opacity: 1;
+}
+.c-hovercard {
+    position: absolute;
+    left: 1.85rem;
+    top: 100%;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 280px;
+    max-width: 420px;
+    padding: 0.5rem 0.625rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--hair-strong);
+    box-shadow: var(--shadow-pop, 0 12px 32px rgba(0, 0, 0, 0.35));
+    font-size: 11px;
+    pointer-events: none;
+}
+.c-verdict {
+    position: relative;
+}
+
+/* --- banner/ledger legibility pass (screenshot feedback) --- */
+.c-verdict-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.c-verdict-msg {
+    font-weight: 600;
+    line-height: 1.35;
+}
+.c-verdict-viz {
+    margin-left: auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+    padding-left: 0.75rem;
+    flex-shrink: 0;
+}
+.c-verdict-viz .c-trend,
+.c-verdict-viz .c-verdict-spark {
+    flex-shrink: 0;
+}
+.c-verdict-spark {
+    max-width: 176px;
+    overflow: hidden;
+}
+.c-ledger-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    margin-bottom: 2px;
+}
+.c-ledger-head .c-ledger-title {
+    display: inline;
+}
+.c-strip-label {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-right: 2px;
+}
+.c-event--source .c-event-when {
+    width: auto;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    color: var(--ink-faint);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.c-event--source .c-event-detail {
+    color: var(--ink-mute);
+    overflow-wrap: anywhere;
+}

@@ -27,7 +27,7 @@ export function QualityScreen() {
                 </span>
                 <span className="q-status-spacer" />
                 <span className="q-status-cell q-status-cell--muted">
-                    <span>5 tools</span>
+                    <span>{TOOLS.length} tools</span>
                 </span>
             </header>
 

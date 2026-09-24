@@ -43,6 +43,7 @@ interface ContractOptions {
  *   history     evidence ledger: mint/verify/violate timeline per fact
  *   review      accept or reject behavior changes found by verify
  *   search      find facts/requirements by keyword
+ *   forget      remove a junk or duplicate fact by key
  *   watch       verify on a schedule; webhook alerts on new regressions
  */
 export async function contractCommand(
@@ -82,6 +83,10 @@ export async function contractCommand(
                     )}%${lowest ? ` (${lowest.route}: ${lowest.action.slice(0, 48)})` : ""}`,
                 );
             }
+            for (const f of view.observed.slice(0, 8)) {
+                console.log(`    ${f.factKey.slice(0, 8)}  ${f.route} — ${f.action.slice(0, 46)}`);
+            }
+            if (view.observed.length > 8) console.log(dim(`    … ${view.observed.length - 8} more (raiken contract show --json)`));
             console.log(`  Requirements:     ${view.intent.length}`);
             if (view.coverage) {
                 const c = view.coverage;
@@ -155,6 +160,15 @@ export async function contractCommand(
         }
 
         case "capture": {
+            const args = (options as Record<string, unknown>)["args"] as string[] | undefined;
+            const givenUrl = (args ?? []).find((a) => /^https?:\/\//i.test(a));
+            if (givenUrl) {
+                console.log(
+                    chalk.yellow(
+                        `\n  note: capture works from discovered site knowledge, not a live URL — \`${givenUrl}\` is ignored.`,
+                    ) + chalk.yellow("\n  To capture a different app, run `raiken discover <url>` first.\n"),
+                );
+            }
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             console.log(chalk.cyan("\n  Capturing form states (empty-submit probing)…\n"));
             const result = await contract.capture({ storageStatePath });
@@ -279,11 +293,20 @@ export async function contractCommand(
                     String((options as Record<string, unknown>)["base"] ?? "HEAD"),
                 );
             }
+            if (contract.view().observed.length === 0) {
+                console.log(
+                    dim("\n  Nothing to verify yet — the contract has no facts.\n") +
+                        dim("  Run `raiken contract capture` (after `raiken discover <url>`) to observe the app.\n"),
+                );
+                return;
+            }
             console.log(chalk.cyan("\n  Verifying contract facts…\n"));
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
+            const opts0 = options as Record<string, unknown>;
             const result = await contract.verify({
                 changedFiles,
-                verifyAll: Boolean((options as Record<string, unknown>)["all"]),
+                verifyAll: Boolean(opts0["all"]),
+                baseURL: (opts0["base-url"] as string | undefined) ?? null,
                 storageStatePath,
             });
             const violations = contract.violationsReport(result.verdicts);
@@ -321,7 +344,11 @@ export async function contractCommand(
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
             const outDir = String((options as Record<string, unknown>)["out"] ?? ".raiken/materialized");
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
-            const result = contract.materialize({ outDir, storageStatePath });
+            const result = contract.materialize({
+                outDir,
+                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                storageStatePath,
+            });
             console.log(
                 chalk.green(
                     `\n  ✓ ${result.testCount} spec(s) materialized → ${result.specPath}${
@@ -338,6 +365,10 @@ export async function contractCommand(
                 process.stdout.write(`${JSON.stringify(sourceRoutes, null, 2)}\n`);
                 return;
             }
+            if (sourceRoutes.length === 0) {
+                console.log(dim("\n  No source routes found. Source extraction supports Next.js app-dir and React Router; run `raiken index` first if the project has not been scanned.\n"));
+                return;
+            }
             console.log(chalk.cyan(`\n  Source routes (${sourceRoutes.length})\n`));
             for (const route of sourceRoutes.slice(0, 20)) {
                 console.log(
@@ -352,7 +383,10 @@ export async function contractCommand(
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             console.log(chalk.cyan("\n  Snapshotting known routes…\n"));
-            const result = await contract.snapshotRoutes({ storageStatePath });
+            const result = await contract.snapshotRoutes({
+                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                storageStatePath,
+            });
             console.log(
                 chalk.green(
                     `  ✓ ${result.captured.length}/${result.total} routes captured (${Math.round(result.coverage * 100)}% checklist coverage, ${result.sources} from source)`,
@@ -393,12 +427,33 @@ export async function contractCommand(
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             console.log(chalk.cyan("\n  Recording API reads across known routes…\n"));
-            const result = await contract.record({ storageStatePath });
+            const result = await contract.record({
+                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                storageStatePath,
+            });
             console.log(
                 chalk.green(`  ✓ ${result.recorded} GET endpoint(s) recorded → ${result.filePath}\n`),
             );
             console.log(dim("  Materialized specs will replay these as page.route() mocks."));
             console.log("");
+            return;
+        }
+
+        case "forget": {
+            const args = (options as Record<string, unknown>)["args"] as string[] | undefined;
+            const key = (args ?? [])[0];
+            if (!key) {
+                console.error(
+                    chalk.red("\n  Provide a fact key: raiken contract forget <factKey> (see `raiken contract show`)\n"),
+                );
+                cliExit(CLI_EXIT.USAGE);
+            }
+            const result = contract.forgetFact(key);
+            console.log(
+                result.forgotten
+                    ? chalk.green(`\n  \u2713 fact ${key.slice(0, 8)} forgotten — removed from the contract and the ledger notes it\n`)
+                    : chalk.red(`\n  \u2717 cannot forget: ${result.reason}\n`),
+            );
             return;
         }
 
@@ -535,7 +590,12 @@ export async function contractCommand(
             let previous = new Map<string, string>();
             const runOnce = async (): Promise<void> => {
                 try {
-                    const result = await contract.verify({ verifyAll: true, storageStatePath });
+                    const optsW = options as Record<string, unknown>;
+                    const result = await contract.verify({
+                        verifyAll: true,
+                        baseURL: (optsW["base-url"] as string | undefined) ?? null,
+                        storageStatePath,
+                    });
                     const statusByKey = new Map(
                         contract.view().observed.map((f) => [f.factKey, f.status]),
                     );

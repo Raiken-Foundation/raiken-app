@@ -95,7 +95,7 @@ export interface FactReview {
 export interface FactEvent {
     id?: number;
     factKey: string;
-    eventType: "minted" | "verified" | "violated" | "unverified" | "retired" | "accepted" | "rejected" | "restored";
+    eventType: "minted" | "verified" | "violated" | "unverified" | "retired" | "accepted" | "rejected" | "restored" | "forgotten";
     detail?: string;
     occurredAt: number;
 }

@@ -268,6 +268,27 @@ export class ContractStore {
         }));
     }
 
+    /** Remove a junk/duplicate fact from the contract. Refuses when a
+     *  never-regress requirement depends on it. Logs a 'forgotten' event. */
+    forgetFact(factKey: string): { forgotten: boolean; reason?: string } {
+        const fact = this.getBehaviorFactByKey(factKey);
+        if (!fact?.id) return { forgotten: false, reason: "no such fact" };
+        const guard = this.listIntentFacts().find(
+            (i) => i.matchedFactId === fact.id && i.neverRegress,
+        );
+        if (guard) {
+            return {
+                forgotten: false,
+                reason: `locked by never-regress requirement "${guard.requirementText.slice(0, 60)}"`,
+            };
+        }
+        this.adapter.db
+            .prepare(`DELETE FROM behavior_facts WHERE project_path = ? AND fact_key = ?`)
+            .run(this.adapter.projectPath, factKey);
+        this.logFactEvent(factKey, "forgotten", `${fact.route}: ${fact.action}`);
+        return { forgotten: true };
+    }
+
     /** Undo an accepted review: bring the retired fact back (it re-verifies
      *  on the next cycle and may re-violate — honestly). */
     restoreReview(reviewId: number): boolean {

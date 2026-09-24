@@ -109,7 +109,7 @@ export class ProjectContext {
      */
     async initialize(verbose = true): Promise<void> {
         const log = (...args: unknown[]) => {
-            if (verbose) console.log(...args);
+            if (verbose) console.error(...args);
         };
 
         if (this.initialized) {
@@ -272,7 +272,7 @@ export class ProjectContext {
      */
     async ensureFreshContext(query: string, changedFiles?: string[]): Promise<ContextValidation> {
         if (!this.initialized) {
-            await this.initialize();
+            await this.initialize(false);
         }
 
         const validation = this.validateContext(query, changedFiles);
@@ -397,7 +397,7 @@ export class ProjectContext {
      */
     async refresh(changedFiles?: string[]): Promise<void> {
         if (!this.initialized || !this.graph) {
-            await this.initialize();
+            await this.initialize(false);
             return;
         }
 

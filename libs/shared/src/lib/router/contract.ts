@@ -35,6 +35,10 @@ export const contractRouter = {
             appFor(ctx).contract.resolveReview(input.reviewId, input.accept),
         ),
 
+    contractForgetFact: procedure
+        .input(z.object({ factKey: z.string() }))
+        .mutation(({ input, ctx }) => appFor(ctx).contract.forgetFact(input.factKey)),
+
     contractRestoreReview: procedure
         .input(z.object({ reviewId: z.number() }))
         .mutation(({ input, ctx }) => appFor(ctx).contract.restoreReview(input.reviewId)),

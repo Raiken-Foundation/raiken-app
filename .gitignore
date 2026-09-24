@@ -72,3 +72,6 @@ reports/
 
 # Local dependency store
 .pnpm-store/
+
+# Playground QA output (generated Playwright reports, not source)
+/tools/playground-notes/test-reports/

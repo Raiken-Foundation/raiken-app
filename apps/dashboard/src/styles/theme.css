@@ -12,16 +12,22 @@
     --bg-hover: #181818;
     --bg-sunken: #060606;
 
-    /* ---- Hairlines ---- */
-    --hair: #1c1c1c;
-    --hair-soft: #161616;
-    --hair-strong: #2a2a2a;
+    /* ---- Hairlines: three weights, one job each. Alpha-white so a line
+       composites identically on every surface (bg / bg-bar / bg-elev).
+         --rule        row + chrome dividers — the quietest line
+         --hair        container outlines and section heads
+         --hair-strong state: focus, the open row, editable fields
+       --hair-soft is the legacy alias for --rule. ---- */
+    --rule: rgba(255, 255, 255, 0.055);
+    --hair: rgba(255, 255, 255, 0.1);
+    --hair-strong: rgba(255, 255, 255, 0.16);
+    --hair-soft: var(--rule);
 
     /* ---- Ink ---- */
     --ink: #d4d4d4;
     --ink-strong: #f0f0f0;
     --ink-dim: #8a8a8a;
-    --ink-faint: #5a5a5a;
+    --ink-faint: #7f7f7f; /* measured 4.8:1 on --bg, 4.6:1 on --bg-elev — WCAG AA (was #5a5a5a, 2.87:1) */
     --ink-mute: #3a3a3a;
 
     /* ---- Accent: Raiken purple ---- */
@@ -617,6 +623,7 @@ button {
 .q-btn--sm {
     padding: 0.25rem 0.5rem;
     font-size: 11px;
+    min-height: 24px; /* measured hit-target floor */
 }
 .q-btn svg {
     width: 12px;
@@ -671,8 +678,8 @@ button {
     padding: 0;
     margin: 0 0 0.75rem;
     background: transparent;
-    border-top: 1px solid var(--hair);
-    border-bottom: 1px solid var(--hair);
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
     font-family: var(--mono);
     font-size: 11px;
 }
@@ -681,7 +688,7 @@ button {
     align-items: baseline;
     gap: 0.375rem;
     padding: 0.4375rem 0.75rem;
-    border-right: 1px solid var(--hair);
+    border-right: 1px solid var(--rule);
     font-variant-numeric: tabular-nums;
 }
 .q-strip-val {

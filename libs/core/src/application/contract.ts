@@ -19,8 +19,12 @@ import {
     mintFromSiteKnowledge,
     parseRequirementsFile,
     parseTicketRequirements,
+    extractRouteBindings,
+    loadDependentsGraph,
     scopeFactsByChanges,
+    scopeFactsByImpact,
     verifyFacts,
+    type BehaviorFact,
     type CaptureResult,
     type CaptureRoute,
     type ContractDiff,
@@ -32,6 +36,15 @@ import { ContractStore } from "../contract/store";
 import { notFoundError } from "../errors";
 import type { ResolvedAIConfig } from "../agent/ai-providers";
 import type { ProjectApplicationContext } from "./context";
+
+export interface ContractScope {
+    /** graph: graft code graph + route map · names: file-name matching · all: --all */
+    scoper: "graph" | "names" | "all";
+    scoped: BehaviorFact[];
+    reasons: Array<{ factKey: string; reason: string }>;
+    globalReason: string | null;
+    unmapped: string[];
+}
 
 /**
  * Contract application service — the two-sided behavior contract scoped to a
@@ -267,7 +280,7 @@ export class ContractApplication implements ProjectApplicationContext {
         changedFiles?: string[];
         verifyAll?: boolean;
         storageStatePath?: string | null;
-    }): Promise<{ verdicts: FactVerdict[]; scoped: number; total: number }> {
+    }): Promise<{ verdicts: FactVerdict[]; scoped: number; total: number; scope: ContractScope }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
         const baseURL =
             input.baseURL ??
@@ -280,15 +293,15 @@ export class ContractApplication implements ProjectApplicationContext {
         // able to return to verified when the app is fixed, not vanish from
         // the check set the moment it fails.
         const allFacts = this.withStore((store) => store.listBehaviorFacts());
-        const scoped = input.verifyAll
-            ? { scoped: allFacts, global: true }
-            : scopeFactsByChanges(allFacts, input.changedFiles ?? []);
-        if (scoped.scoped.length === 0) {
-            return { verdicts: [], scoped: 0, total: allFacts.length };
+        const scope = input.verifyAll
+            ? { scoper: "all" as const, scoped: allFacts, reasons: [], globalReason: "--all", unmapped: [] }
+            : this.scope(allFacts, input.changedFiles ?? []);
+        if (scope.scoped.length === 0) {
+            return { verdicts: [], scoped: 0, total: allFacts.length, scope };
         }
         const verdicts = await verifyFacts({
             baseURL,
-            facts: scoped.scoped,
+            facts: scope.scoped,
             storageStatePath: input.storageStatePath ?? null,
         });
         // Persist verdicts and cascade violated status to matched intents.
@@ -322,7 +335,47 @@ export class ContractApplication implements ProjectApplicationContext {
                 }
             }
         });
-        return { verdicts, scoped: scoped.scoped.length, total: allFacts.length };
+        return { verdicts, scoped: scope.scoped.length, total: allFacts.length, scope };
+    }
+
+    /**
+     * Which facts can this change reach? With a graft code graph the answer
+     * is structural (changed file → dependents → route component → facts) and
+     * each fact carries the path that put it in scope; without one, fall back
+     * to matching changed-file names against routes.
+     */
+    scope(facts: BehaviorFact[], changedFiles: string[]): ContractScope {
+        const graph = loadDependentsGraph(this.projectPath);
+        if (graph) {
+            const bindings = extractRouteBindings(this.projectPath);
+            if (bindings.length > 0) {
+                const impact = scopeFactsByImpact({
+                    projectPath: this.projectPath,
+                    facts,
+                    changedFiles,
+                    bindings,
+                    graph,
+                });
+                return {
+                    scoper: "graph",
+                    scoped: impact.scoped,
+                    reasons: impact.scoped.map((f) => ({
+                        factKey: f.factKey,
+                        reason: impact.reasons.get(f.factKey) ?? "",
+                    })),
+                    globalReason: impact.globalReason,
+                    unmapped: impact.unmapped,
+                };
+            }
+        }
+        const byName = scopeFactsByChanges(facts, changedFiles);
+        return {
+            scoper: "names",
+            scoped: byName.scoped,
+            reasons: [],
+            globalReason: byName.global ? "a global file changed" : null,
+            unmapped: [],
+        };
     }
 
     /** Business-language violation lines: fact + ticket/AC provenance. */

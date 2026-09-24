@@ -1,4 +1,4 @@
-import { createProjectApplication, resolveAuthStorageStatePath } from "@raiken/core";
+import { type ContractScope, createProjectApplication, resolveAuthStorageStatePath } from "@raiken/core";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
 import { CLI_EXIT } from "../errors";
@@ -283,6 +283,26 @@ export async function contractCommand(
             return;
         }
 
+        case "scope": {
+            // Dry run of verify's scoping: which facts would this change re-check, and why.
+            const opts0 = options as Record<string, unknown>;
+            const { getChangedFiles } = await import("../git-changed");
+            const changedFiles = await getChangedFiles(projectPath, String(opts0["base"] ?? "HEAD"));
+            const scope = contract.scope(contract.view().observed, changedFiles);
+            if (opts0["json"]) {
+                process.stdout.write(
+                    `${JSON.stringify({ changedFiles, ...scope, scoped: scope.scoped.map((f) => f.factKey) }, null, 2)}\n`,
+                );
+                return;
+            }
+            console.log(chalk.cyan("\n  Contract scope\n"));
+            console.log(`  Changed files:    ${changedFiles.length}`);
+            console.log(`  Facts in scope:   ${scope.scoped.length}/${contract.view().observed.length}`);
+            printScope(scope);
+            console.log("");
+            return;
+        }
+
         case "verify": {
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
             let changedFiles: string[] | undefined;
@@ -327,6 +347,7 @@ export async function contractCommand(
             console.log(
                 `  ${verifiedCount} verified · ${violations.length} violated · ${unverifiedCount} unverified  (${result.scoped}/${result.total} facts in scope)`,
             );
+            printScope(result.scope);
             const format = String((options as Record<string, unknown>)["format"] ?? "");
             for (const v of violations) {
                 if (format === "github") {
@@ -661,5 +682,17 @@ export async function contractCommand(
             dim("     search | explore | materialize | routes | snapshot | record | watch\n"),
             );
             cliExit(CLI_EXIT.USAGE);
+    }
+}
+
+function printScope(scope: ContractScope): void {
+    const label = { graph: "code graph (graft)", names: "file names (no graft graph found)", all: "--all" }[scope.scoper];
+    console.log(dim(`  Scoped by ${label}`));
+    if (scope.globalReason) console.log(dim(`  Whole contract in scope: ${scope.globalReason}`));
+    const seen = new Set<string>();
+    for (const { reason } of scope.reasons) {
+        if (!reason || seen.has(reason) || scope.globalReason) continue;
+        seen.add(reason);
+        console.log(dim(`    ${reason}`));
     }
 }

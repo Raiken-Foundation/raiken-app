@@ -3,6 +3,7 @@ export * from "./capture";
 export * from "./coverage";
 export * from "./exporter";
 export * from "./explore";
+export * from "./impact";
 export * from "./intent";
 export * from "./materialize";
 export * from "./mint";

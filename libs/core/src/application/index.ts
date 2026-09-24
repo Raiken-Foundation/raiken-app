@@ -27,6 +27,7 @@ import {
 import { TestingApplication } from "./testing";
 
 export type { ProjectApplicationContext } from "./context";
+export type { ContractScope } from "./contract";
 export { assertUnderProjectRoot, writeFileAtomic } from "./paths";
 export {
     ChatApplication,

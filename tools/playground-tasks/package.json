@@ -1,0 +1,32 @@
+{
+    "name": "@raiken/playground-tasks",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Task manager fixture — auth-walled SPA that simulates NextAuth middleware for testing raiken discover auth-wall detection, post-auth page discovery, and grounded task-management flows",
+    "scripts": {
+        "dev": "vite",
+        "build": "pnpm typecheck && vite build",
+        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+        "serve": "node server.mjs",
+        "raiken": "raiken start",
+        "test:e2e": "playwright test auth-flow.spec.ts",
+        "test:e2e:ui": "playwright test --ui",
+        "test:e2e:debug": "playwright test --debug",
+        "test:e2e:headed": "playwright test --headed"
+    },
+    "dependencies": {
+        "react": "^19.2.0",
+        "react-dom": "^19.2.0",
+        "react-router-dom": "^7.18.1"
+    },
+    "devDependencies": {
+        "@playwright/test": "^1.57.0",
+        "@types/node": "^24.10.1",
+        "@types/react": "^19.2.7",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^4.3.4",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11"
+    }
+}

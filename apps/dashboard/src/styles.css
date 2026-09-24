@@ -1,17 +1,64 @@
 @import "tailwindcss";
+@import "./styles/theme.css";
 
-/* You can add global styles to this file, and also import other style files */
-
+html,
 body {
     margin: 0;
-    font-family:
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        Roboto,
-        "Helvetica Neue",
-        Arial,
-        sans-serif;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    color-scheme: dark;
+}
+
+#root {
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--ink);
+}
+
+/* Anything that wants the dev-tool monospace look opts in */
+.font-mono,
+code,
+pre,
+kbd,
+samp {
+    font-family: var(--mono);
+}
+
+/* Live agent activity trail (what the agent is doing during a run) */
+.agent-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.activity-trail {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+}
+.activity-trail li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    opacity: 0.55;
+}
+.activity-trail li::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+}
+.activity-trail li.activity-current {
+    opacity: 1;
+    font-weight: 500;
 }

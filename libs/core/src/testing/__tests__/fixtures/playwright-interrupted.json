@@ -1,0 +1,24 @@
+{
+    "stats": { "expected": 0, "unexpected": 1, "skipped": 0, "duration": 1500 },
+    "suites": [
+        {
+            "title": "auth.spec.ts",
+            "specs": [
+                {
+                    "title": "signs in",
+                    "tests": [
+                        {
+                            "results": [
+                                {
+                                    "status": "interrupted",
+                                    "duration": 200,
+                                    "error": { "message": "Test interrupted" }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

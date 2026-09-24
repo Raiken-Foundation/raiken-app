@@ -1,0 +1,356 @@
+/* ── Tables ── */
+.discovery-view .table-wrap {
+    overflow: auto;
+    max-height: 440px;
+    border: 1px solid var(--hair);
+}
+
+.discovery-view table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    font-family: var(--mono);
+}
+
+.discovery-view th,
+.discovery-view td {
+    border-bottom: 1px solid var(--hair-soft);
+    text-align: left;
+    padding: 0.375rem 0.5rem;
+}
+
+.discovery-view th {
+    color: var(--ink-faint);
+    font-weight: 500;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+    background: var(--bg-bar);
+    border-bottom: 1px solid var(--hair);
+}
+
+.discovery-view td {
+    color: var(--ink);
+}
+
+.discovery-view tbody tr:hover td {
+    background: var(--bg-hover);
+}
+
+.discovery-view .url-cell {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent);
+}
+
+.discovery-view .empty,
+.discovery-view .empty-cell {
+    color: var(--ink-faint);
+    font-size: 11.5px;
+    font-style: normal;
+}
+
+.discovery-view .table-wrap td.empty-cell {
+    text-align: center;
+    padding: 1rem;
+}
+
+.discovery-view .page-actions {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+}
+
+.discovery-view .table-action {
+    all: unset;
+    padding: 2px 6px;
+    border: 1px solid var(--hair-strong);
+    background: var(--bg);
+    color: var(--ink-dim);
+    font-size: 10.5px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--mono);
+}
+
+.discovery-view .table-action:hover {
+    background: var(--bg-hover);
+    color: var(--ink);
+}
+
+.discovery-view a.table-link {
+    all: revert;
+    padding: 2px 6px;
+    border: 1px solid var(--hair-strong);
+    background: var(--bg);
+    color: var(--ink-dim);
+    font-size: 10.5px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    font-family: var(--mono);
+}
+
+.discovery-view a.table-link:hover {
+    background: var(--bg-hover);
+    color: var(--ink);
+}
+
+.discovery-view .table-action.generate {
+    background: transparent;
+    border-color: var(--accent-dim);
+    color: var(--accent);
+}
+
+.discovery-view .table-action.generate:hover {
+    background: var(--accent-dim);
+}
+
+.discovery-view .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.625rem;
+    padding-top: 0.4375rem;
+    border-top: 1px solid var(--hair);
+}
+
+.discovery-view .page-info {
+    font-size: 11px;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Snapshot ── */
+.discovery-view .snapshot-drawer {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4375rem;
+    margin-top: 0.625rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--hair);
+}
+
+.discovery-view .snapshot-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.discovery-view .snapshot-title {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--accent);
+    text-transform: lowercase;
+}
+
+.discovery-view .snapshot-title::before {
+    content: "$ ";
+    color: var(--ink-mute);
+}
+
+.discovery-view .snapshot-close {
+    all: unset;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--ink-faint);
+    padding: 0 0.25rem;
+}
+
+.discovery-view .snapshot-close:hover {
+    color: var(--ink);
+}
+
+.discovery-view .snapshot-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.625rem;
+    font-size: 11px;
+    color: var(--ink-faint);
+}
+
+.discovery-view .snapshot-pre {
+    margin: 0;
+    padding: 0.5rem 0.625rem;
+    border: 1px solid var(--hair);
+    background: var(--bg-sunken);
+    color: var(--ink);
+    font-size: 11px;
+    line-height: 1.5;
+    overflow: auto;
+    max-height: 320px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--mono);
+}
+
+/* ── Results sub-tabs ── */
+.discovery-view .results-sub-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--hair);
+    margin: -0.875rem -0.875rem 0;
+    padding: 0 0.875rem;
+    background: var(--bg-bar);
+}
+
+.discovery-view .results-sub-tab {
+    all: unset;
+    padding: 0.4375rem 0.75rem;
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    cursor: pointer;
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.3125rem;
+    font-family: var(--mono);
+}
+
+.discovery-view .results-sub-tab:hover {
+    color: var(--ink-dim);
+}
+
+.discovery-view .results-sub-tab.active {
+    color: var(--ink);
+}
+
+.discovery-view .results-sub-tab.active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: var(--accent);
+}
+
+.discovery-view .sub-badge {
+    font-size: 10px;
+    background: var(--bg);
+    color: var(--ink-faint);
+    border: 1px solid var(--hair);
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.discovery-view .sub-badge.good {
+    border-color: rgba(111, 184, 111, 0.3);
+    color: var(--pass);
+    background: var(--pass-soft);
+}
+
+.discovery-view .sub-badge.bad {
+    border-color: rgba(215, 92, 92, 0.3);
+    color: var(--fail);
+    background: var(--fail-soft);
+}
+
+.discovery-view .results-sub-tab.active .sub-badge {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.discovery-view .dv-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+}
+
+/* ── Links ── */
+.discovery-view .links-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.discovery-view .link-row {
+    padding: 0.4375rem 0.5rem;
+    border-bottom: 1px solid var(--hair-soft);
+    font-family: var(--mono);
+}
+
+.discovery-view .link-row:hover {
+    background: var(--bg-hover);
+}
+
+.discovery-view .link-row.broken {
+    border-left: 2px solid var(--fail);
+}
+
+.discovery-view .link-path {
+    display: flex;
+    align-items: center;
+    gap: 0.4375rem;
+    font-size: 11.5px;
+}
+
+.discovery-view .link-from,
+.discovery-view .link-to {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.discovery-view .link-from {
+    color: var(--ink-faint);
+    max-width: 40%;
+}
+
+.discovery-view .link-to {
+    color: var(--ink);
+    flex: 1;
+    min-width: 0;
+}
+
+.discovery-view .link-to.broken-url {
+    color: var(--fail);
+    text-decoration: line-through;
+}
+
+.discovery-view .link-arrow {
+    width: 0.75rem;
+    height: 0.75rem;
+    color: var(--ink-mute);
+    flex-shrink: 0;
+}
+
+.discovery-view .link-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4375rem;
+    margin-top: 0.1875rem;
+    flex-wrap: wrap;
+}
+
+.discovery-view .link-selector {
+    font-size: 10.5px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-dim);
+    padding: 1px 5px;
+    font-family: var(--mono);
+}
+
+.discovery-view .link-text {
+    font-size: 10.5px;
+    color: var(--ink-faint);
+}
+
+.discovery-view .link-error {
+    display: block;
+    margin-top: 0.1875rem;
+    font-size: 10.5px;
+    color: var(--fail);
+}

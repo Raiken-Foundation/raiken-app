@@ -1,0 +1,19 @@
+title = "Raiken secret scan"
+
+# Default vendor rules (AWS, GitHub, OpenAI, ...) plus the Raiken-specific
+# rule below: raiken.config.json must hold env-resolved placeholders, never
+# literal provider keys. A literal DeepSeek key in a committed fixture
+# config is what motivated this scan.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "raiken-config-literal-api-key"
+description = "Literal AI provider API key in raiken.config.json (use an env var instead)"
+path = '''raiken\.config\.json'''
+regex = '''"(?:apiKey|openrouter|openai|anthropic|google|groq|mistral|deepseek|xai|together|perplexity|custom)"\s*:\s*"[^"]{12,}"'''
+
+# "${ENV_VAR}" placeholders are the sanctioned shape.
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = ['''"\w+"\s*:\s*"\$\{[A-Z0-9_]+\}"''']

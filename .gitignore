@@ -7,6 +7,8 @@ out-tsc
 
 # dependencies
 node_modules
+# This workspace is pnpm-only; nested npm lockfiles are accidental.
+tools/**/package-lock.json
 
 # IDEs and editors
 /.idea
@@ -18,11 +20,7 @@ node_modules
 *.sublime-workspace
 
 # IDE - VSCode
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+.vscode/
 
 # misc
 /.sass-cache
@@ -38,13 +36,42 @@ testem.log
 .DS_Store
 Thumbs.db
 
-.nx/cache
-.nx/workspace-data
+.nx/
+.vscode/
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
 vite.config.*.timestamp*
 vitest.config.*.timestamp*
-# Raiken analysis cache
+# Raiken runtime data
 .raiken/
+raiken.config.json
+storage/
 .env
+
+raiken.ctx.md
+
+# Playwright and test runner output
+playwright-report/
+**/playwright-report/
+# Playwright OUTPUT dirs, anchored to the root — an unanchored "test-results/"
+# would also swallow the dashboard SOURCE dir
+# apps/dashboard/src/components/test-results/ (it did, once).
+/test-results/
+/test-reports/
+
+# Generated exploratory tests
+**/tests/generated/
+**/e2e/generated/
+
+# Stryker mutation testing
+.stryker-tmp/
+reports/
+
+.local
+
+# Local dependency store
+.pnpm-store/
+
+# Playground QA output (generated Playwright reports, not source)
+/tools/playground-notes/test-reports/

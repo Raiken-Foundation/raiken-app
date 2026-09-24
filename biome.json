@@ -6,6 +6,22 @@
         "indentWidth": 4,
         "lineWidth": 100
     },
+    "files": {
+        "includes": [
+            "**",
+            "!**/node_modules",
+            "!**/dist",
+            "!**/tmp",
+            "!**/.nx",
+            "!**/.stryker-tmp",
+            "!**/.pnpm-store",
+            "!**/reports",
+            "!**/.raiken",
+            "!**/coverage",
+            "!**/test-results",
+            "!**/playwright-report"
+        ]
+    },
     "linter": {
         "enabled": true,
         "rules": {
@@ -19,5 +35,17 @@
     },
     "json": {
         "formatter": {}
-    }
+    },
+    "overrides": [
+        {
+            "includes": ["libs/core/**", "libs/shared/**"],
+            "linter": {
+                "rules": {
+                    "complexity": {
+                        "useLiteralKeys": "off"
+                    }
+                }
+            }
+        }
+    ]
 }

@@ -5,6 +5,16 @@
     "type": "commonjs",
     "main": "./index.cjs",
     "types": "./index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./index.d.ts",
+            "default": "./index.cjs"
+        },
+        "./server": {
+            "types": "./server.d.ts",
+            "default": "./server.cjs"
+        }
+    },
     "dependencies": {
         "@raiken/core": "workspace:*",
         "@trpc/server": "^11.7.2",

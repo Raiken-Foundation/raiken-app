@@ -1,0 +1,11 @@
+{
+    "stats": { "expected": 0, "unexpected": 1, "skipped": 0, "duration": 800 },
+    "errors": [
+        {
+            "message": "SyntaxError: Unexpected token",
+            "snippet": "> 3 | import { broken",
+            "location": { "file": "e2e/login.spec.ts", "line": 3, "column": 1 }
+        }
+    ],
+    "suites": []
+}

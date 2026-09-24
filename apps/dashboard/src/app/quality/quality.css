@@ -1,0 +1,12 @@
+/* Quality view module — supplements shared q- utilities in theme.css */
+.q-tab-label {
+    line-height: 1.4;
+}
+
+.q-toggle-text {
+    line-height: 1.45;
+}
+
+.q-arg--toggle .q-arg-input {
+    align-items: flex-start;
+}

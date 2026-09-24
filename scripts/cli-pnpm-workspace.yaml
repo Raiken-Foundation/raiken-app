@@ -1,0 +1,14 @@
+packages: []
+
+# Same override as the root workspace: sharp 0.32 builds from source (network +
+# vendored libvips); 0.33+ ships prebuilt @img/sharp-* packages.
+overrides:
+  sharp: ^0.33.5
+
+onlyBuiltDependencies:
+  - '@swc/core'
+  - better-sqlite3
+  - esbuild
+  - nx
+  - protobufjs
+  - unrs-resolver

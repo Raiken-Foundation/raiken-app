@@ -1,0 +1,25 @@
+{
+    "stats": { "expected": 2, "unexpected": 0, "skipped": 0, "duration": 3100 },
+    "suites": [
+        {
+            "title": "checkout.spec.ts",
+            "suites": [
+                {
+                    "title": "Checkout",
+                    "specs": [
+                        {
+                            "id": "c1",
+                            "title": "adds item to cart",
+                            "tests": [{ "results": [{ "status": "passed", "duration": 900 }] }]
+                        },
+                        {
+                            "id": "c2",
+                            "title": "completes purchase",
+                            "tests": [{ "results": [{ "status": "passed", "duration": 1200 }] }]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

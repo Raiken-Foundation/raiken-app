@@ -3,7 +3,7 @@
     "$schema": "../../node_modules/nx/schemas/project-schema.json",
     "sourceRoot": "libs/shared/src",
     "projectType": "library",
-    "tags": [],
+    "tags": ["type:lib", "scope:shared"],
     "targets": {
         "build": {
             "executor": "@nx/esbuild:esbuild",
@@ -11,10 +11,24 @@
             "options": {
                 "outputPath": "dist/libs/shared",
                 "main": "libs/shared/src/index.ts",
+                "additionalEntryPoints": ["libs/shared/src/server.ts"],
                 "tsConfig": "libs/shared/tsconfig.lib.json",
-                "assets": ["libs/shared/*.md"],
+                "assets": ["libs/shared/package.json"],
                 "format": ["cjs"],
-                "generatePackageJson": true
+                "generatePackageJson": false
+            }
+        },
+        "lint": {
+            "executor": "nx:run-commands",
+            "options": {
+                "command": "pnpm biome lint libs/shared"
+            }
+        },
+        "test": {
+            "executor": "@nx/vitest:test",
+            "outputs": ["{workspaceRoot}/coverage/libs/shared"],
+            "options": {
+                "config": "libs/shared/vitest.config.ts"
             }
         }
     }

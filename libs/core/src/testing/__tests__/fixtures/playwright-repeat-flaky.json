@@ -1,0 +1,28 @@
+{
+    "stats": { "expected": 1, "unexpected": 1, "skipped": 0, "duration": 5200 },
+    "suites": [
+        {
+            "title": "workspace.spec.ts",
+            "specs": [
+                {
+                    "title": "deletes a workspace",
+                    "tests": [{ "results": [{ "status": "passed", "duration": 800 }] }]
+                },
+                {
+                    "title": "deletes a workspace",
+                    "tests": [
+                        {
+                            "results": [
+                                {
+                                    "status": "failed",
+                                    "duration": 400,
+                                    "error": { "message": "modal intercepted" }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

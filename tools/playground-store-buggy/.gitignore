@@ -1,0 +1,9 @@
+node_modules
+dist
+test-results
+playwright-report
+.raiken
+raiken.config.json
+
+# Raiken analysis cache
+.raiken/

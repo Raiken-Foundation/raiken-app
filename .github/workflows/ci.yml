@@ -1,0 +1,95 @@
+name: CI
+
+on:
+    pull_request:
+    push:
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    static-checks:
+        name: Format and type checks
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10.15.1
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: pnpm
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm check
+            - run: pnpm lint:boundaries
+            - run: pnpm typecheck
+            - run: pnpm test
+            - run: pnpm exec nx build cli --skip-nx-cache
+
+    discovery-integration:
+        name: Discovery integration (serialized)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10.15.1
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: pnpm
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm exec playwright install --with-deps chromium
+            - run: pnpm exec nx run @raiken/playground-notes:build
+            - run: pnpm exec nx run core:test:integration --skip-nx-cache
+
+    accuracy-gates:
+        name: Accuracy gates (golden suite, zero retries)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10.15.1
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: pnpm
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm exec playwright install --with-deps chromium
+            - run: pnpm exec nx build cli --skip-nx-cache
+            # The remaining gates in `pnpm verify` are the jobs above. This one
+            # runs the benchmark's hand-written suite repeatedly with retries
+            # disabled, which is the only way a fix that passes intermittently
+            # is told apart from one that holds.
+            - run: pnpm test:trust
+            - run: node scripts/verify-gates.mjs --only golden-suite
+
+    cli-smoke:
+        name: Installed CLI smoke (Ubuntu)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10.15.1
+            - uses: actions/setup-node@v4
+              with:
+                  node-version-file: .nvmrc
+                  cache: pnpm
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm exec nx build cli --skip-nx-cache
+            - run: pnpm run cli:install
+            - run: raiken --version
+            - run: pnpm smoke:cli
+
+    secret-scan:
+        name: Secret scan (gitleaks)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: gitleaks/gitleaks-action@v2

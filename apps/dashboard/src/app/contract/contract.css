@@ -661,10 +661,12 @@
     box-shadow: inset 0 0 0 1px var(--accent);
 }
 
+/* The open fact and its ledger are ONE region, marked by a single uniform
+   tint. A vertical rule here would float in the panel's padding — the row's
+   left edge is not the panel's edge — so the tint carries the state instead. */
 .c-fact--open,
 .c-verdict--open {
-    background: color-mix(in srgb, var(--accent) 5%, var(--bg-elev));
-    box-shadow: inset 2px 0 0 var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev));
 }
 
 /* The open fact and its ledger are ONE region: the row's accent bar runs the
@@ -694,39 +696,36 @@
     letter-spacing: 0.05em;
 }
 
-.c-ledger-sub {
-    font-size: 10px;
-    color: var(--ink-faint);
-    margin-bottom: 2px;
-}
 
-.c-key-copy {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    padding: 0 2px;
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--ink-mute);
-    font: inherit;
-    cursor: pointer;
-}
-
-.c-key-copy:hover {
+/* Evidence URLs are actionable: opening the page a fact was observed on is
+   the first thing triage wants. Quiet until hovered, per the dim-URL rule. */
+.c-url-link {
     color: var(--ink-dim);
-    border-color: var(--hair);
+    text-decoration: none;
 }
 
-.c-key-copy:focus-visible {
-    outline: 0;
-    border-color: var(--accent);
+.c-url-link:hover {
     color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
 }
 
-.c-ledger-key {
-    color: inherit;
-    font-variant-numeric: tabular-nums;
+.c-url-link:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
 }
+
+.c-url-link .c-event-icon {
+    opacity: 0.45;
+}
+
+.c-url-link:hover .c-event-icon {
+    opacity: 1;
+}
+
+
+
+
 .c-event {
     display: flex;
     flex-direction: column;
@@ -1002,10 +1001,19 @@
     background: var(--bg-hover);
     border-color: var(--hair);
 }
+/* The row button stays transparent when open — otherwise its own accent
+   border draws a second left edge 5px off the region's, and its fill splits
+   the tint between row and ledger. */
 .c-fact--open .c-fact-row,
 .c-verdict--open .c-verdict-row {
-    border-color: var(--accent-dim);
-    background: var(--accent-soft);
+    border-color: transparent;
+    background: transparent;
+}
+
+/* Hovering an open row deepens the region tint rather than boxing it. */
+.c-fact--open .c-fact-row:hover,
+.c-verdict--open .c-verdict-row:hover {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 
 /* Status marks: shape already encodes state; violated now glows */

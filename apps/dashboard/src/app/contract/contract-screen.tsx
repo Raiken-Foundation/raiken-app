@@ -1,12 +1,10 @@
 import {
     Archive,
-    Check,
+    ExternalLink,
     CircleCheck,
     CircleDashed,
     CirclePlus,
     CircleX,
-    Copy,
-    Link2,
     RotateCcw,
     Trash2,
     UserCheck,
@@ -117,6 +115,60 @@ function EventMark({ type }: { type: string }) {
             strokeWidth={2}
             aria-hidden="true"
         />
+    );
+}
+
+/**
+ * A ledger detail line only earns its space when it says something the card
+ * does not already say. Today every detail is `${route}: ${action}`, and the
+ * expanded row above already spells out the action — so those render as
+ * nothing. A future detail carrying real news (an observed-vs-expected diff,
+ * a redirect target) still shows.
+ */
+function ledgerDetail(
+    detail: string | null | undefined,
+    route: string,
+    action: string,
+): string | null {
+    if (!detail) return null;
+    const rest = detail.startsWith(`${route}: `) ? detail.slice(route.length + 2) : detail;
+    if (rest === action) return null;
+    const urls = rest.match(/https?:\/\/\S+/g) ?? [];
+    const prose = rest.replace(/https?:\/\/\S+/g, "").trim();
+    if (prose === "" && urls.every((u) => u === route)) return null;
+    return rest;
+}
+
+/**
+ * Evidence text with its URLs made clickable: the ledger is where you go to
+ * look at the page a fact was observed on, so the address must be actionable
+ * rather than inert prose. Non-URL text is left exactly as-is.
+ */
+function LinkedText({ text }: { text: string }) {
+    return (
+        <>
+            {text.split(/(https?:\/\/\S+)/g).map((part, i) =>
+                /^https?:\/\//.test(part) ? (
+                    <a
+                        key={i}
+                        className="c-url-link"
+                        href={part}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        {part}
+                        <ExternalLink
+                            className="c-event-icon"
+                            size={10}
+                            strokeWidth={2}
+                            aria-hidden="true"
+                        />
+                    </a>
+                ) : (
+                    part
+                ),
+            )}
+        </>
     );
 }
 
@@ -259,7 +311,6 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
     });
     const [undoable, setUndoable] = useState<{ id: number } | null>(null);
     const [confirmForget, setConfirmForget] = useState<string | null>(null);
-    const [copiedKey, setCopiedKey] = useState<string | null>(null);
     const [hoverKey, setHoverKey] = useState<string | null>(null);
 
     const factEvents = trpc.contractEvents.useQuery(
@@ -1035,65 +1086,15 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                             : "forget"}
                                                     </button>
                                                 </div>
-                                                <span className="c-ledger-sub">
-                                                    key{" "}
-                                                    <button
-                                                        type="button"
-                                                        className="c-key-copy"
-                                                        title="copy the full fact key — paste into: raiken contract forget <key>"
-                                                        aria-label="copy fact key"
-                                                        onClick={() => {
-                                                            void navigator.clipboard
-                                                                .writeText(fact.factKey)
-                                                                .then(
-                                                                    () => {
-                                                                        setCopiedKey(fact.factKey);
-                                                                        window.setTimeout(
-                                                                            () => setCopiedKey(null),
-                                                                            1400,
-                                                                        );
-                                                                    },
-                                                                    () =>
-                                                                        setActionNote(
-                                                                            "clipboard unavailable",
-                                                                        ),
-                                                                );
-                                                        }}
-                                                    >
-                                                        <span className="c-ledger-key">
-                                                            {fact.factKey.slice(0, 12)}
-                                                        </span>
-                                                        {copiedKey === fact.factKey ? (
-                                                            <Check
-                                                                size={11}
-                                                                strokeWidth={2}
-                                                                aria-hidden="true"
-                                                            />
-                                                        ) : (
-                                                            <Copy
-                                                                size={11}
-                                                                strokeWidth={2}
-                                                                aria-hidden="true"
-                                                            />
-                                                        )}
-                                                    </button>
-                                                    {(factEvents.data ?? []).length > 0
-                                                        ? ` · ${(factEvents.data ?? []).length} event${(factEvents.data ?? []).length === 1 ? "" : "s"}`
-                                                        : ""}
-                                                </span>
                                                 {fact.evidence?.observedUrl ? (
                                                     <span className="c-event c-event--source">
                                                         <span className="c-event-when">
-                                                            <Link2
-                                                                className="c-event-icon"
-                                                                size={11}
-                                                                strokeWidth={2}
-                                                                aria-hidden="true"
-                                                            />
                                                             observed at
                                                         </span>
                                                         <span className="c-event-detail">
-                                                            {fact.evidence.observedUrl}
+                                                            <LinkedText
+                                                                text={fact.evidence.observedUrl}
+                                                            />
                                                         </span>
                                                     </span>
                                                 ) : null}
@@ -1124,7 +1125,13 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                 ) : (
                                                     groupLedgerEvents(
                                                         (factEvents.data ?? []).slice(0, 12),
-                                                    ).map((g) => (
+                                                    ).map((g) => {
+                                                        const detail = ledgerDetail(
+                                                            g.detail,
+                                                            fact.route,
+                                                            fact.action,
+                                                        );
+                                                        return (
                                                         <span
                                                             key={`${g.eventType}-${g.last}`}
                                                             className="c-event"
@@ -1151,24 +1158,14 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                                     {g.count > 1 ? ` ×${g.count}` : ""}
                                                                 </span>
                                                             </span>
-                                                            {g.detail ? (
+                                                            {detail ? (
                                                                 <span className="c-event-detail">
-                                                                    {dimUrls(
-                                                                        condenseLists(
-                                                                            g.detail.startsWith(
-                                                                                `${fact.route}: `,
-                                                                            )
-                                                                                ? g.detail.slice(
-                                                                                      fact.route.length +
-                                                                                          2,
-                                                                                  )
-                                                                                : g.detail,
-                                                                        ),
-                                                                    )}
+                                                                    <LinkedText text={detail} />
                                                                 </span>
                                                             ) : null}
                                                         </span>
-                                                    ))
+                                                        );
+                                                    })
                                                 )}
                                             </div>
                                         ) : null}

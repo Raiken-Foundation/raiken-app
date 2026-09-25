@@ -463,17 +463,26 @@ export async function contractCommand(
 
         case "forget": {
             const args = (options as Record<string, unknown>)["args"] as string[] | undefined;
-            const key = (args ?? [])[0];
-            if (!key) {
+            const id = (args ?? [])[0];
+            if (!id) {
                 console.error(
-                    chalk.red("\n  Provide a fact key: raiken contract forget <factKey> (see `raiken contract show`)\n"),
+                    chalk.red(
+                        "\n  Provide a fact id: raiken contract forget <id> — the short ids from `raiken contract show` work\n",
+                    ),
                 );
                 cliExit(CLI_EXIT.USAGE);
             }
-            const result = contract.forgetFact(key);
+            const resolved = contract.resolveFactId(id);
+            if (!resolved.factKey) {
+                console.error(chalk.red(`\n  \u2717 ${resolved.reason}\n`));
+                cliExit(CLI_EXIT.USAGE);
+            }
+            const result = contract.forgetFact(resolved.factKey);
             console.log(
                 result.forgotten
-                    ? chalk.green(`\n  \u2713 fact ${key.slice(0, 8)} forgotten — removed from the contract and the ledger notes it\n`)
+                    ? chalk.green(
+                          `\n  \u2713 fact ${resolved.factKey.slice(0, 8)} forgotten — removed from the contract and the ledger notes it\n`,
+                      )
                     : chalk.red(`\n  \u2717 cannot forget: ${result.reason}\n`),
             );
             return;
@@ -518,7 +527,14 @@ export async function contractCommand(
 
         case "history": {
             const opts = options as Record<string, unknown>;
-            const key = (opts["file"] ?? opts["text"]) as string | undefined;
+            const args = (opts["args"] as string[] | undefined) ?? [];
+            const typed = (args[0] ?? opts["file"] ?? opts["text"]) as string | undefined;
+            const resolved = typed ? contract.resolveFactId(typed) : undefined;
+            if (resolved && !resolved.factKey) {
+                console.error(chalk.red(`\n  \u2717 ${resolved.reason}\n`));
+                cliExit(CLI_EXIT.USAGE);
+            }
+            const key = resolved?.factKey;
             const events = contract.factHistory(key);
             if ((options as Record<string, unknown>)["json"]) {
                 process.stdout.write(`${JSON.stringify(events, null, 2)}\n`);

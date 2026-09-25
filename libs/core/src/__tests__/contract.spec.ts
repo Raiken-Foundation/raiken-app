@@ -35,6 +35,88 @@ describe("ContractStore", () => {
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
+    it("resolves a fact id from a unique prefix, and refuses the rest", () => {
+        const base = {
+            route: "/shop",
+            precondition: null,
+            action: "open /shop",
+            expectedObservable: 'shows heading "Shop"',
+            status: "verified",
+            evidence: null,
+            sourceCommit: null,
+            capturedAt: 1,
+            lastVerifiedAt: null,
+            verifiedCount: 0,
+            violatedCount: 0,
+        } as const;
+        const { factKey } = store.upsertBehaviorFact({ ...base });
+        store.upsertBehaviorFact({
+            ...base,
+            action: "open /cart",
+            expectedObservable: 'shows heading "Your cart"',
+        });
+
+        // the full key and the 8 characters `show` prints both land on it
+        expect(store.resolveFactKey(factKey).factKey).toBe(factKey);
+        expect(store.resolveFactKey(factKey.slice(0, 8)).factKey).toBe(factKey);
+        expect(store.resolveFactKey(factKey.slice(0, 8).toUpperCase()).factKey).toBe(factKey);
+
+        expect(store.resolveFactKey("deadbeef").reason).toMatch(/no fact matches/);
+        expect(store.resolveFactKey("ab").reason).toMatch(/at least 4 characters/);
+    });
+
+    it("refuses an ambiguous prefix rather than picking a fact to delete", () => {
+        const base = {
+            route: "/shop",
+            precondition: null,
+            action: "open /shop",
+            expectedObservable: 'shows heading "Shop"',
+            status: "verified",
+            evidence: null,
+            sourceCommit: null,
+            capturedAt: 1,
+            lastVerifiedAt: null,
+            verifiedCount: 0,
+            violatedCount: 0,
+        } as const;
+        // Keys are content-derived, so pin two that share a prefix: this is the
+        // case where guessing would delete evidence the caller never named.
+        store.upsertBehaviorFact({ ...base, factKey: "abcd1111abcd1111" });
+        store.upsertBehaviorFact({
+            ...base,
+            action: "open /cart",
+            expectedObservable: 'shows heading "Your cart"',
+            factKey: "abcd2222abcd2222",
+        });
+
+        const result = store.forgetFact("abcd");
+        expect(result.forgotten).toBe(false);
+        expect(result.reason).toMatch(/matches 2 facts/);
+        // nothing was deleted
+        expect(store.listBehaviorFacts()).toHaveLength(2);
+    });
+
+    it("forgets a fact named by its 8-character id", () => {
+        const { factKey } = store.upsertBehaviorFact({
+            route: "/shop",
+            precondition: null,
+            action: "open /shop",
+            expectedObservable: 'shows heading "Shop"',
+            status: "verified",
+            evidence: null,
+            sourceCommit: null,
+            capturedAt: 1,
+            lastVerifiedAt: null,
+            verifiedCount: 0,
+            violatedCount: 0,
+        });
+
+        expect(store.forgetFact(factKey.slice(0, 8)).forgotten).toBe(true);
+        expect(store.listBehaviorFacts()).toHaveLength(0);
+        // the ledger records who removed it
+        expect(store.listFactEvents(factKey).map((e) => e.eventType)).toContain("forgotten");
+    });
+
     it("upserts observed facts by stable key (no duplicates, counters bump)", () => {
         const first = store.upsertBehaviorFact({
             route: "/signup",

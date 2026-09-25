@@ -49,6 +49,11 @@ export class ContractStore {
     // Observed facts
     // ==========================================================================
 
+    /** Shortest prefix of a fact key accepted as an id. 4 hex characters is
+     *  still 65k combinations in a contract that holds tens of facts, and
+     *  `raiken contract show` prints the first 8. */
+    static readonly MIN_ID_PREFIX = 4;
+
     /** Stable identity for an observation: same tuple → same fact row. */
     static factKey(input: {
         route: string;
@@ -323,9 +328,38 @@ export class ContractStore {
         }));
     }
 
-    /** Remove a junk/duplicate fact from the contract. Refuses when a
-     *  never-regress requirement depends on it. Logs a 'forgotten' event. */
-    forgetFact(factKey: string): { forgotten: boolean; reason?: string } {
+    /**
+     * Resolve a fact id a human typed: the full key, or any unique prefix of
+     * one. Exact matches win. A prefix too short to be safe, one that matches
+     * nothing, and one that matches several facts are each refused with a
+     * reason the caller can print verbatim — never guessed at, because the
+     * caller may be about to delete what it names.
+     */
+    resolveFactKey(idOrPrefix: string): { factKey?: string; reason?: string } {
+        const id = idOrPrefix.trim().toLowerCase();
+        if (id.length < ContractStore.MIN_ID_PREFIX) {
+            return {
+                reason: `fact ids are at least ${ContractStore.MIN_ID_PREFIX} characters ("${id}" is ${id.length})`,
+            };
+        }
+        const facts = this.listBehaviorFacts();
+        const exact = facts.find((f) => f.factKey === id);
+        if (exact) return { factKey: exact.factKey };
+        const matches = facts.filter((f) => f.factKey.startsWith(id));
+        if (matches.length === 0) return { reason: `no fact matches "${id}"` };
+        if (matches.length > 1) {
+            return { reason: `"${id}" matches ${matches.length} facts — use more characters` };
+        }
+        return { factKey: matches[0].factKey };
+    }
+
+    /** Remove a junk/duplicate fact from the contract. Takes a full key or any
+     *  unique prefix (see resolveFactKey). Refuses when a never-regress
+     *  requirement depends on it. Logs a 'forgotten' event. */
+    forgetFact(idOrPrefix: string): { forgotten: boolean; reason?: string } {
+        const resolved = this.resolveFactKey(idOrPrefix);
+        const factKey = resolved.factKey;
+        if (!factKey) return { forgotten: false, reason: resolved.reason };
         const fact = this.getBehaviorFactByKey(factKey);
         if (!fact?.id) return { forgotten: false, reason: "no such fact" };
         const guard = this.listIntentFacts().find(

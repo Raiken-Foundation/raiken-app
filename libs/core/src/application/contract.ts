@@ -225,9 +225,16 @@ export class ContractApplication implements ProjectApplicationContext {
         return this.withStore((store) => store.resolveReview(reviewId, accept));
     }
 
-    /** Remove a junk/duplicate fact (see store.forgetFact). */
-    forgetFact(factKey: string): { forgotten: boolean; reason?: string } {
-        return this.withStore((store) => store.forgetFact(factKey));
+    /** Resolve a fact id a human typed — full key or unique prefix. See
+     *  ContractStore.resolveFactKey for the rules. */
+    resolveFactId(idOrPrefix: string): { factKey?: string; reason?: string } {
+        return this.withStore((store) => store.resolveFactKey(idOrPrefix));
+    }
+
+    /** Remove a junk/duplicate fact (see store.forgetFact). Takes a full key
+     *  or any unique prefix. */
+    forgetFact(idOrPrefix: string): { forgotten: boolean; reason?: string } {
+        return this.withStore((store) => store.forgetFact(idOrPrefix));
     }
 
     /** Undo an accepted review — the retired fact returns as unverified. */

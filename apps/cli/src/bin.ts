@@ -200,7 +200,7 @@ program
     .command("contract [subcommand] [args...]")
     .description(
         "The two-sided behavior contract: observed facts vs ticket/AC requirements " +
-            "(show | coverage | capture | mint | import | export | diff | verify | review | history | search | forget | explore | materialize | routes | snapshot | record | watch)",
+            "(show | coverage | scope | capture | mint | import | export | diff | changes | verify | review | history | search | forget | explore | materialize | routes | snapshot | record | watch)",
     )
     .option("--json", "Emit machine-readable output", false)
     .option("--file <path>", "import: requirements markdown/text file")

@@ -41,6 +41,7 @@ interface ContractOptions {
  *   explore     LLM-driven exploration of uncovered requirements
  *   record      record GET traffic for hermetic materialization mocks
  *   history     evidence ledger: mint/verify/violate timeline per fact
+ *   changes     behavior changes between commits (ledger events by commit)
  *   review      accept or reject behavior changes found by verify
  *   search      find facts/requirements by keyword
  *   forget      remove a junk or duplicate fact by key
@@ -540,9 +541,61 @@ export async function contractCommand(
                           ? chalk.red("✗ violated")
                           : e.eventType === "minted"
                             ? chalk.magenta("+ minted")
-                            : chalk.yellow("○ unverified");
+                            : e.eventType === "unverified"
+                              ? chalk.yellow("○ unverified")
+                              : dim(`· ${e.eventType}`);
                 const when = new Date(e.occurredAt).toISOString().replace("T", " ").slice(0, 19);
-                console.log(`  ${dim(when)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`);
+                const at = e.commitSha ? `${e.commitSha.slice(0, 7)}${e.commitDirty ? "+" : " "}` : "       ";
+                console.log(`  ${dim(when)}  ${dim(at)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`);
+            }
+            console.log("");
+            return;
+        }
+
+        case "changes": {
+            const { defaultBaseRef } = await import("@raiken/core");
+            const range = options.args?.[0] ?? `${defaultBaseRef(projectPath)}..HEAD`;
+            let changes: ReturnType<typeof contract.changes>;
+            try {
+                changes = contract.changes(range);
+            } catch (error) {
+                console.error(chalk.red(`\n  ✗ ${safeCliErrorMessage(error)}\n`));
+                cliExit(CLI_EXIT.USAGE);
+            }
+            if (options.json) {
+                process.stdout.write(`${JSON.stringify(changes, null, 2)}\n`);
+                return;
+            }
+            console.log(chalk.cyan(`\n  Behavior changes — ${range}\n`));
+            const s = changes.summary;
+            const parts = [
+                s.added && chalk.magenta(`+${s.added} added`),
+                s.broke && chalk.red(`✗${s.broke} broke`),
+                s.fixed && chalk.green(`✓${s.fixed} fixed`),
+                s.accepted && `${s.accepted} accepted`,
+                s.rejected && `${s.rejected} rejected`,
+                s.forgotten && `${s.forgotten} forgotten`,
+            ].filter(Boolean);
+            console.log(`  ${parts.length > 0 ? parts.join(" · ") : dim("no behavior changes recorded in this range")}`);
+            if (changes.silentCommits > 0) {
+                console.log(dim(`  ${changes.silentCommits} commit(s) in range have no ledger events (never verified at that commit)`));
+            }
+            for (const c of changes.commits) {
+                const label = c.uncommitted ? `${c.sha.slice(0, 7)}+ uncommitted edits` : `${c.sha.slice(0, 7)} ${c.subject}`;
+                console.log(`\n  ${chalk.bold(label)}`);
+                for (const e of c.events) {
+                    const mark =
+                        e.transition === "added"
+                            ? chalk.magenta("+ added   ")
+                            : e.transition === "broke"
+                              ? chalk.red("✗ broke   ")
+                              : e.transition === "fixed"
+                                ? chalk.green("✓ fixed   ")
+                                : dim(`${(e.transition ?? e.eventType).padEnd(10)}`);
+                    const what = e.route ? `${e.action} → ${e.expectedObservable}` : (e.detail ?? e.factKey);
+                    console.log(`    ${mark} ${what}`);
+                }
+                if (c.reverified > 0) console.log(dim(`    ${c.reverified} re-verified`));
             }
             console.log("");
             return;

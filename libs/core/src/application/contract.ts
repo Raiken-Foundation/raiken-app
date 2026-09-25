@@ -5,6 +5,8 @@ import { CodeGraphDB } from "../database/db";
 import {
     buildContractView,
     captureFormStates,
+    computeContractChanges,
+    type ContractChanges,
     computeCoverage,
     exploreUncovered,
     extractSourceRoutes,
@@ -236,6 +238,14 @@ export class ContractApplication implements ProjectApplicationContext {
     /** Evidence ledger: recent fact events (mint/verify/violate timeline). */
     factHistory(factKey?: string): Array<import("../contract/types").FactEvent> {
         return this.withStore((store) => store.listFactEvents(factKey));
+    }
+
+    /**
+     * Behavior changes between commits: ledger events stamped with a commit
+     * in `range` (git syntax, e.g. `origin/main..HEAD`), grouped per commit.
+     */
+    changes(range: string): ContractChanges {
+        return this.withStore((store) => computeContractChanges(store, this.projectPath, range));
     }
 
     /** Full contract view (observed + intent + coverage). */

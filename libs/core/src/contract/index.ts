@@ -1,5 +1,7 @@
 export * from "./agents-md";
 export * from "./capture";
+export * from "./changes";
+export * from "./commit";
 export * from "./coverage";
 export * from "./exporter";
 export * from "./explore";

@@ -684,6 +684,18 @@ export class SchemaManager {
         } catch {
             /* column already exists */
         }
+        // Commit stamping: which commit (and whether the tree was dirty) each
+        // ledger event was observed at.
+        for (const column of ["commit_sha TEXT", "commit_dirty INTEGER"]) {
+            try {
+                this.adapter.db.exec(`ALTER TABLE fact_events ADD COLUMN ${column}`);
+            } catch {
+                /* column already exists */
+            }
+        }
+        this.adapter.db.exec(
+            "CREATE INDEX IF NOT EXISTS idx_fact_events_commit ON fact_events(project_path, commit_sha)",
+        );
         })();
     }
 

@@ -10,11 +10,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {
-    type AffectedTestEvidence,
-    GraphQueryService,
-    isLikelyTestPath,
-} from "../analysis/graph-query";
 import { recordRunOutcomes } from "../testing/record-outcomes";
 import { parseCiRunReport } from "../testing/report-parser";
 import { writeTestRunReport } from "../testing/report-writer";
@@ -28,9 +23,9 @@ import {
     resolveRefs,
 } from "./git-diff";
 import { renderJUnitXml } from "./junit-reporter";
+import { directlyChangedTests, selectAffectedTests } from "./select-tests";
 import type {
     CiAffectedTest,
-    CiChangedFile,
     CiEvent,
     CiImpactReport,
     CiOptions,
@@ -76,69 +71,13 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
 
     const consideredSourceFiles = filterSourceFiles(changedFiles);
 
-    // ---- 2. Impact (graph query)
-    const query = new GraphQueryService(projectPath);
-    const evidence = query.getAffectedTests(consideredSourceFiles);
-
-    // Collapse per-(testFile,sourceFile) evidence into per-testFile rows.
-    const byTestFile = new Map<string, AffectedTestEvidence[]>();
-    for (const row of evidence) {
-        const list = byTestFile.get(row.testFile) ?? [];
-        list.push(row);
-        byTestFile.set(row.testFile, list);
-    }
-
-    const affectedTests: CiAffectedTest[] = [];
-    const skippedBelowThreshold: Array<{ testFile: string; confidence: number }> = [];
-
-    for (const [testFile, rows] of byTestFile) {
-        const confidence = rows.reduce((acc, r) => Math.max(acc, r.confidence), 0);
-        const sourceFiles = Array.from(new Set(rows.map((r) => r.sourceFile)));
-        const reasons = rows.flatMap((r) =>
-            r.reasons.map((reason) => ({
-                reason: reason.reason,
-                provenance: reason.provenance as CiAffectedTest["reasons"][number]["provenance"],
-                confidence: reason.confidence,
-                sourceFile: r.sourceFile,
-                sourceSymbol: reason.sourceSymbol,
-                targetSymbol: reason.targetSymbol,
-                line: reason.line,
-                snippet: reason.snippet,
-            })),
-        );
-
-        if (confidence < threshold) {
-            skippedBelowThreshold.push({ testFile, confidence });
-            continue;
-        }
-        affectedTests.push({ testFile, confidence, sourceFiles, reasons });
-    }
-
-    // A changed test file is affected BY DEFINITION — the graph only maps
-    // source → tests, so editing the suite itself previously produced
-    // `affectedTests: []` and CI ran nothing exactly when a test changed.
-    // Guard against duplicates in the ACCEPTED list (not the evidence map):
-    // a changed test with weak graph evidence sits below the confidence
-    // threshold and must still run (review finding: the old
-    // `byTestFile.has()` check silently skipped exactly those).
-    const acceptedTestFiles = new Set(affectedTests.map((t) => t.testFile));
-    for (const entry of directlyChangedTestEntries(changedFiles)) {
-        if (acceptedTestFiles.has(entry.testFile)) continue;
-        acceptedTestFiles.add(entry.testFile);
-        affectedTests.push(entry);
-    }
-
-    // Highest-confidence first, then alphabetical for stable ordering.
-    affectedTests.sort((a, b) => {
-        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-        return a.testFile.localeCompare(b.testFile);
+    // ---- 2. Impact: evidence-backed selection that fails safe to the full suite
+    const { affectedTests, skippedBelowThreshold, selection } = await selectAffectedTests({
+        projectPath,
+        changedFiles,
+        confidenceThreshold: threshold,
+        fallback: options.fallback,
     });
-    // A directly-changed test is never "skipped below threshold" — it runs
-    // at confidence 1.0 via the loop above.
-    skippedBelowThreshold.sort((a, b) => a.testFile.localeCompare(b.testFile));
-    const skippedNotRunning = skippedBelowThreshold.filter(
-        (s) => !acceptedTestFiles.has(s.testFile),
-    );
 
     const impact: CiImpactReport = {
         schemaVersion: 1,
@@ -147,8 +86,9 @@ export async function runCi(options: CiOptions): Promise<CiResult> {
         changedFiles,
         consideredSourceFiles,
         affectedTests,
-        skippedBelowThreshold: skippedNotRunning,
+        skippedBelowThreshold,
         confidenceThreshold: threshold,
+        selection,
     };
 
     emit({ type: "impact_complete", affectedTests });
@@ -319,34 +259,5 @@ async function writeReports(
 
 export { GitError };
 
-/**
- * Changed files that are themselves test files, expressed as affected-test
- * entries with maximum confidence. Deletions drop out (nothing to run);
- * renames count under their new path. Exported (pure) so the contract — "a
- * changed spec must appear in affectedTests" — is unit-testable without a
- * git repo or a code graph.
- */
-export function directlyChangedTestEntries(changedFiles: CiChangedFile[]): CiAffectedTest[] {
-    const entries: CiAffectedTest[] = [];
-    const seen = new Set<string>();
-    for (const file of changedFiles) {
-        if (file.status === "removed") continue;
-        if (!isLikelyTestPath(file.path)) continue;
-        if (seen.has(file.path)) continue;
-        seen.add(file.path);
-        entries.push({
-            testFile: file.path,
-            confidence: 1.0,
-            sourceFiles: [file.path],
-            reasons: [
-                {
-                    reason: "changed_test",
-                    provenance: "static_ast",
-                    confidence: 1.0,
-                    sourceFile: file.path,
-                },
-            ],
-        });
-    }
-    return entries;
-}
+/** @deprecated kept for callers of the old name; see `directlyChangedTests`. */
+export const directlyChangedTestEntries = directlyChangedTests;

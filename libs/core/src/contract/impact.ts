@@ -427,20 +427,16 @@ export function scopeFactsByImpact(input: {
             unmapped.push(file);
             continue;
         }
-        const trail = reverseReach(graph, file);
-        let hit = false;
-        for (const binding of bindings) {
-            const via = explainBinding(binding, file, trail);
-            if (!via) continue;
-            hit = true;
-            if (!routeHits.has(binding.path)) {
+        const reached = routesReachedBy(file, bindings, graph);
+        for (const [pattern, via] of reached) {
+            if (!routeHits.has(pattern)) {
                 routeHits.set(
-                    binding.path,
-                    `${binding.path} ← ${via.map((f) => rel(projectPath, f)).join(" ← ")}`,
+                    pattern,
+                    `${pattern} ← ${via.map((f) => rel(projectPath, f)).join(" ← ")}`,
                 );
             }
         }
-        if (!hit) unmapped.push(file);
+        if (reached.size === 0) unmapped.push(file);
     }
 
     if (unmapped.length > 0) {
@@ -464,8 +460,27 @@ export function scopeFactsByImpact(input: {
     return { scoped, global: false, reasons, globalReason: null, unmapped: [] };
 }
 
+/**
+ * Routes a changed file can affect, each with the dependency path from the
+ * route's component back to the file (route component first).
+ */
+export function routesReachedBy(
+    changedFile: string,
+    bindings: RouteBinding[],
+    graph: DependentsGraph,
+): Map<string, string[]> {
+    const trail = reverseReach(graph, changedFile);
+    const reached = new Map<string, string[]>();
+    for (const binding of bindings) {
+        if (reached.has(binding.path)) continue;
+        const via = explainBinding(binding, changedFile, trail);
+        if (via) reached.set(binding.path, via);
+    }
+    return reached;
+}
+
 /** BFS over reverse edges; returns file → predecessor toward the changed file. */
-function reverseReach(graph: DependentsGraph, start: string): Map<string, string | null> {
+export function reverseReach(graph: DependentsGraph, start: string): Map<string, string | null> {
     const parent = new Map<string, string | null>([[start, null]]);
     const queue = [start];
     while (queue.length > 0) {
@@ -511,7 +526,7 @@ function explainBinding(
 }
 
 /** Fact routes are stored as URLs or paths; compare on the pathname. */
-function factPath(route: string): string {
+export function factPath(route: string): string {
     try {
         if (/^https?:\/\//i.test(route)) return new URL(route).pathname.replace(/\/$/, "") || "/";
     } catch {
@@ -521,7 +536,7 @@ function factPath(route: string): string {
     return (p.startsWith("/") ? p : `/${p}`).replace(/\/$/, "") || "/";
 }
 
-function routeMatches(pattern: string, pathname: string): boolean {
+export function routeMatches(pattern: string, pathname: string): boolean {
     const re = new RegExp(
         `^${pattern
             .split("/")

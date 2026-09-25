@@ -13,7 +13,9 @@ export type AffectReason =
     | "imports" // static dependency: test file imports the changed file
     | "calls" // symbol-level call from a test symbol into changed code
     | "renders" // JSX render of an exported component
-    | "name_match"; // weakest: name overlap between test file and source
+    | "name_match" // weakest: name overlap between test file and source
+    | "route" // an E2E spec visits a route whose components reach the change
+    | "fallback"; // impact unprovable: the full suite runs
 
 export interface AffectedTestEvidence {
     testFile: string;

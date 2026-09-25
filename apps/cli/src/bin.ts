@@ -402,6 +402,11 @@ program
     .option("--max-tests <number>", "Cap the number of tests executed")
     .option("--timeout <number>", "Per-test timeout in ms", "60000")
     .option("--skip-run", "Compute impact only; do not execute tests", false)
+    .option(
+        "--fallback <mode>",
+        "When a change's impact can't be proven: full (run the whole suite) | none (changed specs only)",
+        "full",
+    )
     .option("--json", "Emit a machine-readable summary to stdout", false)
     .action(async (options) => {
         try {

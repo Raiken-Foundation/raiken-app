@@ -1,9 +1,12 @@
-import { type ContractScope, createProjectApplication, resolveAuthStorageStatePath } from "@raiken/core";
+import {
+    type ContractScope,
+    createProjectApplication,
+    resolveAuthStorageStatePath,
+} from "@raiken/core";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
-import { CLI_EXIT } from "../errors";
 import { cliExit } from "../cli/exit";
-import { safeCliErrorMessage } from "../errors";
+import { CLI_EXIT, safeCliErrorMessage } from "../errors";
 
 interface ContractOptions {
     json?: boolean;
@@ -69,9 +72,11 @@ export async function contractCommand(
                 return acc;
             }, {});
             console.log(
-                `  Fact status:      ${Object.entries(byStatus)
-                    .map(([k, v]) => `${v} ${k}`)
-                    .join(" · ") || "—"}`,
+                `  Fact status:      ${
+                    Object.entries(byStatus)
+                        .map(([k, v]) => `${v} ${k}`)
+                        .join(" · ") || "—"
+                }`,
             );
             if (view.observed.length > 0) {
                 const confidences = view.observed.map((f) => f.confidence);
@@ -87,7 +92,10 @@ export async function contractCommand(
             for (const f of view.observed.slice(0, 8)) {
                 console.log(`    ${f.factKey.slice(0, 8)}  ${f.route} — ${f.action.slice(0, 46)}`);
             }
-            if (view.observed.length > 8) console.log(dim(`    … ${view.observed.length - 8} more (raiken contract show --json)`));
+            if (view.observed.length > 8)
+                console.log(
+                    dim(`    … ${view.observed.length - 8} more (raiken contract show --json)`),
+                );
             console.log(`  Requirements:     ${view.intent.length}`);
             if (view.coverage) {
                 const c = view.coverage;
@@ -106,12 +114,22 @@ export async function contractCommand(
             if (view.observed.length === 0 && view.intent.length === 0) {
                 console.log("");
                 console.log(dim("  The contract is empty. Build the two sides:"));
-                console.log(dim("    1. raiken discover <url>          record the app's pages/forms"));
-                console.log(dim("    2. raiken contract capture <url>  observe it — mints facts with evidence"));
+                console.log(
+                    dim("    1. raiken discover <url>          record the app's pages/forms"),
+                );
+                console.log(
+                    dim(
+                        "    2. raiken contract capture <url>  observe it — mints facts with evidence",
+                    ),
+                );
                 console.log(
                     dim("    3. raiken contract import --file requirements.md   add ticket intent"),
                 );
-                console.log(dim("    4. raiken contract verify         re-observe on every change (exit 1 on regression)"));
+                console.log(
+                    dim(
+                        "    4. raiken contract verify         re-observe on every change (exit 1 on regression)",
+                    ),
+                );
             }
             console.log("");
             return;
@@ -124,6 +142,23 @@ export async function contractCommand(
                 return;
             }
             console.log(chalk.cyan("\n  Requirement Coverage\n"));
+            // Business register first — a sentence a stakeholder can read —
+            // then the technical counts, then the per-requirement detail.
+            if (report.violated > 0) {
+                console.log(
+                    chalk.red(
+                        `  ✗ ${report.violated} promise${report.violated === 1 ? "" : "s"} broken — the app no longer does what the tickets asked`,
+                    ),
+                );
+            } else if (report.covered > 0) {
+                console.log(
+                    chalk.green(
+                        `  ✓ Every covered promise holds — ${report.covered} of ${report.total} have working evidence`,
+                    ),
+                );
+            } else {
+                console.log(dim("  No promise has working evidence yet — nothing is claimed"));
+            }
             console.log(
                 `  ${report.covered}/${report.total} covered · ${report.uncovered} uncovered · ${report.violated} violated`,
             );
@@ -138,7 +173,9 @@ export async function contractCommand(
             }
             if (report.neverRegressUncovered > 0) {
                 console.log(
-                    chalk.red(`  ⚠ ${report.neverRegressUncovered} never-regress requirement(s) uncovered`),
+                    chalk.red(
+                        `  ⚠ ${report.neverRegressUncovered} never-regress requirement(s) uncovered`,
+                    ),
                 );
             }
             for (const entry of report.entries) {
@@ -152,7 +189,9 @@ export async function contractCommand(
                 console.log(`  ${mark} ${entry.intent.requirementText.slice(0, 96)}${origin}`);
                 if (entry.matches.length > 0) {
                     console.log(
-                        dim(`      → ${entry.matches[0].fact.action} ${entry.matches[0].fact.expectedObservable} (${Math.round(entry.matches[0].score * 100)}%)`),
+                        dim(
+                            `      → ${entry.matches[0].fact.action} ${entry.matches[0].fact.expectedObservable} (${Math.round(entry.matches[0].score * 100)}%)`,
+                        ),
                     );
                 }
             }
@@ -167,7 +206,10 @@ export async function contractCommand(
                 console.log(
                     chalk.yellow(
                         `\n  note: capture works from discovered site knowledge, not a live URL — \`${givenUrl}\` is ignored.`,
-                    ) + chalk.yellow("\n  To capture a different app, run `raiken discover <url>` first.\n"),
+                    ) +
+                        chalk.yellow(
+                            "\n  To capture a different app, run `raiken discover <url>` first.\n",
+                        ),
                 );
             }
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
@@ -223,7 +265,11 @@ export async function contractCommand(
             } else if (options.file || options.text) {
                 result = contract.importFromFile({ filePath: options.file, text: options.text });
             } else {
-                console.error(chalk.red("\n  Provide --file <path>, --text <requirements>, or --ticket <id>.\n"));
+                console.error(
+                    chalk.red(
+                        "\n  Provide --file <path>, --text <requirements>, or --ticket <id>.\n",
+                    ),
+                );
                 cliExit(CLI_EXIT.USAGE);
             }
             if (options.json) {
@@ -252,7 +298,11 @@ export async function contractCommand(
                 return;
             }
             if (!d.hasBaseline) {
-                console.log(dim("\n  No previous export — run `raiken contract export` to set the baseline.\n"));
+                console.log(
+                    dim(
+                        "\n  No previous export — run `raiken contract export` to set the baseline.\n",
+                    ),
+                );
                 return;
             }
             const sections: Array<[string, string[]]> = [
@@ -267,11 +317,14 @@ export async function contractCommand(
                 if (items.length === 0) continue;
                 any = true;
                 console.log(`  ${label}:`);
-                for (const item of items.slice(0, 10)) console.log(`    ${chalk.green("+")} ${item}`);
+                for (const item of items.slice(0, 10))
+                    console.log(`    ${chalk.green("+")} ${item}`);
             }
             for (const change of d.statusChanged.slice(0, 10)) {
                 any = true;
-                console.log(`    ${chalk.yellow("~")} ${change.key} [${change.from} → ${change.to}]`);
+                console.log(
+                    `    ${chalk.yellow("~")} ${change.key} [${change.from} → ${change.to}]`,
+                );
             }
             for (const change of d.coverageChanged.slice(0, 10)) {
                 any = true;
@@ -288,7 +341,10 @@ export async function contractCommand(
             // Dry run of verify's scoping: which facts would this change re-check, and why.
             const opts0 = options as Record<string, unknown>;
             const { getChangedFiles } = await import("../git-changed");
-            const changedFiles = await getChangedFiles(projectPath, String(opts0["base"] ?? "HEAD"));
+            const changedFiles = await getChangedFiles(
+                projectPath,
+                String(opts0["base"] ?? "HEAD"),
+            );
             const scope = await contract.scope(contract.view().observed, changedFiles);
             if (opts0["json"]) {
                 process.stdout.write(
@@ -298,7 +354,9 @@ export async function contractCommand(
             }
             console.log(chalk.cyan("\n  Contract scope\n"));
             console.log(`  Changed files:    ${changedFiles.length}`);
-            console.log(`  Facts in scope:   ${scope.scoped.length}/${contract.view().observed.length}`);
+            console.log(
+                `  Facts in scope:   ${scope.scoped.length}/${contract.view().observed.length}`,
+            );
             printScope(scope);
             console.log("");
             return;
@@ -317,7 +375,9 @@ export async function contractCommand(
             if (contract.view().observed.length === 0) {
                 console.log(
                     dim("\n  Nothing to verify yet — the contract has no facts.\n") +
-                        dim("  Run `raiken contract capture` (after `raiken discover <url>`) to observe the app.\n"),
+                        dim(
+                            "  Run `raiken contract capture` (after `raiken discover <url>`) to observe the app.\n",
+                        ),
                 );
                 return;
             }
@@ -332,13 +392,17 @@ export async function contractCommand(
             });
             const violations = contract.violationsReport(result.verdicts);
             const verifiedCount = result.verdicts.filter((v) => v.verdict === "verified").length;
-            const unverifiedCount = result.verdicts.filter((v) => v.verdict === "unverified").length;
+            const unverifiedCount = result.verdicts.filter(
+                (v) => v.verdict === "unverified",
+            ).length;
 
             // Nothing checked must never read as "passed": a change set that
             // matches no fact routes gets a loud non-zero exit unless the
             // user explicitly accepts an unchecked run.
             const emptyScope = result.scoped === 0 && result.total > 0;
-            const allowEmptyScope = Boolean((options as Record<string, unknown>)["allowEmptyScope"]);
+            const allowEmptyScope = Boolean(
+                (options as Record<string, unknown>)["allowEmptyScope"],
+            );
             if (emptyScope && !allowEmptyScope) {
                 const message =
                     "0 facts in scope — nothing was checked, so nothing passed. " +
@@ -374,6 +438,21 @@ export async function contractCommand(
                 cliExit(violations.length > 0 ? CLI_EXIT.RUNTIME_FAILURE : 0);
             }
 
+            // Business register first, then the technical line — operators
+            // forward this output to non-terminal teammates.
+            if (violations.length > 0) {
+                console.log(
+                    chalk.red(
+                        `  ✗ ${violations.length} behavior${violations.length === 1 ? "" : "s"} broke — the app no longer matches its record`,
+                    ),
+                );
+            } else if (verifiedCount > 0) {
+                console.log(
+                    chalk.green(
+                        `  ✓ ${verifiedCount} behavior${verifiedCount === 1 ? "" : "s"} checked — all still hold`,
+                    ),
+                );
+            }
             console.log(
                 `  ${verifiedCount} verified · ${violations.length} violated · ${unverifiedCount} unverified  (${result.scoped}/${result.total} facts in scope)`,
             );
@@ -393,11 +472,15 @@ export async function contractCommand(
 
         case "materialize": {
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
-            const outDir = String((options as Record<string, unknown>)["out"] ?? ".raiken/materialized");
+            const outDir = String(
+                (options as Record<string, unknown>)["out"] ?? ".raiken/materialized",
+            );
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             const result = contract.materialize({
                 outDir,
-                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                baseURL:
+                    ((options as Record<string, unknown>)["base-url"] as string | undefined) ??
+                    null,
                 storageStatePath,
             });
             console.log(
@@ -417,7 +500,11 @@ export async function contractCommand(
                 return;
             }
             if (sourceRoutes.length === 0) {
-                console.log(dim("\n  No source routes found. Source extraction supports Next.js app-dir and React Router; run `raiken index` first if the project has not been scanned.\n"));
+                console.log(
+                    dim(
+                        "\n  No source routes found. Source extraction supports Next.js app-dir and React Router; run `raiken index` first if the project has not been scanned.\n",
+                    ),
+                );
                 return;
             }
             console.log(chalk.cyan(`\n  Source routes (${sourceRoutes.length})\n`));
@@ -435,7 +522,9 @@ export async function contractCommand(
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             console.log(chalk.cyan("\n  Snapshotting known routes…\n"));
             const result = await contract.snapshotRoutes({
-                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                baseURL:
+                    ((options as Record<string, unknown>)["base-url"] as string | undefined) ??
+                    null,
                 storageStatePath,
             });
             console.log(
@@ -461,7 +550,9 @@ export async function contractCommand(
                 return;
             }
             for (const outcome of outcomes) {
-                const mark = outcome.covered ? chalk.green("✓ covered") : chalk.yellow("○ still uncovered");
+                const mark = outcome.covered
+                    ? chalk.green("✓ covered")
+                    : chalk.yellow("○ still uncovered");
                 console.log(
                     `  ${mark} ${outcome.requirementText.slice(0, 90)} (${outcome.executedSteps} step(s), ${outcome.factsMinted} fact(s) minted)`,
                 );
@@ -479,11 +570,15 @@ export async function contractCommand(
             const storageStatePath = resolveAuthStorageStatePath(projectPath);
             console.log(chalk.cyan("\n  Recording API reads across known routes…\n"));
             const result = await contract.record({
-                baseURL: ((options as Record<string, unknown>)["base-url"] as string | undefined) ?? null,
+                baseURL:
+                    ((options as Record<string, unknown>)["base-url"] as string | undefined) ??
+                    null,
                 storageStatePath,
             });
             console.log(
-                chalk.green(`  ✓ ${result.recorded} GET endpoint(s) recorded → ${result.filePath}\n`),
+                chalk.green(
+                    `  ✓ ${result.recorded} GET endpoint(s) recorded → ${result.filePath}\n`,
+                ),
             );
             console.log(dim("  Materialized specs will replay these as page.route() mocks."));
             console.log("");
@@ -495,14 +590,18 @@ export async function contractCommand(
             const key = (args ?? [])[0];
             if (!key) {
                 console.error(
-                    chalk.red("\n  Provide a fact key: raiken contract forget <factKey> (see `raiken contract show`)\n"),
+                    chalk.red(
+                        "\n  Provide a fact key: raiken contract forget <factKey> (see `raiken contract show`)\n",
+                    ),
                 );
                 cliExit(CLI_EXIT.USAGE);
             }
             const result = contract.forgetFact(key);
             console.log(
                 result.forgotten
-                    ? chalk.green(`\n  \u2713 fact ${key.slice(0, 8)} forgotten — removed from the contract and the ledger notes it\n`)
+                    ? chalk.green(
+                          `\n  \u2713 fact ${key.slice(0, 8)} forgotten — removed from the contract and the ledger notes it\n`,
+                      )
                     : chalk.red(`\n  \u2717 cannot forget: ${result.reason}\n`),
             );
             return;
@@ -556,7 +655,9 @@ export async function contractCommand(
             if (events.length === 0) {
                 console.log(
                     key
-                        ? dim(`\n  No events recorded for ${key} yet — run \`raiken contract verify\`.\n`)
+                        ? dim(
+                              `\n  No events recorded for ${key} yet — run \`raiken contract verify\`.\n`,
+                          )
                         : dim("\n  Evidence ledger is empty — verify or capture to start it.\n"),
                 );
                 return;
@@ -574,8 +675,12 @@ export async function contractCommand(
                               ? chalk.yellow("○ unverified")
                               : dim(`· ${e.eventType}`);
                 const when = new Date(e.occurredAt).toISOString().replace("T", " ").slice(0, 19);
-                const at = e.commitSha ? `${e.commitSha.slice(0, 7)}${e.commitDirty ? "+" : " "}` : "       ";
-                console.log(`  ${dim(when)}  ${dim(at)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`);
+                const at = e.commitSha
+                    ? `${e.commitSha.slice(0, 7)}${e.commitDirty ? "+" : " "}`
+                    : "       ";
+                console.log(
+                    `  ${dim(when)}  ${dim(at)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`,
+                );
             }
             console.log("");
             return;
@@ -605,12 +710,20 @@ export async function contractCommand(
                 s.rejected && `${s.rejected} rejected`,
                 s.forgotten && `${s.forgotten} forgotten`,
             ].filter(Boolean);
-            console.log(`  ${parts.length > 0 ? parts.join(" · ") : dim("no behavior changes recorded in this range")}`);
+            console.log(
+                `  ${parts.length > 0 ? parts.join(" · ") : dim("no behavior changes recorded in this range")}`,
+            );
             if (changes.silentCommits > 0) {
-                console.log(dim(`  ${changes.silentCommits} commit(s) in range have no ledger events (never verified at that commit)`));
+                console.log(
+                    dim(
+                        `  ${changes.silentCommits} commit(s) in range have no ledger events (never verified at that commit)`,
+                    ),
+                );
             }
             for (const c of changes.commits) {
-                const label = c.uncommitted ? `${c.sha.slice(0, 7)}+ uncommitted edits` : `${c.sha.slice(0, 7)} ${c.subject}`;
+                const label = c.uncommitted
+                    ? `${c.sha.slice(0, 7)}+ uncommitted edits`
+                    : `${c.sha.slice(0, 7)} ${c.subject}`;
                 console.log(`\n  ${chalk.bold(label)}`);
                 for (const e of c.events) {
                     const mark =
@@ -621,7 +734,9 @@ export async function contractCommand(
                               : e.transition === "fixed"
                                 ? chalk.green("✓ fixed   ")
                                 : dim(`${(e.transition ?? e.eventType).padEnd(10)}`);
-                    const what = e.route ? `${e.action} → ${e.expectedObservable}` : (e.detail ?? e.factKey);
+                    const what = e.route
+                        ? `${e.action} → ${e.expectedObservable}`
+                        : (e.detail ?? e.factKey);
                     console.log(`    ${mark} ${what}`);
                 }
                 if (c.reverified > 0) console.log(dim(`    ${c.reverified} re-verified`));
@@ -639,8 +754,12 @@ export async function contractCommand(
                 const ok = contract.restoreReview(Number(undoId));
                 console.log(
                     ok
-                        ? chalk.green(`\n  \u2713 review #${undoId} undone \u2014 fact restored as unverified; it re-verifies next cycle\n`)
-                        : chalk.red("\n  \u2717 only an accepted review with a snapshot can be undone\n"),
+                        ? chalk.green(
+                              `\n  \u2713 review #${undoId} undone \u2014 fact restored as unverified; it re-verifies next cycle\n`,
+                          )
+                        : chalk.red(
+                              "\n  \u2717 only an accepted review with a snapshot can be undone\n",
+                          ),
                 );
                 return;
             }
@@ -662,7 +781,9 @@ export async function contractCommand(
                 return;
             }
             if (reviews.length === 0) {
-                console.log(dim("\n  No pending reviews — the contract matches observed behavior.\n"));
+                console.log(
+                    dim("\n  No pending reviews — the contract matches observed behavior.\n"),
+                );
                 return;
             }
             console.log(chalk.cyan(`\n  Pending behavior changes (${reviews.length})\n`));
@@ -682,7 +803,19 @@ export async function contractCommand(
         case "watch": {
             const opts = options as Record<string, unknown>;
             const everySec = Math.max(30, Number(opts["every"] ?? 600));
-            const webhook = opts["webhook"] as string | undefined;
+            // --webhook wins; alerts.webhookUrl in raiken.config.json is the
+            // documented default so board and watcher share one channel.
+            const {
+                readRawConfigSync,
+                raikenConfigSchema,
+                writeWatchHeartbeat,
+                clearWatchHeartbeat,
+            } = await import("@raiken/core");
+            let webhook = opts["webhook"] as string | undefined;
+            if (!webhook) {
+                const parsedConfig = raikenConfigSchema.safeParse(readRawConfigSync(projectPath));
+                webhook = parsedConfig.success ? parsedConfig.data.alerts?.webhookUrl : undefined;
+            }
             console.log(
                 chalk.cyan(
                     `\n  Watching the contract — verifying every ${everySec}s${webhook ? `, alerts → ${webhook}` : ""}. Ctrl-C to stop.\n`,
@@ -709,6 +842,13 @@ export async function contractCommand(
                         }
                     }
                     const violations = contract.violationsReport(result.verdicts);
+                    // Heartbeat for the board's "watching" banner.
+                    writeWatchHeartbeat(projectPath, {
+                        lastCheckAt: Date.now(),
+                        everySec,
+                        verified: result.verdicts.length - violations.length,
+                        violated: violations.length,
+                    });
                     const when = new Date().toTimeString().slice(0, 8);
                     console.log(
                         `  ${dim(when)}  ${result.verdicts.length - violations.length} verified · ${chalk.red(`${violations.length} violated`)}${regressions.length > 0 ? chalk.red(` · ${regressions.length} NEW`) : ""}`,
@@ -728,9 +868,7 @@ export async function contractCommand(
                             });
                         } catch (err) {
                             console.log(
-                                chalk.yellow(
-                                    `    ⚠ webhook failed: ${safeCliErrorMessage(err)}`,
-                                ),
+                                chalk.yellow(`    ⚠ webhook failed: ${safeCliErrorMessage(err)}`),
                             );
                         }
                     }
@@ -748,6 +886,7 @@ export async function contractCommand(
             await new Promise<void>((resolve) => {
                 const stop = () => {
                     clearInterval(timer);
+                    clearWatchHeartbeat(projectPath);
                     console.log(dim("\n  Watch stopped.\n"));
                     resolve();
                 };
@@ -760,15 +899,23 @@ export async function contractCommand(
         default:
             console.error(
                 chalk.red(`\n  Unknown subcommand "${subcommand}".`) +
-                    dim("  — show | coverage | capture | mint | import | export | diff | verify | review | history\n") +
-            dim("     search | explore | materialize | routes | snapshot | record | watch\n"),
+                    dim(
+                        "  — show | coverage | capture | mint | import | export | diff | verify | review | history\n",
+                    ) +
+                    dim(
+                        "     search | explore | materialize | routes | snapshot | record | watch\n",
+                    ),
             );
             cliExit(CLI_EXIT.USAGE);
     }
 }
 
 function printScope(scope: ContractScope): void {
-    const label = { graph: "code graph (graft)", names: "file names (code graph unavailable)", all: "--all" }[scope.scoper];
+    const label = {
+        graph: "code graph (graft)",
+        names: "file names (code graph unavailable)",
+        all: "--all",
+    }[scope.scoper];
     console.log(dim(`  Scoped by ${label}`));
     if (scope.globalReason) console.log(dim(`  Whole contract in scope: ${scope.globalReason}`));
     const seen = new Set<string>();

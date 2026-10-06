@@ -37,4 +37,15 @@ export interface BoardReport {
     rows: BoardRow[];
     counts: { works: number; broken: number; notChecked: number };
     generatedAt: number;
+    /** Live watcher heartbeat when `raiken contract watch` is running. */
+    watch?: WatchHeartbeat | null;
+}
+
+export interface WatchHeartbeat {
+    /** Epoch ms of the last completed verification cycle. */
+    lastCheckAt: number;
+    /** Cycle interval in seconds (from `contract watch --every`). */
+    everySec: number;
+    verified: number;
+    violated: number;
 }

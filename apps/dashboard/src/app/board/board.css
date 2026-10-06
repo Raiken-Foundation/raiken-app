@@ -32,6 +32,13 @@
     font-size: 0.95rem;
 }
 
+.board-watch {
+    margin: -1rem 0 1.25rem;
+    color: var(--ok, #3fb950);
+    font-size: 0.82rem;
+    font-family: var(--mono);
+}
+
 .board-register-toggle {
     margin-left: auto;
     color: var(--accent);

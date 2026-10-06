@@ -419,6 +419,10 @@ export async function startServer(options: StartServerOptions | number = 7101) {
     try {
         await app.listen({ port, host: session.host });
         console.log(`\nRaiken is running at http://localhost:${port}`);
+        console.log(
+            "Status board for the team: the same URL opens a plain-language view of " +
+                "every promise (works / broken / not checked) — share it.\n",
+        );
         if (session.mode === "remote") {
             console.warn(
                 "Remote mode is enabled. Open the dashboard with " +

@@ -70,6 +70,13 @@ export function BoardScreen() {
                 </a>
             </header>
 
+            {data.watch ? (
+                <p className="board-watch">
+                    watching · last check {timeAgo(data.watch.lastCheckAt)} ·{" "}
+                    {data.watch.violated > 0 ? `${data.watch.violated} broken` : "none broken"}
+                </p>
+            ) : null}
+
             {data.rows.length === 0 ? (
                 <BoardEmptyState
                     onImport={(input) => importMutation.mutate(input)}

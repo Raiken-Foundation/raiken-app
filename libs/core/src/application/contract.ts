@@ -30,6 +30,7 @@ import {
     parseRequirementsFile,
     parseTicketRequirements,
     projectBoard,
+    readWatchHeartbeat,
     recordApiCalls,
     scopeFactsByChanges,
     scopeFactsByImpact,
@@ -226,12 +227,14 @@ export class ContractApplication implements ProjectApplicationContext {
     board(): import("../contract/status").BoardReport {
         return this.withStore((store) => {
             computeCoverage(store);
-            return projectBoard({
+            const report = projectBoard({
                 intents: store.listIntentFacts(),
                 facts: store.listBehaviorFacts(),
                 events: store.listFactEvents(undefined, 500),
                 now: Date.now(),
             });
+            report.watch = readWatchHeartbeat(this.projectPath);
+            return report;
         });
     }
 

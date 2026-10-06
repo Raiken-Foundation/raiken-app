@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { BehaviorFact, FactEvent, IntentFact } from "./types";
 
 /**
@@ -47,6 +49,61 @@ export interface BoardReport {
     rows: BoardRow[];
     counts: { works: number; broken: number; notChecked: number };
     generatedAt: number;
+    /** Live watcher heartbeat when `raiken contract watch` is running. */
+    watch?: WatchHeartbeat | null;
+}
+
+export interface WatchHeartbeat {
+    /** Epoch ms of the last completed verification cycle. */
+    lastCheckAt: number;
+    /** Cycle interval in seconds (from `contract watch --every`). */
+    everySec: number;
+    verified: number;
+    violated: number;
+}
+
+/**
+ * Read the watcher heartbeat from `.raiken/watch-state.json`. Null when the
+ * file is absent or stale (no cycle within 3x the interval — the watcher
+ * died without cleanup). Pure fs, no store.
+ */
+export function readWatchHeartbeat(projectPath: string, now = Date.now()): WatchHeartbeat | null {
+    try {
+        const raw = fs.readFileSync(path.join(projectPath, ".raiken", "watch-state.json"), "utf-8");
+        const parsed = JSON.parse(raw) as WatchHeartbeat;
+        if (typeof parsed.lastCheckAt !== "number") return null;
+        if (now - parsed.lastCheckAt > 3 * Math.max(30, parsed.everySec ?? 600) * 1000) {
+            return null; // stale — the watcher is not running
+        }
+        return {
+            lastCheckAt: parsed.lastCheckAt,
+            everySec: Math.max(30, parsed.everySec ?? 600),
+            verified: parsed.verified ?? 0,
+            violated: parsed.violated ?? 0,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** Record a watcher cycle (called by `raiken contract watch` after each verify). */
+export function writeWatchHeartbeat(projectPath: string, state: WatchHeartbeat): void {
+    try {
+        const dir = path.join(projectPath, ".raiken");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, "watch-state.json"), JSON.stringify(state), "utf-8");
+    } catch {
+        // The heartbeat is advisory; a failed write must not kill the watcher.
+    }
+}
+
+/** Remove the heartbeat on a clean stop. */
+export function clearWatchHeartbeat(projectPath: string): void {
+    try {
+        fs.rmSync(path.join(projectPath, ".raiken", "watch-state.json"), { force: true });
+    } catch {
+        // already gone
+    }
 }
 
 /**

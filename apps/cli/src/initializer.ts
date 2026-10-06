@@ -457,11 +457,7 @@ export async function initializeProject(
 
         console.log(chalk.green("\n✓ Project initialization complete!"));
         console.log(chalk.cyan("\nNext steps:"));
-        console.log(
-            chalk.gray(
-                '  1. Discover your app: "raiken discover http://localhost:3000 --skip-auth"',
-            ),
-        );
+        console.log(chalk.gray('  1. Discover your app: "raiken discover http://localhost:3000"'));
         console.log(
             chalk.gray(
                 '  2. Build the contract: "raiken contract capture" then "raiken contract import --file <ac.md>"',
@@ -473,7 +469,9 @@ export async function initializeProject(
             ),
         );
         console.log(
-            chalk.gray('  4. Or run "raiken" for the interactive agent / "/config" for AI setup\n'),
+            chalk.gray(
+                '  4. Share the board: "raiken start" serves the status board at http://localhost:7101 — the whole team can read it\n',
+            ),
         );
 
         if (preferences.testFramework === "playwright" && !webServerConfigured) {
@@ -1027,9 +1025,7 @@ export function getPlaywrightInstallCommand(manager: PackageManager): {
  * project browserless. Defaults to 10 minutes; CI and slow networks can
  * override via `RAIKEN_BROWSER_INSTALL_TIMEOUT_MS`.
  */
-export function resolveBrowserInstallTimeoutMs(
-    env: NodeJS.ProcessEnv = process.env,
-): number {
+export function resolveBrowserInstallTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
     const override = Number(env.RAIKEN_BROWSER_INSTALL_TIMEOUT_MS);
     return Number.isFinite(override) && override > 0 ? override : 10 * 60_000;
 }
@@ -1080,7 +1076,11 @@ async function installPlaywrightPackage(
             new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                     if (child && !child.killed) child.kill("SIGTERM");
-                    reject(new Error(`@playwright/test install timed out after ${installTimeoutMinutes()}`));
+                    reject(
+                        new Error(
+                            `@playwright/test install timed out after ${installTimeoutMinutes()}`,
+                        ),
+                    );
                 }, INSTALL_TIMEOUT_MS);
             }),
         ]);

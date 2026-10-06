@@ -235,7 +235,21 @@ are stamped `// @raiken-unverified`, and `raiken test` refuses to run them
 (exit 1) unless `--allow-unverified` is passed — review the spec and remove
 the marker once it is grounded.
 
-Exit codes are scriptable: `0` success, `1` runtime/test failure, `2` usage error, `3` config/auth error, `4` busy conflict, `130` cancelled.
+#### Exit codes (the CI contract)
+
+Every command follows one policy — scriptable and stable across versions:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | runtime / test failure — **including any contract violation and an empty verify scope** |
+| `2` | usage / validation error |
+| `3` | config / auth error (missing key, unreadable config) |
+| `4` | busy / conflict (another run holds the lock) |
+| `124` | timeout (GNU convention) |
+| `130` | cancelled (Ctrl-C) |
+
+For `raiken contract verify` specifically: a red is exit `1`, and **so is an unchecked run** — when the resolved scope contains no facts (nothing was verified, nothing passed), verify exits `1` with the remedy (`--all`, or `--allow-empty-scope` to accept an unchecked run). An empty contract exits `0` honestly ("nothing to verify yet").
 
 ### Configuration
 
@@ -295,12 +309,19 @@ Raiken is configured via `raiken.config.json` in your project root (created by `
   },
   "quarantine": {
     "testFiles": []
+  },
+  "alerts": {
+    "webhookUrl": "https://hooks.slack.com/services/…"
   }
 }
 ```
 
 `quarantine.testFiles` holds flaky specs (project-relative paths) that `raiken test` skips by
 default; run them explicitly with `raiken test --only-flaky`.
+
+`alerts.webhookUrl` is the one alerting channel shared by the dashboard's **Alert the team**
+button and `raiken contract watch` (the `--webhook` flag overrides it per run). Payloads are
+plain JSON posts (`{ text, detail }`) that Slack/Discord-style endpoints render directly.
 
 The API key can also be set via the `OPENROUTER_API_KEY` environment variable (recommended) or in a `.env` file in your project root.
 

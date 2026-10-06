@@ -42,7 +42,11 @@ describe("observable + action parsing", () => {
         });
         expect(
             parseObservable('exposes inputs [Email, Password] and submit [Sign in]'),
-        ).toEqual({ kind: "inputs", labels: ["Email", "Password"] });
+        ).toEqual({ kind: "inputs", labels: ["Email", "Password"], submitLabel: "Sign in" });
+        expect(parseObservable("exposes inputs [Email]")).toEqual({
+            kind: "inputs",
+            labels: ["Email"],
+        });
         expect(parseObservable("unrecognized shape")).toBeNull();
     });
 

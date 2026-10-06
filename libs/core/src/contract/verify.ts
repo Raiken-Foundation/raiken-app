@@ -1,4 +1,5 @@
 import { chromium, type Page } from "playwright";
+import { readFormControls } from "../browser/form-controls";
 import type { BehaviorFact, FactEvidence } from "./types";
 
 /**
@@ -39,6 +40,8 @@ interface ObservableSpec {
     kind: "heading" | "text" | "inputs";
     text?: string;
     labels?: string[];
+    /** Submit label minted into the fact (`… and submit [Add chore]`), now verified. */
+    submitLabel?: string;
 }
 
 /** Parse a stored `expectedObservable` into a machine-checkable spec. */
@@ -47,11 +50,12 @@ export function parseObservable(expected: string): ObservableSpec | null {
     if (heading) return { kind: "heading", text: heading[1] };
     const text = expected.match(/^shows "(.+)"$/);
     if (text) return { kind: "text", text: text[1] };
-    const inputs = expected.match(/^exposes inputs \[([^\]]+)\](?: and submit \[[^\]]+\])?$/);
+    const inputs = expected.match(/^exposes inputs \[([^\]]+)\](?: and submit \[([^\]]+)\])?$/);
     if (inputs) {
         return {
             kind: "inputs",
             labels: inputs[1].split(", ").map((l) => l.trim()),
+            submitLabel: inputs[2],
         };
     }
     return null;
@@ -72,28 +76,33 @@ export function resolveFactUrl(route: string, baseURL: string): string {
 }
 
 async function checkObservable(page: Page, spec: ObservableSpec): Promise<boolean> {
-    return page.evaluate((s) => {
-        if (s.kind === "heading") {
-            const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4"));
-            return headings.some((h) => (h.textContent ?? "").trim() === s.text);
-        }
-        if (s.kind === "text") {
-            return (document.body?.innerText ?? "").includes(s.text as string);
-        }
-        const controls = Array.from(document.querySelectorAll("input, select, textarea"));
-        return (s.labels ?? []).every((label) =>
-            controls.some((el) => {
-                const hay = [
-                    el.getAttribute("placeholder"),
-                    el.getAttribute("aria-label"),
-                    el.getAttribute("name"),
-                ]
-                    .filter(Boolean)
-                    .join(" ");
-                return hay.toLowerCase().includes(label.toLowerCase());
-            }),
-        );
-    }, spec);
+    if (spec.kind === "heading") {
+        return page.evaluate((text) => {
+            // Any heading level, plus `role="heading"` elements: the accessible
+            // view of a page's headings, not the tag-name view.
+            const headings = Array.from(
+                document.querySelectorAll("h1, h2, h3, h4, h5, h6, [role=heading]"),
+            );
+            return headings.some((h) => (h.textContent ?? "").trim() === text);
+        }, spec.text);
+    }
+    if (spec.kind === "text") {
+        return page.evaluate((text) => {
+            return (document.body?.innerText ?? "").includes(text as string);
+        }, spec.text);
+    }
+    // Form observables re-observe through the same accessible-name collector
+    // discovery mints with (`browser/form-controls.ts`) — matching a raw
+    // attribute haystack here is what made accessible `<label for>` markup
+    // false-fail.
+    const { fields, submits } = await readFormControls(page);
+    const labelsOk = (spec.labels ?? []).every((label) =>
+        fields.some((f) => f.label.toLowerCase().includes(label.toLowerCase())),
+    );
+    const submitOk =
+        !spec.submitLabel ||
+        submits.some((s) => s.toLowerCase().includes(spec.submitLabel.toLowerCase()));
+    return labelsOk && submitOk;
 }
 
 /** Re-observe one fact; never throws — failures become `unverified`. */

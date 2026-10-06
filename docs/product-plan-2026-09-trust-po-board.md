@@ -53,7 +53,8 @@ A *projection* of existing `contractView` data — no schema or pipeline changes
 | 2.3 | **The broken-row moment:** plain sentence ("submitting the reservation form no longer shows …"), ticket ref, since-when, one **Alert the team** button → configured webhook (reuses `contract watch` plumbing) | Clicking alert posts to the webhook; row history visible |
 | 2.4 | **Plain / Technical register toggle** — plain = the board; technical = today's contract view with evidence and commands. Deep-linkable (hash routes exist) | Same data, one truth, linkable rows |
 | 2.5 | **A11y fixes from the audit:** palette focus trap + restore + `aria-activedescendant` (D1); drawer Escape + labeled close + dialog semantics (D2); one `<h1>` per screen (D3); skip link (D4) | Keyboard-only pass over board + palette + drawer; axe clean on the board |
-| 2.6 | **Sharing (stretch):** read-only board link or static export for stakeholders | URL opens the board without auth friction |
+| 2.6 | **`contractImport` tRPC procedure** — the API cannot add requirements today; the dashboard dead-ends into the CLI (`Cmd` hint). Add import (file path or pasted ACs) so the operator loop closes on the dashboard | Requirements importable from the board's empty state; no CLI handoff |
+| 2.7 | **Sharing (stretch):** read-only board link or static export for stakeholders | URL opens the board without auth friction |
 
 **Verify:** Playwright specs for board states (empty / mixed / broken); keyboard + axe pass;
 walkthrough with the `table-crud-a11y` live data; show it to a real PO.
@@ -67,6 +68,7 @@ The CLI stays the operator's instrument; its outputs become forwardable to POs.
 | 3.1 | `verify` / `coverage` output: business sentence first ("2 promises broken"), technical detail below; `--json` / `--format github` unchanged | Snapshot tests; an operator can paste output into Slack as-is |
 | 3.2 | `contract watch` graduates: documented alert channel; watcher state surfaced as a board banner | Board shows "watching · last check 3 min ago" |
 | 3.3 | `init` / `start` print the handoff: board URL + "share it with the team" | First-run output includes the PO entry point |
+| 3.4 | **Interface polish:** `--json` on the read commands that lack it (`status`, `sessions`, `search`); document the exit-code contract (0/1/2/3/4/124/130) in the README — it is the gatekeeper's interface and lives only in code comments today | Every read command scriptable; exit codes documented where CI users look |
 
 ## Phase 4 — Docs & onboarding alignment (1 day)
 

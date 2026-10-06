@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CodeGraphDB } from "../database/db";
 import { SqliteDbAdapter } from "../database/adapter";
 import { ContractStore } from "../contract/store";
-import { computeCoverage, matchScore } from "../contract/coverage";
+import { computeCoverage, COVERAGE_MATCH_THRESHOLD, matchScore } from "../contract/coverage";
 import { mintFromSiteKnowledge, mintObservedFact } from "../contract/mint";
 import {
     parseRequirementsFile,
@@ -136,7 +136,56 @@ describe("coverage matching", () => {
                 expectedObservable: 'shows "Please enter an email address."',
             },
         );
-        expect(score).toBeGreaterThan(0.34);
+        expect(score).toBeGreaterThan(COVERAGE_MATCH_THRESHOLD);
+    });
+
+    it("vetoes a fact that does not assert the requirement's quoted copy (the round-3 over-claim)", () => {
+        // tasks-api shape: an API AC "covered" by a heading fact on the home page.
+        const score = matchScore(
+            { requirementText: 'adding a chore without a name shows "Chore needs a name"', routeHint: "/" },
+            {
+                route: "http://localhost:9417/",
+                action: "view form on http://localhost:9417/",
+                expectedObservable: "exposes inputs [New chore] and submit [Add chore]",
+            },
+        );
+        expect(score).toBe(0);
+    });
+
+    it("accepts a fact that asserts the quoted copy, even from the failure path", () => {
+        const score = matchScore(
+            { requirementText: 'adding a chore without a name shows "Chore needs a name"', routeHint: "/" },
+            {
+                route: "http://localhost:9417/",
+                action: 'submit "Add chore" form empty',
+                expectedObservable: 'shows "Chore needs a name"',
+            },
+        );
+        expect(score).toBeGreaterThan(COVERAGE_MATCH_THRESHOLD);
+    });
+
+    it("vetoes route disagreement: an API AC is not covered by a home-page heading fact", () => {
+        const score = matchScore(
+            { requirementText: "GET /api/tasks returns the task list", routeHint: "/api/tasks" },
+            {
+                route: "http://localhost:9404/",
+                action: "open http://localhost:9404/",
+                expectedObservable: 'shows heading "Tasks API"',
+            },
+        );
+        expect(score).toBe(0);
+    });
+
+    it("vetoes a fact quoting different copy for the same requirement (contradictory observables)", () => {
+        const score = matchScore(
+            { requirementText: 'a duplicate chore shows "That chore already exists"', routeHint: "/" },
+            {
+                route: "http://localhost:9417/",
+                action: 'submit "Add chore" form empty',
+                expectedObservable: 'shows "Chore needs a name"',
+            },
+        );
+        expect(score).toBe(0);
     });
 
     it("marks requirements with no matching fact uncovered", () => {

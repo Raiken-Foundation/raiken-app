@@ -1,7 +1,7 @@
 import { chromium, type Page } from "playwright";
 import { callWithTokenBudget, extractMessageContent } from "../agent/ai-providers";
 import type { ResolvedAIConfig } from "../agent/ai-providers";
-import { matchScore } from "./coverage";
+import { COVERAGE_MATCH_THRESHOLD, matchScore } from "./coverage";
 import { mintObservedFact } from "./mint";
 import { ContractStore } from "./store";
 import type { BehaviorFact, FactEvidence, IntentFact } from "./types";
@@ -260,7 +260,7 @@ async function executePlan(
     const fresh = options.store
         .listBehaviorFacts("verified")
         .filter((f) => (f.evidence as FactEvidence | null)?.source === "agent");
-    const covered = fresh.some((f) => matchScore(intent, f) >= 0.34);
+    const covered = fresh.some((f) => matchScore(intent, f) >= COVERAGE_MATCH_THRESHOLD);
     return {
         requirementText: intent.requirementText,
         factsMinted: fresh.length,

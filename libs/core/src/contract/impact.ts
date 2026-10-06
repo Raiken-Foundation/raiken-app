@@ -407,7 +407,10 @@ export function scopeFactsByImpact(input: {
         .map((f) => path.resolve(projectPath, f))
         .filter((f) => f.startsWith(projectPath + path.sep) || f === projectPath);
     if (changed.length === 0)
-        return { scoped: [], global: false, reasons, globalReason: null, unmapped: [] };
+        // No change information (non-git project, clean tree) must not mean
+        // "verify nothing and pass": it means we cannot narrow, so the whole
+        // contract is in scope. Same fail-safe rule as an unmappable code file.
+        return everything("no change information — verifying the whole contract");
 
     const globalFile = changed.find((f) => {
         const base = path.basename(f);

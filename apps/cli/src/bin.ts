@@ -208,6 +208,7 @@ program
     .option("--ticket <id>", "import: ticket id (uses the configured provider)")
     .option("--all", "verify: re-observe the full contract, not just changed-scoped facts", false)
     .option("--base <ref>", "verify: git base for change scoping", "HEAD")
+    .option("--allow-empty-scope", "verify: exit 0 even when the resolved scope checked nothing", false)
     .option("--out <dir>", "materialize: output directory", ".raiken/materialized")
     .option("--base-url <url>", "verify/materialize: override the app base URL")
     .option("--accept <id>", "review: accept a behavior change (retires the old fact)")

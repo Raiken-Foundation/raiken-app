@@ -88,9 +88,10 @@ describe("diff scoping", () => {
         }
     });
 
-    it("scopes nothing on an empty change set", () => {
-        const { scoped } = scopeFactsByChanges([fact()], []);
-        expect(scoped).toHaveLength(0);
+    it("scopes the whole contract on an empty change set (no change info must not pass silently)", () => {
+        const { scoped, global } = scopeFactsByChanges([fact(), fact()], []);
+        expect(global).toBe(true);
+        expect(scoped).toHaveLength(2);
     });
 });
 

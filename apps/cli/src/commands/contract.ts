@@ -334,6 +334,35 @@ export async function contractCommand(
             const verifiedCount = result.verdicts.filter((v) => v.verdict === "verified").length;
             const unverifiedCount = result.verdicts.filter((v) => v.verdict === "unverified").length;
 
+            // Nothing checked must never read as "passed": a change set that
+            // matches no fact routes gets a loud non-zero exit unless the
+            // user explicitly accepts an unchecked run.
+            const emptyScope = result.scoped === 0 && result.total > 0;
+            const allowEmptyScope = Boolean((options as Record<string, unknown>)["allowEmptyScope"]);
+            if (emptyScope && !allowEmptyScope) {
+                const message =
+                    "0 facts in scope — nothing was checked, so nothing passed. " +
+                    "Use --all to verify the whole contract, or --allow-empty-scope to accept an unchecked run.";
+                if ((options as Record<string, unknown>)["json"]) {
+                    process.stdout.write(
+                        `${JSON.stringify(
+                            {
+                                ...result,
+                                verifiedCount,
+                                unverifiedCount,
+                                violations,
+                                error: message,
+                            },
+                            null,
+                            2,
+                        )}\n`,
+                    );
+                    cliExit(CLI_EXIT.RUNTIME_FAILURE);
+                }
+                console.log(chalk.red(`\n  ✗ ${message}\n`));
+                cliExit(CLI_EXIT.RUNTIME_FAILURE);
+            }
+
             if ((options as Record<string, unknown>)["json"]) {
                 process.stdout.write(
                     `${JSON.stringify(

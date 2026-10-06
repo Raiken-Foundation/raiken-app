@@ -383,7 +383,11 @@ export class ContractApplication implements ProjectApplicationContext {
             scoper: "names",
             scoped: byName.scoped,
             reasons: [],
-            globalReason: byName.global ? "a global file changed" : null,
+            globalReason: byName.global
+                ? changedFiles.length === 0
+                    ? "no change information — verifying the whole contract"
+                    : "a global file changed"
+                : null,
             unmapped: [],
         };
     }

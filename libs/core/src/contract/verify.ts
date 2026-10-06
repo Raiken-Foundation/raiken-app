@@ -241,7 +241,10 @@ export function scopeFactsByChanges(
     facts: BehaviorFact[],
     changedFiles: string[],
 ): { scoped: BehaviorFact[]; global: boolean } {
-    if (changedFiles.length === 0) return { scoped: [], global: false };
+    // No change information (non-git project, clean tree) widens to the whole
+    // contract — an empty scope here used to short-circuit verify into a
+    // silent exit 0 on a broken app.
+    if (changedFiles.length === 0) return { scoped: facts, global: true };
 
     const global = changedFiles.some((f) => {
         const base = f.split("/").pop() ?? f;

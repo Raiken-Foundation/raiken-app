@@ -12,6 +12,7 @@ export * from "./mint";
 export * from "./record";
 export * from "./routes";
 export * from "./snapshotter";
+export * from "./status";
 export * from "./store";
 export * from "./types";
 export * from "./verify";

@@ -21,6 +21,7 @@ import {
     mintFromSiteKnowledge,
     parseRequirementsFile,
     parseTicketRequirements,
+    projectBoard,
     extractRouteBindings,
     loadDependentsGraph,
     scopeFactsByChanges,
@@ -204,6 +205,24 @@ export class ContractApplication implements ProjectApplicationContext {
     /** Compute and persist requirement coverage. */
     coverage(): ReturnType<typeof computeCoverage> {
         return this.withStore((store) => computeCoverage(store));
+    }
+
+    /**
+     * The Reader's projection: every requirement as works/broken/not-checked
+     * with ticket refs and last-observed times. Coverage is recomputed first
+     * so intent statuses reflect the current facts, then the ledger supplies
+     * the "since when" behind each row.
+     */
+    board(): import("../contract/status").BoardReport {
+        return this.withStore((store) => {
+            computeCoverage(store);
+            return projectBoard({
+                intents: store.listIntentFacts(),
+                facts: store.listBehaviorFacts(),
+                events: store.listFactEvents(undefined, 500),
+                now: Date.now(),
+            });
+        });
     }
 
     /** Token search across both sides of the contract. */

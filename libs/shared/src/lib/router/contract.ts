@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { appFor } from "./app-context";
 import { procedure } from "./trpc";
 
@@ -12,6 +13,32 @@ export const contractRouter = {
     contractView: procedure.query(({ ctx }) => appFor(ctx).contract.view()),
 
     contractCoverage: procedure.query(({ ctx }) => appFor(ctx).contract.coverage()),
+
+    /**
+     * The Reader's projection — works/broken/not-checked per requirement,
+     * no scores. This is what the board renders.
+     */
+    contractBoard: procedure.query(({ ctx }) => appFor(ctx).contract.board()),
+
+    /**
+     * Import requirements from the dashboard (file path or pasted text) —
+     * before this the requirements side was CLI-only and the board's empty
+     * state dead-ended into a terminal command.
+     */
+    contractImport: procedure
+        .input(z.object({ filePath: z.string().optional(), text: z.string().optional() }))
+        .mutation(({ input, ctx }) => {
+            if (!input.filePath && !input.text) {
+                throw new TRPCError({
+                    code: "BAD_REQUEST",
+                    message: "Provide filePath or text",
+                });
+            }
+            return appFor(ctx).contract.importFromFile({
+                filePath: input.filePath,
+                text: input.text,
+            });
+        }),
 
     contractFacts: procedure
         .input(z.object({ status: z.string().optional() }))

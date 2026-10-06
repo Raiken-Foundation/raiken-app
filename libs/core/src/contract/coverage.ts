@@ -99,12 +99,19 @@ export function matchScore(
 
 /**
  * Compute the coverage report and persist the derived status back onto the
- * intent facts (`uncovered`/`covered`; `violated` is set by the verifier when
- * a matched fact later breaks — preserved here if already set).
+ * intent facts. Matching runs over verified AND violated facts: a broken
+ * fact must keep satisfying its requirement (as a violation), not vanish
+ * from the pool — otherwise a recompute after a regression reads the
+ * promise as merely "uncovered" and verify and coverage disagree (round-2
+ * dogfood defect #9, resurfaced by the board). The best-scoring match
+ * decides: violated fact → the requirement reads violated; verified fact →
+ * covered; no match → uncovered.
  */
 export function computeCoverage(store: ContractStore, threshold = COVERAGE_MATCH_THRESHOLD): CoverageReport {
     const intents = store.listIntentFacts();
-    const observed = store.listBehaviorFacts("verified");
+    const observed = store
+        .listBehaviorFacts()
+        .filter((f) => f.status === "verified" || f.status === "violated");
     const entries: CoverageEntry[] = [];
 
     for (const intent of intents) {
@@ -114,12 +121,10 @@ export function computeCoverage(store: ContractStore, threshold = COVERAGE_MATCH
             .sort((a, b) => b.score - a.score)
             .slice(0, 3);
 
-        // A previously-violated intent stays violated until a fresh observed
-        // fact covers it (the verifier clears it on re-verification).
         const verdict: CoverageEntry["verdict"] =
             matches.length === 0
                 ? "uncovered"
-                : intent.status === "violated"
+                : matches[0].fact.status === "violated"
                   ? "violated"
                   : "covered";
 

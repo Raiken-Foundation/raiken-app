@@ -228,6 +228,58 @@ describe("coverage matching", () => {
             fs.rmSync(dir, { recursive: true, force: true });
         }
     });
+
+    it("keeps a requirement violated when its matched fact broke (verify and coverage agree)", () => {
+        const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "raiken-cov2-")));
+        const db = new CodeGraphDB(dir);
+        const store = new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), dir));
+        try {
+            const fact = store.upsertBehaviorFact({
+                route: "/",
+                precondition: null,
+                action: "open /",
+                expectedObservable: 'shows heading "Chores"',
+                status: "verified",
+                evidence: null,
+                sourceCommit: null,
+                capturedAt: 1,
+                lastVerifiedAt: null,
+                verifiedCount: 2,
+                violatedCount: 0,
+            });
+            store.upsertIntentFact({
+                requirementText: 'open / shows heading "Chores"',
+                routeHint: "/",
+                ticketId: null,
+                ticketProvider: null,
+                ticketSeverity: null,
+                ticketUrl: null,
+                neverRegress: false,
+                status: "uncovered",
+                matchedFactId: null,
+                source: "file",
+                importedAt: 1,
+            });
+
+            // The fact breaks (as the verifier would record it).
+            store.setBehaviorStatus(fact.id!, "violated");
+
+            const report = computeCoverage(store);
+            expect(report.entries[0].verdict).toBe("violated");
+            expect(report.violated).toBe(1);
+            // The link to the violated fact survives the recompute — the
+            // board's broken row needs it for evidence.
+            expect(store.listIntentFacts()[0].matchedFactId).toBe(fact.id);
+
+            // Re-verified: the same requirement returns to covered.
+            store.setBehaviorStatus(fact.id!, "verified");
+            const after = computeCoverage(store);
+            expect(after.entries[0].verdict).toBe("covered");
+        } finally {
+            db.close();
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("minting", () => {

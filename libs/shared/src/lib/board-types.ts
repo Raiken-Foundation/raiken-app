@@ -41,6 +41,27 @@ export interface BoardReport {
     generatedAt: number;
     /** Live watcher heartbeat when `raiken contract watch` is running. */
     watch?: WatchHeartbeat | null;
+    /**
+     * Behavior changes awaiting a human decision, in Reader language. The
+     * workbench asks "accept or regression?" — a product question the Reader
+     * is usually the only person who can answer, so the board asks it plainly.
+     */
+    needsYourCall?: BoardCall[];
+}
+
+export interface BoardCall {
+    reviewId: number;
+    /** The observed fact behind the change — links the call to its board row. */
+    factKey: string;
+    /** The promise this change belongs to, when an intent matches it. */
+    requirementText: string | null;
+    route: string;
+    /** The behavior as recorded, in observable notation. */
+    was: string;
+    /** What verify actually saw (business-language detail). */
+    observed: string;
+    /** When the change was first observed. */
+    sinceWhen: number;
 }
 
 export interface WatchHeartbeat {

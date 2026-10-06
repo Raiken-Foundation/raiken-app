@@ -1,6 +1,14 @@
 import type { BoardRow } from "@raiken/shared";
 import { describe, expect, it } from "vitest";
-import { groupRows, statusGlyph, statusLabel, summarize, timeAgo } from "../helpers";
+import {
+    explainCall,
+    groupRows,
+    plainObservable,
+    statusGlyph,
+    statusLabel,
+    summarize,
+    timeAgo,
+} from "../helpers";
 
 function row(overrides: Partial<BoardRow> = {}): BoardRow {
     return {
@@ -107,5 +115,49 @@ describe("board timestamps", () => {
         expect(timeAgo(now - 5 * 60_000, now)).toBe("5 min ago");
         expect(timeAgo(now - 3 * 3_600_000, now)).toBe("3 h ago");
         expect(timeAgo(now - 26 * 3_600_000, now)).toBe("yesterday");
+    });
+});
+
+describe("plainObservable — observable notation in English", () => {
+    it("translates the three observable shapes a Reader will meet", () => {
+        expect(plainObservable('shows "Tool name is required"')).toBe(
+            'show "Tool name is required"',
+        );
+        expect(plainObservable('shows heading "ToolCrib"')).toBe('show the heading "ToolCrib"');
+        expect(
+            plainObservable("exposes inputs [Tool name, Borrower, Days] and submit [Record loan]"),
+        ).toBe('have Tool name, Borrower and Days fields, and a "Record loan" button');
+    });
+
+    it("handles a single field without pluralising it", () => {
+        expect(plainObservable("exposes inputs [Email]")).toBe("have Email field");
+    });
+
+    it("passes anything it does not recognise through untouched", () => {
+        expect(plainObservable("does something new")).toBe("does something new");
+    });
+});
+
+describe("explainCall — the Reader's decision, stated plainly", () => {
+    const call = {
+        reviewId: 1,
+        requirementText: 'recording a loan without a tool shows "Tool name is required"',
+        route: "http://localhost:9500/lend",
+        was: 'shows "Tool name is required"',
+        observed: 'expected shows "Tool name is required" — no longer present',
+        sinceWhen: 5,
+    };
+
+    it("asks about the promise with no jargon in the sentence", () => {
+        const plain = explainCall(call);
+        expect(plain.title).toBe(call.requirementText);
+        expect(plain.before).toBe('It used to show "Tool name is required".');
+        expect(plain.now).toBe("It no longer does that.");
+        expect(JSON.stringify(plain)).not.toMatch(/exposes inputs|observable|factKey/);
+    });
+
+    it("falls back to the page when no ticket covers the change", () => {
+        const plain = explainCall({ ...call, requirementText: null });
+        expect(plain.title).toBe("An observed behavior on /lend");
     });
 });

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { BehaviorFact, FactEvent, IntentFact } from "./types";
+import type { BehaviorFact, FactEvent, FactReview, IntentFact } from "./types";
 
 /**
  * The Reader's projection of the contract.
@@ -53,6 +53,27 @@ export interface BoardReport {
     generatedAt: number;
     /** Live watcher heartbeat when `raiken contract watch` is running. */
     watch?: WatchHeartbeat | null;
+    /**
+     * Behavior changes awaiting a human decision, in Reader language. The
+     * workbench asks "accept or regression?" — a product question the Reader
+     * is usually the only person who can answer, so the board asks it plainly.
+     */
+    needsYourCall?: BoardCall[];
+}
+
+export interface BoardCall {
+    reviewId: number;
+    /** The observed fact behind the change — links the call to its board row. */
+    factKey: string;
+    /** The promise this change belongs to, when an intent matches it. */
+    requirementText: string | null;
+    route: string;
+    /** The behavior as recorded, in observable notation. */
+    was: string;
+    /** What verify actually saw (business-language detail). */
+    observed: string;
+    /** When the change was first observed. */
+    sinceWhen: number;
 }
 
 export interface WatchHeartbeat {
@@ -118,11 +139,14 @@ export function projectBoard(input: {
     intents: IntentFact[];
     facts: BehaviorFact[];
     events?: FactEvent[];
+    /** Pending behavior-change reviews — surfaced as the Reader's "needs your call". */
+    reviews?: FactReview[];
     now?: number;
 }): BoardReport {
     const { intents, facts } = input;
     const events = input.events ?? [];
     const factByKey = new Map(facts.map((f) => [f.factKey, f]));
+    const factIdByKey = new Map(facts.map((f) => [f.factKey, f.id]));
 
     const rows = intents.map((intent): BoardRow => {
         const matched = intent.matchedFactId
@@ -184,5 +208,27 @@ export function projectBoard(input: {
             notChecked: rows.filter((r) => r.status === "not-checked").length,
         },
         generatedAt: input.now ?? 0,
+        needsYourCall: (input.reviews ?? [])
+            // Only changes that are still true. A review whose fact verifies
+            // again is history (the round-1 staleness defect) — asking the
+            // Reader to adjudicate a change that no longer exists would be
+            // worse than not asking at all.
+            .filter((review) => factByKey.get(review.factKey)?.status === "violated")
+            .map((review) => {
+                const factId = factIdByKey.get(review.factKey);
+                const intent =
+                    factId === undefined
+                        ? undefined
+                        : intents.find((i) => i.matchedFactId === factId);
+                return {
+                    reviewId: review.id,
+                    factKey: review.factKey,
+                    requirementText: intent?.requirementText ?? null,
+                    route: review.route,
+                    was: review.expectedObservable,
+                    observed: review.observed,
+                    sinceWhen: review.createdAt,
+                };
+            }),
     };
 }

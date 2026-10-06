@@ -152,4 +152,86 @@ describe("projectBoard", () => {
         expect(row.status).toBe("works");
         expect(JSON.stringify(board)).not.toMatch(/score|percent|confidence|0\.4/);
     });
+
+    it("surfaces pending reviews as the Reader's call, linked to their promise", () => {
+        const f = fact({ status: "violated" });
+        const board = projectBoard({
+            intents: [
+                intent({
+                    requirementText: 'recording a loan without a tool shows "Tool name is required"',
+                    status: "violated",
+                    matchedFactId: f.id,
+                }),
+            ],
+            facts: [f],
+            reviews: [
+                {
+                    id: 7,
+                    factKey: f.factKey,
+                    route: "http://localhost:9500/lend",
+                    action: 'submit "Record loan" form empty',
+                    expectedObservable: 'shows "Tool name is required"',
+                    observed: 'expected shows "Tool name is required" — no longer present',
+                    status: "pending",
+                    createdAt: 1234,
+                    decidedAt: null,
+                },
+            ],
+        });
+        expect(board.needsYourCall).toHaveLength(1);
+        const call = board.needsYourCall?.[0];
+        expect(call?.reviewId).toBe(7);
+        expect(call?.factKey).toBe(f.factKey);
+        expect(call?.requirementText).toBe(
+            'recording a loan without a tool shows "Tool name is required"',
+        );
+        expect(call?.sinceWhen).toBe(1234);
+    });
+
+    it("stays quiet about a review whose change no longer reproduces", () => {
+        // The app was fixed: the fact verifies again, so the pending review is
+        // history — the board must not ask the Reader to adjudicate it.
+        const f = fact({ status: "verified" });
+        const board = projectBoard({
+            intents: [intent({ status: "covered", matchedFactId: f.id })],
+            facts: [f],
+            reviews: [
+                {
+                    id: 12,
+                    factKey: f.factKey,
+                    route: "http://localhost:9500/lend",
+                    action: 'submit "Record loan" form empty',
+                    expectedObservable: 'shows "Tool name is required"',
+                    observed: 'expected shows "Tool name is required" — no longer present',
+                    status: "pending",
+                    createdAt: 1,
+                    decidedAt: null,
+                },
+            ],
+        });
+        expect(board.needsYourCall).toEqual([]);
+    });
+
+    it("still surfaces a call whose change no requirement covers", () => {
+        const orphan = fact({ factKey: "fk-unmatched", status: "violated" });
+        const board = projectBoard({
+            intents: [],
+            facts: [orphan],
+            reviews: [
+                {
+                    id: 9,
+                    factKey: "fk-unmatched",
+                    route: "http://localhost:9500/loans/1",
+                    action: "open http://localhost:9500/loans/1",
+                    expectedObservable: 'shows heading "Loan details"',
+                    observed: 'expected shows heading "Loan details" — no longer present',
+                    status: "pending",
+                    createdAt: 55,
+                    decidedAt: null,
+                },
+            ],
+        });
+        expect(board.needsYourCall?.[0]?.requirementText).toBeNull();
+        expect(board.needsYourCall?.[0]?.route).toContain("/loans/1");
+    });
 });

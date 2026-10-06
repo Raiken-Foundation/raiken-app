@@ -1,4 +1,5 @@
 import type {
+    BoardCall as CoreBoardCall,
     BoardReport as CoreBoardReport,
     BoardRow as CoreBoardRow,
     BoardStatus as CoreBoardStatus,
@@ -7,6 +8,7 @@ import type {
 } from "@raiken/core";
 import { describe, expect, it } from "vitest";
 import type {
+    BoardCall,
     BoardReport,
     BoardRow,
     BoardStatus,
@@ -27,6 +29,7 @@ describe("shared/core board type parity", () => {
         type RowParity = ExpectTrue<AssertExact<BoardRow, CoreBoardRow>>;
         type ReportParity = ExpectTrue<AssertExact<BoardReport, CoreBoardReport>>;
         type WatchParity = ExpectTrue<AssertExact<WatchHeartbeat, CoreWatchHeartbeat>>;
+        type CallParity = ExpectTrue<AssertExact<BoardCall, CoreBoardCall>>;
         // Referenced so the type assertions are actually checked.
         const parity: [
             StatusParity,
@@ -34,7 +37,8 @@ describe("shared/core board type parity", () => {
             RowParity,
             ReportParity,
             WatchParity,
-        ] = [true, true, true, true, true];
-        expect(parity).toEqual([true, true, true, true, true]);
+            CallParity,
+        ] = [true, true, true, true, true, true];
+        expect(parity).toEqual([true, true, true, true, true, true]);
     });
 });

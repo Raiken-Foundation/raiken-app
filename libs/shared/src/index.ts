@@ -7,10 +7,12 @@
  */
 
 export {
+    type BoardCall,
     type BoardReport,
     type BoardRow,
     type BoardStatus,
     type BoardTicket,
+    type WatchHeartbeat,
 } from "./lib/board-types";
 export {
     type AgentStreamErrorField,

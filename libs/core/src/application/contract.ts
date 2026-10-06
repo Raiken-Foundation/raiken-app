@@ -231,6 +231,7 @@ export class ContractApplication implements ProjectApplicationContext {
                 intents: store.listIntentFacts(),
                 facts: store.listBehaviorFacts(),
                 events: store.listFactEvents(undefined, 500),
+                reviews: store.listReviews("pending"),
                 now: Date.now(),
             });
             report.watch = readWatchHeartbeat(this.projectPath);

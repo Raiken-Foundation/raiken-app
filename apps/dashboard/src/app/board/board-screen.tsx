@@ -1,8 +1,9 @@
-import type { BoardRow } from "@raiken/shared";
+import type { BoardCall, BoardRow } from "@raiken/shared";
 import { useState } from "react";
 import { trpc } from "../../utils/trpc";
 import {
     type BoardGroup,
+    explainCall,
     groupRows,
     statusGlyph,
     statusLabel,
@@ -66,6 +67,9 @@ export function BoardScreen() {
     const data = board.data;
     const groups = groupRows(data.rows);
     const brokenCount = data.counts.broken;
+    // Rows with an open question are linked to their card above, so the same
+    // promise does not read as an unexplained duplicate.
+    const callFactKeys = new Set((data.needsYourCall ?? []).map((c) => c.factKey));
     const lastChecked = data.rows.reduce<number | null>(
         (latest, row) =>
             row.sinceWhen && (!latest || row.sinceWhen > latest) ? row.sinceWhen : latest,
@@ -105,6 +109,22 @@ export function BoardScreen() {
                 </p>
             ) : null}
 
+            {/* The one decision that belongs to the Reader: "the app changed —
+                was that on purpose?" Answerable with no raiken vocabulary. */}
+            {data.needsYourCall && data.needsYourCall.length > 0 ? (
+                <section className="board-calls" aria-labelledby="board-calls-title">
+                    <h2 id="board-calls-title" className="board-calls-title">
+                        Needs your call
+                        <span className="board-calls-count">{data.needsYourCall.length}</span>
+                    </h2>
+                    <ul className="board-call-list">
+                        {data.needsYourCall.map((call) => (
+                            <BoardCallCard key={call.reviewId} call={call} />
+                        ))}
+                    </ul>
+                </section>
+            ) : null}
+
             {data.rows.length === 0 ? (
                 <BoardEmptyState
                     onImport={(input) => importMutation.mutate(input)}
@@ -126,6 +146,7 @@ export function BoardScreen() {
                             key={group.key}
                             group={group}
                             highlight={brokenCount > 0}
+                            callFactKeys={callFactKeys}
                         />
                     ))}
                 </div>
@@ -134,7 +155,60 @@ export function BoardScreen() {
     );
 }
 
-function BoardGroupSection({ group, highlight }: { group: BoardGroup; highlight: boolean }) {
+function BoardCallCard({ call }: { call: BoardCall }) {
+    const utils = trpc.useUtils();
+    const resolve = trpc.contractResolveReview.useMutation({
+        onSettled: () => {
+            void utils.contractBoard.invalidate();
+            void utils.contractView.invalidate();
+            void utils.contractReviews.invalidate();
+        },
+    });
+    const plain = explainCall(call);
+
+    return (
+        <li className="board-call">
+            <p className="board-call-title">{plain.title}</p>
+            <p className="board-call-change">
+                {plain.before} <span className="board-call-now">{plain.now}</span>
+            </p>
+            <div className="board-call-actions">
+                <span className="board-call-question">Was that change intentional?</span>
+                <button
+                    type="button"
+                    className="board-call-btn is-yes"
+                    disabled={resolve.isPending}
+                    onClick={() => resolve.mutate({ reviewId: call.reviewId, accept: true })}
+                >
+                    Yes — that's correct now
+                </button>
+                <button
+                    type="button"
+                    className="board-call-btn is-no"
+                    disabled={resolve.isPending}
+                    onClick={() => resolve.mutate({ reviewId: call.reviewId, accept: false })}
+                >
+                    No — that's a bug
+                </button>
+            </div>
+            {resolve.isError ? (
+                <output className="board-call-error">
+                    Could not save that: {resolve.error.message}
+                </output>
+            ) : null}
+        </li>
+    );
+}
+
+function BoardGroupSection({
+    group,
+    highlight,
+    callFactKeys,
+}: {
+    group: BoardGroup;
+    highlight: boolean;
+    callFactKeys: Set<string>;
+}) {
     const hasBroken = group.rows.some((r) => r.status === "broken");
     return (
         <section className={`board-group ${hasBroken && highlight ? "has-broken" : ""}`}>
@@ -149,14 +223,18 @@ function BoardGroupSection({ group, highlight }: { group: BoardGroup; highlight:
             </h2>
             <ul className="board-rows">
                 {group.rows.map((row) => (
-                    <BoardRowItem key={row.requirementKey} row={row} />
+                    <BoardRowItem
+                        key={row.requirementKey}
+                        row={row}
+                        hasOpenCall={Boolean(row.factKey && callFactKeys.has(row.factKey))}
+                    />
                 ))}
             </ul>
         </section>
     );
 }
 
-function BoardRowItem({ row }: { row: BoardRow }) {
+function BoardRowItem({ row, hasOpenCall }: { row: BoardRow; hasOpenCall: boolean }) {
     return (
         <li className={`board-row is-${row.status}`}>
             <div className="board-row-main">
@@ -172,6 +250,9 @@ function BoardRowItem({ row }: { row: BoardRow }) {
                     <p className="board-meta">
                         {row.sinceWhen ? `stopped working ${timeAgo(row.sinceWhen)}` : null}
                         {row.sinceCommit ? ` · commit ${row.sinceCommit.slice(0, 7)}` : null}
+                        {hasOpenCall ? (
+                            <span className="board-meta-call"> · waiting on your call ↑</span>
+                        ) : null}
                     </p>
                     <AlertButton row={row} />
                 </div>

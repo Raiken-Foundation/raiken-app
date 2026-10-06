@@ -80,6 +80,121 @@
     max-width: 60rem;
 }
 
+/* "Needs your call" — the Reader's only decision, in their language. */
+.board-calls {
+    max-width: 60rem;
+    margin-bottom: 2rem;
+}
+
+.board-calls-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--warn, #d9a441);
+    margin: 0 0 0.5rem;
+}
+
+.board-calls-count {
+    background: var(--warn-soft, rgba(217, 164, 65, 0.12));
+    border: 1px solid var(--warn, #d9a441);
+    border-radius: 10px;
+    padding: 0 0.45rem;
+    font-size: 0.7rem;
+}
+
+.board-call-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.board-call {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.9rem 1rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--warn, #d9a441);
+    border-radius: 6px;
+}
+
+.board-call-title {
+    margin: 0;
+    color: var(--ink);
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.board-call-change {
+    margin: 0;
+    color: var(--ink-dim);
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+.board-call-now {
+    color: var(--warn, #d9a441);
+}
+
+.board-call-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-top: 0.2rem;
+}
+
+.board-call-question {
+    color: var(--ink-faint);
+    font-size: 0.85rem;
+}
+
+.board-call-btn {
+    border: 1px solid var(--hair-strong);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+}
+.board-call-btn.is-yes {
+    background: var(--ok, #3fb950);
+    border-color: var(--ok, #3fb950);
+    color: var(--bg);
+}
+.board-call-btn.is-no {
+    border-color: var(--err, #e5534b);
+    color: var(--err, #e5534b);
+}
+.board-call-btn:hover:not(:disabled) {
+    filter: brightness(1.12);
+}
+.board-call-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.board-call-error {
+    color: var(--err, #e5534b);
+    font-size: 0.8rem;
+}
+
+/* Ties a broken row to its open question above, so the same promise does not
+ * read as an unexplained duplicate. */
+.board-meta-call {
+    color: var(--warn, #d9a441);
+}
+
 .board-group-title {
     font-size: 0.8rem;
     font-weight: 600;

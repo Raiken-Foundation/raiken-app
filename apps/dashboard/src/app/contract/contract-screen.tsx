@@ -359,14 +359,14 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                         className="q-tab"
                         onClick={() => selectTab("portfolio")}
                     >
-                        portfolio
+                        overview
                     </button>
                     <button
                         type="button"
                         className="q-tab is-active"
                         aria-current="page"
                     >
-                        acquisition
+                        crawl the app
                     </button>
                 </nav>
                 <div className="c-acquisition">
@@ -463,7 +463,9 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                     <span className="c-status-val">{intent.length}</span>
                 </span>
                 <span className="c-status-cell">
-                    <span className="c-status-key">avg confidence</span>
+                    <span className="c-status-key" title="Average share of each fact's checks that held">
+                        avg checks held
+                    </span>
                     <span className="c-status-val">{avgConfidence}%</span>
                 </span>
                 <span className="c-status-cell">
@@ -492,10 +494,10 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                             .join("\n");
                         const md = [
                             `**raiken contract — ${c?.violated ? "violations" : c?.uncovered ? "gaps" : "passing"}**`,
-                            `${c?.covered ?? 0}/${c?.total ?? 0} requirements covered · ${observed.length} facts · avg ${avgConfidence}% confidence · checked ${timeAgo(lastChecked)}`,
+                            `${c?.covered ?? 0}/${c?.total ?? 0} requirements covered · ${observed.length} facts · avg ${avgConfidence}% of checks held · checked ${timeAgo(lastChecked)}`,
                             uncovered ? `\nNeeds attention:\n${uncovered}` : "",
                             (reviews.data ?? []).length > 0
-                                ? `\n${(reviews.data ?? []).length} behavior change(s) awaiting review`
+                                ? `\n${(reviews.data ?? []).length} behavior change(s) awaiting a call`
                                 : "",
                         ].join("\n");
                         void navigator.clipboard.writeText(md).then(
@@ -510,10 +512,10 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
 
             <nav className="q-tabs" aria-label="Contract sections">
                 <button type="button" className="q-tab is-active" aria-current="page">
-                    portfolio
+                    overview
                 </button>
                 <button type="button" className="q-tab" onClick={() => selectTab("acquisition")}>
-                    acquisition
+                    crawl the app
                 </button>
             </nav>
 
@@ -588,7 +590,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
             {(reviews.data ?? []).length > 0 ? (
                 <section className="c-review" aria-label="Pending behavior changes">
                     <div className="c-review-head">
-                        <span>behavior changes awaiting review</span>
+                        <span>behavior changes awaiting a call</span>
                         <span className="c-panel-count">{reviews.data?.length}</span>
                     </div>
                     <ul className="c-review-list">
@@ -596,10 +598,17 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                             <li key={r.id} className="c-review-row">
                                 <span className="c-review-body">
                                     <span className="c-fact-route">
-                                        {r.route} — {r.action}
+                                        {(() => {
+                                            try {
+                                                return new URL(r.route).pathname || "/";
+                                            } catch {
+                                                return r.route;
+                                            }
+                                        })()}{" "}
+                                        — {r.action.replace(r.route, "").trim() || r.action}
                                     </span>
                                     <span className="c-review-expected">
-                                        expected: {condenseLists(r.expectedObservable)}
+                                        was: {condenseLists(r.expectedObservable)}
                                     </span>
                                     <span className="c-review-observed">{r.observed}</span>
                                 </span>
@@ -614,7 +623,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                         setUndoable({ id: r.id });
                                     }}
                                     >
-                                        ✓ accept
+                                        ✓ intentional
                                     </button>
                                     <button
                                         type="button"
@@ -903,7 +912,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                 <input
                                     className="c-filter"
                                     type="search"
-                                    placeholder="filter by route, action, observable…"
+                                    placeholder="filter facts…"
                                     value={factFilter}
                                     onChange={(e) => setFactFilter(e.target.value)}
                                     aria-label="Filter facts"
@@ -915,7 +924,7 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                     title="Emit disposable Playwright specs from verified facts"
                                     onClick={() => materialize.mutate({})}
                                 >
-                                    {materialize.isPending ? "materializing…" : "⇩ materialize"}
+                                    {materialize.isPending ? "generating…" : "⇩ generate specs"}
                                 </button>
                             </div>
                             <ul className="c-list">
@@ -967,22 +976,26 @@ export default function ContractScreen({ onGenerateTest }: ContractScreenProps =
                                                     ) : null}
                                                     <span
                                                         className="c-counts"
-                                                        title={`${fact.verifiedCount} verified, ${fact.violatedCount} violated`}
+                                                        title={`verified ${fact.verifiedCount} times, broke ${fact.violatedCount} times`}
                                                     >
                                                         <span
                                                             className={`c-count ${fact.verifiedCount > 0 ? "c-count--ok" : "c-count--mute"}`}
                                                         >
-                                                            {fact.verifiedCount}✓
+                                                            verified {fact.verifiedCount}×
                                                         </span>
                                                         <span
                                                             className={`c-count ${fact.violatedCount > 0 ? "c-count--bad" : "c-count--mute"}`}
                                                         >
-                                                            {fact.violatedCount}✗
+                                                            broke {fact.violatedCount}×
                                                         </span>
                                                     </span>
                                                     {Math.round(fact.confidence * 100) < 100 ? (
-                                                        <span className="c-fact-conf">
-                                                            {Math.round(fact.confidence * 100)}% confidence
+                                                        <span
+                                                            className="c-fact-conf"
+                                                            title="Share of this fact's checks that held (verifications minus violations)"
+                                                        >
+                                                            {Math.round(fact.confidence * 100)}% of
+                                                            checks held
                                                         </span>
                                                     ) : null}
                                                     <span className="c-fact-checked">

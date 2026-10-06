@@ -2,22 +2,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CodeGraphDB } from "../database/db";
-import { SqliteDbAdapter } from "../database/adapter";
-import { ContractStore } from "../contract/store";
-import { computeCoverage, COVERAGE_MATCH_THRESHOLD, matchScore } from "../contract/coverage";
-import { mintFromSiteKnowledge, mintObservedFact } from "../contract/mint";
+import { diffObservable } from "../contract/capture";
+import { COVERAGE_MATCH_THRESHOLD, computeCoverage, matchScore } from "../contract/coverage";
+import { buildContractView, contractToMarkdown, diffContracts } from "../contract/exporter";
 import {
-    parseRequirementsFile,
     importRequirements,
+    parseRequirementsFile,
     parseTicketRequirements,
 } from "../contract/intent";
-import {
-    buildContractView,
-    contractToMarkdown,
-    diffContracts,
-} from "../contract/exporter";
-import { diffObservable } from "../contract/capture";
+import { mintFromSiteKnowledge, mintObservedFact } from "../contract/mint";
+import { ContractStore } from "../contract/store";
+import { SqliteDbAdapter } from "../database/adapter";
+import { CodeGraphDB } from "../database/db";
 
 describe("ContractStore", () => {
     let dir: string;
@@ -85,8 +81,16 @@ describe("ContractStore", () => {
             violatedCount: 0,
         };
         store.upsertBehaviorFact({ ...base, precondition: null, expectedObservable: "adds note" });
-        store.upsertBehaviorFact({ ...base, precondition: "signed in", expectedObservable: "adds note" });
-        store.upsertBehaviorFact({ ...base, precondition: null, expectedObservable: "shows error" });
+        store.upsertBehaviorFact({
+            ...base,
+            precondition: "signed in",
+            expectedObservable: "adds note",
+        });
+        store.upsertBehaviorFact({
+            ...base,
+            precondition: null,
+            expectedObservable: "shows error",
+        });
         expect(store.listBehaviorFacts()).toHaveLength(3);
     });
 
@@ -142,7 +146,10 @@ describe("coverage matching", () => {
     it("vetoes a fact that does not assert the requirement's quoted copy (the round-3 over-claim)", () => {
         // tasks-api shape: an API AC "covered" by a heading fact on the home page.
         const score = matchScore(
-            { requirementText: 'adding a chore without a name shows "Chore needs a name"', routeHint: "/" },
+            {
+                requirementText: 'adding a chore without a name shows "Chore needs a name"',
+                routeHint: "/",
+            },
             {
                 route: "http://localhost:9417/",
                 action: "view form on http://localhost:9417/",
@@ -154,7 +161,10 @@ describe("coverage matching", () => {
 
     it("accepts a fact that asserts the quoted copy, even from the failure path", () => {
         const score = matchScore(
-            { requirementText: 'adding a chore without a name shows "Chore needs a name"', routeHint: "/" },
+            {
+                requirementText: 'adding a chore without a name shows "Chore needs a name"',
+                routeHint: "/",
+            },
             {
                 route: "http://localhost:9417/",
                 action: 'submit "Add chore" form empty',
@@ -176,9 +186,89 @@ describe("coverage matching", () => {
         expect(score).toBe(0);
     });
 
+    it("does not veto on static-extension normalization (hint '/menu', fact '/menu.html')", () => {
+        // Round-4 catch: the requirements parser stores hints without the
+        // extension; fact routes keep it. A 1.0 match must survive.
+        const score = matchScore(
+            { requirementText: 'open /menu.html shows heading "Menu"', routeHint: "/menu" },
+            {
+                route: "http://localhost:9411/menu.html",
+                action: "open http://localhost:9411/menu.html",
+                expectedObservable: 'shows heading "Menu"',
+            },
+        );
+        expect(score).toBeGreaterThan(COVERAGE_MATCH_THRESHOLD);
+    });
+
+    it("vetoes failure-path evidence for success-path requirements (no quoted copy to save it)", () => {
+        // Round-4 catch on notes-ssr: 'saving a note with a title returns to
+        // the list' was covered (40%) by the empty-submit probe fact.
+        const score = matchScore(
+            {
+                requirementText:
+                    "saving a note with a title returns to the list and shows the note",
+                routeHint: "/new",
+            },
+            {
+                route: "http://localhost:9412/new",
+                action: 'submit "Save note" form empty',
+                expectedObservable: 'shows "Missing title"',
+            },
+        );
+        expect(score).toBe(0);
+    });
+
+    it("keeps failure-path evidence for failure-path requirements", () => {
+        const score = matchScore(
+            {
+                requirementText: 'saving a note without a title shows "Missing title"',
+                routeHint: "/new",
+            },
+            {
+                route: "http://localhost:9412/new",
+                action: 'submit "Save note" form empty',
+                expectedObservable: 'shows "Missing title"',
+            },
+        );
+        expect(score).toBeGreaterThan(COVERAGE_MATCH_THRESHOLD);
+    });
+
+    it("vetoes form-existence evidence for flow-outcome requirements (start ≠ end)", () => {
+        // Round-4 residual on notes-ssr: 'saving a note with a title returns
+        // to the list' covered (40%) by the fact that the form exists.
+        const score = matchScore(
+            {
+                requirementText:
+                    "saving a note with a title returns to the list and shows the note",
+                routeHint: "/new",
+            },
+            {
+                route: "http://localhost:9412/new",
+                action: "view form on http://localhost:9412/new",
+                expectedObservable: "exposes inputs [Title, Body] and submit [Save note]",
+            },
+        );
+        expect(score).toBe(0);
+    });
+
+    it("keeps form-existence evidence for form requirements", () => {
+        const score = matchScore(
+            { requirementText: "the add form exposes a chore title field", routeHint: "/" },
+            {
+                route: "http://localhost:9417/",
+                action: "view form on http://localhost:9417/",
+                expectedObservable: "exposes inputs [New chore] and submit [Add chore]",
+            },
+        );
+        expect(score).toBeGreaterThan(COVERAGE_MATCH_THRESHOLD);
+    });
+
     it("vetoes a fact quoting different copy for the same requirement (contradictory observables)", () => {
         const score = matchScore(
-            { requirementText: 'a duplicate chore shows "That chore already exists"', routeHint: "/" },
+            {
+                requirementText: 'a duplicate chore shows "That chore already exists"',
+                routeHint: "/",
+            },
             {
                 route: "http://localhost:9417/",
                 action: 'submit "Add chore" form empty',
@@ -288,24 +378,22 @@ describe("minting", () => {
         const db = new CodeGraphDB(dir);
         try {
             const raw = db.getRawDatabase();
-            raw
-                .prepare(
-                    `INSERT INTO discovered_pages
+            raw.prepare(
+                `INSERT INTO discovered_pages
                      (project_path, url, normalized_url, title, snapshot_json, forms_json, parent_url,
                       navigation_action, depth, discovered_at, last_visited_at, visit_count, captured_authenticated)
                      VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, 1, 1, 0)`,
-                )
-                .run(
-                    dir,
-                    "http://x/signup",
-                    "http://x/signup",
-                    "Signup",
-                    '- banner:\n  - heading "Create account" [level=1]',
-                    JSON.stringify({
-                        fields: [{ label: "Email", type: "email" }],
-                        submits: ["Subscribe"],
-                    }),
-                );
+            ).run(
+                dir,
+                "http://x/signup",
+                "http://x/signup",
+                "Signup",
+                '- banner:\n  - heading "Create account" [level=1]',
+                JSON.stringify({
+                    fields: [{ label: "Email", type: "email" }],
+                    submits: ["Subscribe"],
+                }),
+            );
             const result = mintFromSiteKnowledge(raw, dir);
             expect(result.minted).toBe(2);
             const store = new ContractStore(new SqliteDbAdapter(raw, dir));
@@ -328,10 +416,17 @@ describe("minting", () => {
                 precondition: null,
                 action: "submit form empty",
                 expectedObservable: 'shows "email required"',
-                evidence: { source: "capture", capturedAt: 1, beforeText: "a", afterText: "a\nemail required" },
+                evidence: {
+                    source: "capture",
+                    capturedAt: 1,
+                    beforeText: "a",
+                    afterText: "a\nemail required",
+                },
             });
             expect(res.isNew).toBe(true);
-            expect(store.getBehaviorFactByKey(res.factKey)?.expectedObservable).toContain("email required");
+            expect(store.getBehaviorFactByKey(res.factKey)?.expectedObservable).toContain(
+                "email required",
+            );
         } finally {
             db.close();
             fs.rmSync(dir, { recursive: true, force: true });
@@ -373,7 +468,9 @@ ignored short
         const db = new CodeGraphDB(dir);
         try {
             const store = new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), dir));
-            importRequirements(store, "file", [{ text: "checkout shows totals", routeHint: null, neverRegress: false }]);
+            importRequirements(store, "file", [
+                { text: "checkout shows totals", routeHint: null, neverRegress: false },
+            ]);
             const again = importRequirements(store, "file", [
                 { text: "checkout  shows totals", routeHint: null, neverRegress: false },
             ]);
@@ -459,9 +556,9 @@ describe("fact confidence", () => {
 
 describe("diffObservable", () => {
     it("returns the first added meaningful line", () => {
-        expect(diffObservable("Title\n\nBody", "Title\n\nBody\nPlease enter an email address.")).toBe(
-            "Please enter an email address.",
-        );
+        expect(
+            diffObservable("Title\n\nBody", "Title\n\nBody\nPlease enter an email address."),
+        ).toBe("Please enter an email address.");
         expect(diffObservable("same", "same")).toBeNull();
     });
 });

@@ -1,5 +1,5 @@
-import { ContractStore } from "./store";
 import { factPath } from "./impact";
+import type { ContractStore } from "./store";
 import type { BehaviorFact, CoverageEntry, CoverageReport, IntentFact } from "./types";
 
 /**
@@ -31,18 +31,67 @@ function quotedExpectations(text: string): string[] {
     return matches.map((m) => m.slice(1, -1));
 }
 
+/** Facts produced by capture's empty-submit probing. */
+const FAILURE_PATH_ACTION = /^submit .+ form empty$/;
+/** Requirement wording that describes the failure path. */
+const FAILURE_PATH_AC = /\b(without|empty|invalid|missing|error|wrong|bad|denied|rejected)\b/i;
+/** Requirement wording asserting a flow: an action verb plus an outcome. */
+const FLOW_ACTION_AC =
+    /\b(sav\w*|submi\w*|creat\w*|add\w*|delet\w*|updat\w*|remov\w*|mark\w*|send\w*|log\w*)\b/i;
+const FLOW_OUTCOME_AC = /\b(shows?|returns?|displays?|sees|redirect\w*|lands)\b/i;
+/** Facts asserting a flow's start (the form exists), not its outcome. */
+const FORM_KIND_OBSERVABLE = /^exposes inputs /;
+
 /** Normalize a route hint for comparison (leading slash, no trailing slash). */
 function normalizedHint(hint: string): string {
     const withSlash = hint.startsWith("/") ? hint : `/${hint}`;
     return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : "/";
 }
 
+/**
+ * Routes compared for agreement. Static extensions are convention, not
+ * identity — the requirements parser stores "/menu" while fact routes carry
+ * "/menu.html", and both name the same destination. "/index.html" is "/".
+ */
+function comparableRoute(p: string): string {
+    let s = p.length > 1 ? p.replace(/\/+$/, "") : "/";
+    s = s.replace(/\.(html?|php|aspx?)$/i, "");
+    s = s.replace(/\/index$/i, "");
+    return s === "" ? "/" : s;
+}
+
 /** Normalize text into lowercase word tokens, dropping stopwords. */
 function tokens(text: string): Set<string> {
     const STOP = new Set([
-        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
-        "is", "are", "be", "shows", "show", "must", "should", "when", "user",
-        "page", "app", "this", "that", "it", "as", "at", "by", "from",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "of",
+        "in",
+        "on",
+        "for",
+        "with",
+        "is",
+        "are",
+        "be",
+        "shows",
+        "show",
+        "must",
+        "should",
+        "when",
+        "user",
+        "page",
+        "app",
+        "this",
+        "that",
+        "it",
+        "as",
+        "at",
+        "by",
+        "from",
     ]);
     return new Set(
         text
@@ -71,14 +120,37 @@ export function matchScore(
 
     // Veto 2: route disagreement. Root ("/") on either side is treated as no
     // signal — it is the default home, not a location claim.
-    const hint = intent.routeHint?.trim() ? normalizedHint(intent.routeHint.trim()) : null;
+    const hint = intent.routeHint?.trim()
+        ? comparableRoute(normalizedHint(intent.routeHint.trim()))
+        : null;
     if (hint && hint !== "/") {
-        const fp = factPath(fact.route);
+        const fp = comparableRoute(factPath(fact.route));
         const agree =
             fp === hint ||
             (fp !== "/" && fp.startsWith(`${hint}/`)) ||
             (fp !== "/" && hint.startsWith(`${fp}/`));
         if (!agree) return 0;
+    }
+
+    // Veto 3: a failure-path observation (the empty-submit probe) is evidence
+    // only for a failure-path promise. "Saving without a title shows the
+    // error" may be covered by the probe; "saving with a title returns to
+    // the list" may not — an existence fact asserting the failure path never
+    // satisfies a success-path requirement (round-1 defect #2 residual).
+    if (FAILURE_PATH_ACTION.test(fact.action) && !FAILURE_PATH_AC.test(intent.requirementText)) {
+        return 0;
+    }
+
+    // Veto 4: the start of a flow is not evidence about its end. A
+    // requirement that asserts an outcome (save → shows / returns / lands)
+    // cannot be satisfied by a fact asserting the form exists — that the
+    // flow can be started says nothing about what it produces.
+    if (
+        FORM_KIND_OBSERVABLE.test(fact.expectedObservable) &&
+        FLOW_ACTION_AC.test(intent.requirementText) &&
+        FLOW_OUTCOME_AC.test(intent.requirementText)
+    ) {
+        return 0;
     }
 
     const want = tokens(`${intent.requirementText} ${intent.routeHint ?? ""}`);
@@ -107,7 +179,10 @@ export function matchScore(
  * decides: violated fact → the requirement reads violated; verified fact →
  * covered; no match → uncovered.
  */
-export function computeCoverage(store: ContractStore, threshold = COVERAGE_MATCH_THRESHOLD): CoverageReport {
+export function computeCoverage(
+    store: ContractStore,
+    threshold = COVERAGE_MATCH_THRESHOLD,
+): CoverageReport {
     const intents = store.listIntentFacts();
     const observed = store
         .listBehaviorFacts()
@@ -137,7 +212,9 @@ export function computeCoverage(store: ContractStore, threshold = COVERAGE_MATCH
         covered: entries.filter((e) => e.verdict === "covered").length,
         uncovered: entries.filter((e) => e.verdict === "uncovered").length,
         violated: entries.filter((e) => e.verdict === "violated").length,
-        neverRegressUncovered: entries.filter((e) => e.verdict === "uncovered" && e.intent.neverRegress).length,
+        neverRegressUncovered: entries.filter(
+            (e) => e.verdict === "uncovered" && e.intent.neverRegress,
+        ).length,
         entries,
         computedAt: Date.now(),
     };

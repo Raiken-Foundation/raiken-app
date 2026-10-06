@@ -15,20 +15,31 @@ export interface BoardGroup {
     rows: BoardRow[];
 }
 
-const NO_TICKET = "No ticket";
+/** Plain-language group labels — the Reader never sees "no ticket" as a bucket. */
+function groupFor(row: BoardRow): { key: string; label: string; ticketUrl: string | null } {
+    if (row.ticket) {
+        return {
+            key: row.ticket.id,
+            label: `Ticket ${row.ticket.id}`,
+            ticketUrl: row.ticket.url,
+        };
+    }
+    if (row.source === "file") {
+        return { key: "file", label: "From the requirements file", ticketUrl: null };
+    }
+    if (row.source === "manual") {
+        return { key: "manual", label: "Added by hand", ticketUrl: null };
+    }
+    return { key: "untracked", label: "Not linked to a ticket", ticketUrl: null };
+}
 
 export function groupRows(rows: BoardRow[]): BoardGroup[] {
     const groups = new Map<string, BoardGroup>();
     for (const row of rows) {
-        const key = row.ticket?.id ?? NO_TICKET;
+        const { key, label, ticketUrl } = groupFor(row);
         let group = groups.get(key);
         if (!group) {
-            group = {
-                key,
-                label: row.ticket ? `Ticket ${row.ticket.id}` : NO_TICKET,
-                ticketUrl: row.ticket?.url ?? null,
-                rows: [],
-            };
+            group = { key, label, ticketUrl, rows: [] };
             groups.set(key, group);
         }
         group.rows.push(row);

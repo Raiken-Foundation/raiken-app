@@ -163,7 +163,15 @@ test.describe("discovered page ${slug}", () => {
                     checks={healthQuery.data?.checks as Record<string, string> | undefined}
                 />
             )}
-            {isBackendDegraded && (
+            {/*
+              Degraded = optional capabilities (AI, etc.) are limited. Nothing
+              on the board depends on them — verification is deterministic —
+              and "ai: degraded" is jargon on the Reader's screen, where on a
+              narrow viewport it also overlapped a row. Backend-down and
+              not-ready still surface everywhere: those really do stop the
+              board from working.
+            */}
+            {isBackendDegraded && currentView !== "board" && (
                 <ConnectionDegraded
                     checks={healthQuery.data?.checks as Record<string, string> | undefined}
                 />

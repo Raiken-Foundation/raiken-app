@@ -8,6 +8,7 @@ function row(overrides: Partial<BoardRow> = {}): BoardRow {
         text: 'adding a chore without a name shows "Chore needs a name"',
         status: "not-checked",
         ticket: null,
+        source: "file",
         neverRegress: false,
         sinceWhen: null,
         sinceCommit: null,
@@ -18,7 +19,7 @@ function row(overrides: Partial<BoardRow> = {}): BoardRow {
 }
 
 describe("board grouping", () => {
-    it("groups rows by ticket, with unticketed requirements in their own group", () => {
+    it("groups rows by ticket, with unticketed requirements in their own plain-language group", () => {
         const groups = groupRows([
             row({ requirementKey: "a", ticket: { id: "RAIK-1", provider: "github", url: null } }),
             row({ requirementKey: "b" }),
@@ -27,9 +28,17 @@ describe("board grouping", () => {
                 ticket: { id: "RAIK-1", provider: "github", url: null },
             }),
         ]);
-        expect(groups.map((g) => g.key)).toEqual(["RAIK-1", "No ticket"]);
+        expect(groups.map((g) => g.key)).toEqual(["RAIK-1", "file"]);
         expect(groups[0].rows).toHaveLength(2);
         expect(groups[1].rows).toHaveLength(1);
+        expect(groups[1].label).toBe("From the requirements file");
+    });
+
+    it("never labels a bucket 'No ticket' — the Reader sees where the promise came from", () => {
+        for (const source of ["file", "manual"] as const) {
+            expect(groupRows([row({ source })])[0].label.toLowerCase()).not.toContain("no ticket");
+        }
+        expect(groupRows([row({ source: "manual" })])[0].label).toBe("Added by hand");
     });
 
     it("sorts broken rows first within groups, and broken groups first overall", () => {

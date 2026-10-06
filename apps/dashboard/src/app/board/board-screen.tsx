@@ -23,9 +23,22 @@ import "./board.css";
 export function BoardScreen() {
     const utils = trpc.useUtils();
     const board = trpc.contractBoard.useQuery(undefined, { refetchOnWindowFocus: false });
+    const project = trpc.getProjectInfo.useQuery(undefined, {
+        refetchOnWindowFocus: false,
+        staleTime: 60_000,
+    });
     const importMutation = trpc.contractImport.useMutation({
         onSettled: () => void utils.contractBoard.invalidate(),
     });
+
+    // The Reader's page must say whose status this is — a bare "Status" is
+    // ambiguous the moment a team has more than one app.
+    const projectName = (() => {
+        const p = project.data?.path;
+        if (!p) return null;
+        const parts = p.split("/").filter(Boolean);
+        return parts[parts.length - 1] ?? p;
+    })();
 
     if (board.isLoading) {
         return (
@@ -53,14 +66,29 @@ export function BoardScreen() {
     const data = board.data;
     const groups = groupRows(data.rows);
     const brokenCount = data.counts.broken;
+    const lastChecked = data.rows.reduce<number | null>(
+        (latest, row) =>
+            row.sinceWhen && (!latest || row.sinceWhen > latest) ? row.sinceWhen : latest,
+        null,
+    );
 
     return (
         <main className="board">
             <header className="board-head">
-                <h1 className="board-h1">Status</h1>
-                <p className="board-summary" aria-live="polite">
-                    {summarize(data.counts)}
-                </p>
+                <div className="board-head-titles">
+                    <h1 className="board-h1">Status</h1>
+                    <p className="board-project">
+                        {projectName ?? "This project"}
+                        {lastChecked ? ` · checked ${timeAgo(lastChecked)}` : ""}
+                    </p>
+                </div>
+                {/* A count of nothing is noise on the first-run page — the
+                    empty state below explains the next step instead. */}
+                {data.rows.length > 0 ? (
+                    <p className="board-summary" aria-live="polite">
+                        {summarize(data.counts)}
+                    </p>
+                ) : null}
                 <a
                     className="board-register-toggle"
                     href="#/contract"

@@ -18,6 +18,20 @@
     color: var(--ink);
 }
 
+.board-head-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+/* Whose board this is — the one line a Reader needs for context. */
+.board-project {
+    margin: 0;
+    color: var(--ink-faint);
+    font-size: 0.8rem;
+    font-family: var(--mono);
+}
+
 .board-head {
     display: flex;
     align-items: baseline;
@@ -284,5 +298,24 @@
     }
     .board-status-label {
         min-width: 5rem;
+    }
+}
+
+/* On a phone the two-column row squeezes the promise into a sliver — stack
+ * the status above the text so the Reader reads a sentence, not a table. */
+@media (max-width: 560px) {
+    .board-row-main {
+        flex-direction: column;
+        gap: 0.25rem;
+        align-items: flex-start;
+    }
+    .board-status-label {
+        min-width: 0;
+    }
+    .board-status {
+        display: none; /* the word carries the meaning; the glyph is decoration */
+    }
+    .board-head {
+        align-items: flex-start;
     }
 }

@@ -34,6 +34,8 @@ export interface BoardRow {
     text: string;
     status: BoardStatus;
     ticket: BoardTicket | null;
+    /** Where the requirement came from — drives the plain group label. */
+    source: "ticket" | "file" | "manual";
     neverRegress: boolean;
     /** Epoch ms of the event behind the status (last verify or violate). */
     sinceWhen: number | null;
@@ -165,6 +167,7 @@ export function projectBoard(input: {
                       url: intent.ticketUrl,
                   }
                 : null,
+            source: intent.source,
             neverRegress: intent.neverRegress,
             sinceWhen: lastRelevant?.occurredAt ?? matched?.lastVerifiedAt ?? null,
             sinceCommit: lastRelevant?.commitSha ?? null,

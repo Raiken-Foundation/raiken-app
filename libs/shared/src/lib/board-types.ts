@@ -22,6 +22,8 @@ export interface BoardRow {
     text: string;
     status: BoardStatus;
     ticket: BoardTicket | null;
+    /** Where the requirement came from — drives the plain group label. */
+    source: "ticket" | "file" | "manual";
     neverRegress: boolean;
     /** Epoch ms of the event behind the status (last verify or violate). */
     sinceWhen: number | null;

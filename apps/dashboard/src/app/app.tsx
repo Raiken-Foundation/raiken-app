@@ -1,7 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { CommandPalette } from "../components/command-palette";
 import { NavRail } from "../components/nav-rail";
 import { trpc } from "../utils/trpc";
+import { BoardScreen } from "./board";
 import {
     ConnectionDegraded,
     ConnectionError,
@@ -16,22 +17,32 @@ import {
 import { TestingView } from "./testing-view";
 
 const QualityView = lazy(() => import("./quality-view").then((m) => ({ default: m.QualityView })));
-const ContractView = lazy(() =>
-    import("./contract").then((m) => ({ default: m.ContractView })),
-);
+const ContractView = lazy(() => import("./contract").then((m) => ({ default: m.ContractView })));
 
-type View = "contract" | "testing" | "quality";
+/**
+ * Views: the board (the Reader's landing screen) plus the workbench views
+ * (contract / testing / quality) grouped behind one rail entry. The front
+ * door is the board; the workbench is one click behind it.
+ */
+type View = "board" | "contract" | "testing" | "quality";
 
-const VIEWS = ["contract", "testing", "quality"] as const;
+const WORKBENCH_VIEWS = ["contract", "testing", "quality"] as const;
+type WorkbenchView = (typeof WORKBENCH_VIEWS)[number];
+
+function isWorkbenchView(value: string): value is WorkbenchView {
+    return (WORKBENCH_VIEWS as readonly string[]).includes(value);
+}
 
 function getViewFromHash(): View {
-    // Match the first hash segment so deep-links like #/quality/doctor still
-    // resolve to the parent view (#/quality). The contract is the product —
-    // it's the landing view, not the editor. Discovery is folded into the
-    // contract as its acquisition tab: legacy #/discovery links land there.
+    // The board is the landing view: an empty or unknown hash opens it.
+    // Deep links into the workbench (`#/contract/acquisition`, legacy
+    // `#/discovery`) keep working — the first hash segment routes the view,
+    // the rest is each screen's own state.
     const seg = window.location.hash.match(/^#\/([a-z]+)/)?.[1];
+    if (seg === "board") return "board";
     if (seg === "discovery") return "contract";
-    return (VIEWS as readonly string[]).includes(seg ?? "") ? (seg as View) : "contract";
+    if (isWorkbenchView(seg ?? "")) return seg as WorkbenchView;
+    return "board";
 }
 
 function ViewLoader() {
@@ -58,6 +69,9 @@ const ATTENTION_POLL_MS = 30000;
 
 export function App() {
     const [currentView, setCurrentView] = useState<View>(getViewFromHash);
+    // The last workbench view the operator used — the Workbench rail button
+    // returns there instead of resetting to a default.
+    const lastWorkbenchView = useRef<WorkbenchView>("contract");
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [pendingGeneratedTest, setPendingGeneratedTest] = useState<string | undefined>();
 
@@ -97,8 +111,9 @@ export function App() {
     const anyTestBroken = (testFilesQuery.data?.files ?? []).some((f) => f.status === "broken");
 
     const navigateTo = useCallback((view: View) => {
+        if (view !== "board") lastWorkbenchView.current = view as WorkbenchView;
         setCurrentView(view);
-        window.location.hash = `#/${view}`;
+        window.location.hash = view === "board" ? "#/board" : `#/${view}`;
     }, []);
 
     useEffect(() => {
@@ -137,6 +152,10 @@ test.describe("discovered page ${slug}", () => {
 
     return (
         <div className="app-shell">
+            {/* First tab stop: keyboard users skip the rail and banners. */}
+            <a className="skip-link" href="#app-content">
+                Skip to content
+            </a>
             <CommandPalette onNavigate={(v) => handleNavigate(v)} />
             {isBackendDown && <ConnectionError />}
             {isBackendNotReady && (
@@ -150,9 +169,11 @@ test.describe("discovered page ${slug}", () => {
                 />
             )}
             <NavRail
-                activeView={currentView}
-                sidebarCollapsed={sidebarCollapsed}
+                activeView={currentView === "board" ? "board" : "workbench"}
+                workbenchView={currentView === "board" ? lastWorkbenchView.current : currentView}
+                onOpenWorkbench={() => navigateTo(lastWorkbenchView.current)}
                 onNavigate={handleNavigate}
+                sidebarCollapsed={sidebarCollapsed}
                 onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
                 attention={{
                     files: anyTestBroken,
@@ -160,27 +181,65 @@ test.describe("discovered page ${slug}", () => {
                 }}
             />
 
-            {/*
-              TestingView is always mounted; we toggle visibility with
-              display:none so the editor's React state (open files, unsaved
-              buffers, a run in flight) survives a round-trip to another
-              view.
-            */}
-            <div className="app-view" data-active={currentView === "testing"}>
-                <TestingView
-                    sidebarCollapsed={sidebarCollapsed}
-                    pendingGeneratedTest={pendingGeneratedTest}
-                    onGeneratedTestConsumed={() => setPendingGeneratedTest(undefined)}
-                />
-            </div>
+            <div className="app-main" id="app-content">
+                {currentView === "board" ? (
+                    <BoardScreen />
+                ) : (
+                    <div className="app-workbench">
+                        {/* One h1 per screen: heading navigation anchors the
+                            workbench without restyling each view's layout. */}
+                        <h1 className="sr-only">Workbench</h1>
+                        <nav className="workbench-tabs" aria-label="Workbench views">
+                            {WORKBENCH_VIEWS.map((view) => {
+                                const isActive = currentView === view;
+                                return (
+                                    <button
+                                        key={view}
+                                        type="button"
+                                        className={`workbench-tab ${isActive ? "is-active" : ""}`}
+                                        aria-current={isActive ? "page" : undefined}
+                                        onClick={() => navigateTo(view)}
+                                    >
+                                        {view === "contract"
+                                            ? "Contract"
+                                            : view === "testing"
+                                              ? "Tests"
+                                              : "Quality"}
+                                    </button>
+                                );
+                            })}
+                            <a className="workbench-board-link" href="#/board">
+                                ← Board
+                            </a>
+                        </nav>
+                        <div className="app-workbench-body">
+                            {/*
+                              TestingView is always mounted; we toggle visibility with
+                              display:none so the editor's React state (open files, unsaved
+                              buffers, a run in flight) survives a round-trip to another
+                              view.
+                            */}
+                            <div className="app-view" data-active={currentView === "testing"}>
+                                <TestingView
+                                    sidebarCollapsed={sidebarCollapsed}
+                                    pendingGeneratedTest={pendingGeneratedTest}
+                                    onGeneratedTestConsumed={() =>
+                                        setPendingGeneratedTest(undefined)
+                                    }
+                                />
+                            </div>
 
-            <Suspense fallback={<ViewLoader />}>
-                {currentView === "quality" && <QualityView />}
+                            <Suspense fallback={<ViewLoader />}>
+                                {currentView === "quality" && <QualityView />}
 
-                {currentView === "contract" && (
-                    <ContractView onGenerateTest={handleGenerateTest} />
+                                {currentView === "contract" && (
+                                    <ContractView onGenerateTest={handleGenerateTest} />
+                                )}
+                            </Suspense>
+                        </div>
+                    </div>
                 )}
-            </Suspense>
+            </div>
 
             <style>{`
                 .app-shell {
@@ -189,6 +248,77 @@ test.describe("discovered page ${slug}", () => {
                     background: var(--bg);
                     color: var(--ink);
                     overflow: hidden;
+                }
+                .skip-link {
+                    position: absolute;
+                    left: -9999px;
+                    top: 0;
+                    background: var(--bg-elev);
+                    color: var(--ink);
+                    border: 1px solid var(--accent);
+                    border-radius: 4px;
+                    padding: 0.5rem 0.9rem;
+                    font-size: 0.85rem;
+                    z-index: 10000;
+                }
+                .skip-link:focus {
+                    left: 0.75rem;
+                    top: 0.75rem;
+                }
+                .sr-only {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    margin: -1px;
+                    padding: 0;
+                    overflow: hidden;
+                    clip: rect(0 0 0 0);
+                    white-space: nowrap;
+                    border: 0;
+                }
+                .app-main {
+                    display: flex;
+                    flex: 1;
+                    min-width: 0;
+                }
+                .app-workbench {
+                    display: flex;
+                    flex-direction: column;
+                    flex: 1;
+                    min-width: 0;
+                }
+                .workbench-tabs {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.25rem;
+                    padding: 0.5rem 1.25rem 0;
+                    border-bottom: 1px solid var(--hair);
+                }
+                .workbench-tab {
+                    background: transparent;
+                    border: 0;
+                    border-bottom: 2px solid transparent;
+                    color: var(--ink-dim);
+                    font-family: var(--mono);
+                    font-size: 0.82rem;
+                    padding: 0.5rem 0.9rem;
+                    cursor: pointer;
+                }
+                .workbench-tab.is-active {
+                    color: var(--ink);
+                    border-bottom-color: var(--accent);
+                }
+                .workbench-board-link {
+                    margin-left: auto;
+                    color: var(--accent);
+                    font-size: 0.8rem;
+                    text-decoration: none;
+                }
+                .app-workbench-body {
+                    display: flex;
+                    flex: 1;
+                    min-height: 0;
+                    min-width: 0;
                 }
                 /* TestingView occupies the full available width when
                  * active and is collapsed to zero (but kept mounted)

@@ -1,5 +1,5 @@
-import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { appFor } from "./app-context";
 import { procedure } from "./trpc";
 
@@ -40,6 +40,21 @@ export const contractRouter = {
             });
         }),
 
+    /**
+     * POST a broken-promise alert to the configured webhook
+     * (alerts.webhookUrl). configured:false when none is set — the board
+     * shows the setup hint instead of pretending an alert went out.
+     */
+    contractAlert: procedure
+        .input(
+            z.object({
+                text: z.string(),
+                detail: z.string(),
+                requirementKey: z.string(),
+            }),
+        )
+        .mutation(({ input, ctx }) => appFor(ctx).contract.alert(input)),
+
     contractFacts: procedure
         .input(z.object({ status: z.string().optional() }))
         .query(({ input, ctx }) =>
@@ -53,7 +68,9 @@ export const contractRouter = {
         .query(({ input, ctx }) => appFor(ctx).contract.factHistory(input?.factKey)),
 
     contractReviews: procedure
-        .input(z.object({ status: z.enum(["pending", "accepted", "rejected"]).optional() }).optional())
+        .input(
+            z.object({ status: z.enum(["pending", "accepted", "rejected"]).optional() }).optional(),
+        )
         .query(({ input, ctx }) => appFor(ctx).contract.listReviews(input?.status)),
 
     contractResolveReview: procedure

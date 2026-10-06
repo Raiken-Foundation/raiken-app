@@ -153,6 +153,15 @@ export const quarantineConfigSchema = z.object({
     testFiles: z.array(z.string()).optional(),
 });
 
+export const alertsConfigSchema = z.object({
+    /**
+     * Webhook URL that receives "promise broken" alerts from the dashboard's
+     * Alert-the-team button (and `raiken contract watch --webhook` parity).
+     * Slack/Discord-style JSON POST endpoints.
+     */
+    webhookUrl: z.string().url().optional(),
+});
+
 export const integrationsConfigSchema = z.object({
     /** Ticket provider: 'github', 'jira', or 'linear' (default: 'github') */
     provider: z.enum(["github", "jira", "linear"]).optional(),
@@ -212,6 +221,8 @@ export const raikenConfigSchema = z.object({
     indexing: indexingConfigSchema.optional(),
     /** Ticket system integration settings */
     integrations: integrationsConfigSchema.optional(),
+    /** Alerting settings (dashboard Alert-the-team webhook) */
+    alerts: alertsConfigSchema.optional(),
     /** Flaky-test quarantine settings */
     quarantine: quarantineConfigSchema.optional(),
 });
@@ -225,6 +236,7 @@ export type DiscoveryConfig = z.infer<typeof discoveryConfigSchema>;
 export type IndexingConfig = z.infer<typeof indexingConfigSchema>;
 export type IntegrationsConfig = z.infer<typeof integrationsConfigSchema>;
 export type QuarantineConfig = z.infer<typeof quarantineConfigSchema>;
+export type AlertsConfig = z.infer<typeof alertsConfigSchema>;
 export type RaikenConfig = z.infer<typeof raikenConfigSchema>;
 
 export const defaultConfig = {
@@ -280,6 +292,7 @@ export const defaultConfig = {
     quarantine: {
         testFiles: [] as string[],
     },
+    alerts: {},
 } satisfies Required<RaikenConfig>;
 
 export function validateConfig(config: unknown): RaikenConfig {

@@ -1,13 +1,12 @@
 import { Logo } from "./logo";
 
-type View = "testing" | "quality" | "contract";
-
 /**
- * Attention flags surfaced as a small dot on the corresponding rail button —
- * the nav-rail equivalent of the REPL's startup banner. Booleans (not
- * counts) are intentional: the rail is 44px wide, there's no room for a
- * number, and "does this need a look" is all the badge needs to answer.
+ * Two entries, two audiences: the Board (the Reader's status board — the
+ * dashboard's front door) and the Workbench (contract · tests · quality,
+ * the operator's screens, one click behind it). The workbench button
+ * returns to the last workbench view instead of resetting to a default.
  */
+
 interface NavRailAttention {
     /** At least one test file's last recorded run failed/errored/timed out. */
     files?: boolean;
@@ -16,10 +15,13 @@ interface NavRailAttention {
 }
 
 interface NavRailProps {
-    activeView: View;
-    sidebarCollapsed: boolean;
-    onNavigate: (view: View) => void;
+    activeView: "board" | "workbench";
+    /** Which workbench view the Workbench button opens (contract/testing/quality). */
+    workbenchView: "contract" | "testing" | "quality";
+    onOpenWorkbench: () => void;
+    onNavigate: (view: "board") => void;
     onToggleCollapse: () => void;
+    sidebarCollapsed: boolean;
     attention?: NavRailAttention;
 }
 
@@ -31,12 +33,16 @@ function AttentionDot({ show }: { show: boolean | undefined }) {
 
 export function NavRail({
     activeView,
-    sidebarCollapsed,
+    workbenchView,
+    onOpenWorkbench,
     onNavigate,
     onToggleCollapse,
+    sidebarCollapsed,
     attention,
 }: NavRailProps) {
-    const isOnTesting = activeView === "testing";
+    const onBoard = activeView === "board";
+    const workbenchNeedsAttention = attention?.files || attention?.discovery;
+    const workbenchLabel = `workbench (${workbenchView})`;
 
     return (
         <nav className="nav-rail" aria-label="Main navigation">
@@ -45,16 +51,36 @@ export function NavRail({
             </div>
             <button
                 type="button"
-                className={`rail-btn ${activeView === "contract" ? "active" : ""}`}
-                onClick={() => onNavigate("contract")}
+                className={`rail-btn ${onBoard ? "active" : ""}`}
+                onClick={() => onNavigate("board")}
+                title="status board — does what we promised work?"
+                aria-label="status board"
+                aria-current={onBoard ? "page" : undefined}
+            >
+                <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    aria-hidden="true"
+                >
+                    <path d="M4 5h16v14H4z" />
+                    <path d="M8 10h8M8 14h5" />
+                </svg>
+            </button>
+            <button
+                type="button"
+                className={`rail-btn ${activeView === "workbench" ? "active" : ""}`}
+                onClick={onOpenWorkbench}
                 title={
-                    attention?.discovery
-                        ? "contract — acquisition (discovery) needs attention"
-                        : "contract — observed behavior vs requirements"
+                    workbenchNeedsAttention
+                        ? `${workbenchLabel} — needs attention`
+                        : `${workbenchLabel} — contract, tests, quality`
                 }
                 aria-label={
-                    attention?.discovery ? "contract, needs attention" : "contract"
+                    workbenchNeedsAttention ? `${workbenchLabel}, needs attention` : workbenchLabel
                 }
+                aria-current={activeView === "workbench" ? "page" : undefined}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -63,50 +89,14 @@ export function NavRail({
                     strokeWidth="1.5"
                     aria-hidden="true"
                 >
-                    <path d="M6 3h9l4 4v14H6z" />
-                    <path d="M9 12h6M9 16h6" />
+                    <path d="M14 6l3.5 3.5L8 19H4.5v-3.5L14 6z" />
+                    <path d="M5 9V5h4" />
+                    <path d="M15 15v4h4" />
                 </svg>
-                <AttentionDot show={attention?.discovery} />
-            </button>
-            <button
-                type="button"
-                className={`rail-btn ${isOnTesting ? "active" : ""}`}
-                onClick={() => onNavigate("testing")}
-                title={attention?.files ? "tests — a test is failing" : "tests"}
-                aria-label={attention?.files ? "tests, needs attention" : "tests"}
-            >
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    aria-hidden="true"
-                >
-                    <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                </svg>
-                <AttentionDot show={attention?.files} />
-            </button>
-            <button
-                type="button"
-                className={`rail-btn ${activeView === "quality" ? "active" : ""}`}
-                onClick={() => onNavigate("quality")}
-                title="quality"
-                aria-label="quality"
-            >
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    aria-hidden="true"
-                >
-                    <path d="M9 12l2 2 4-4" />
-                    <path d="M12 2l9 4v6c0 5-3.5 9.5-9 10-5.5-.5-9-5-9-10V6l9-4z" />
-                </svg>
+                <AttentionDot show={workbenchNeedsAttention} />
             </button>
 
-
-            {isOnTesting && (
+            {activeView === "workbench" && workbenchView === "testing" && (
                 <button
                     type="button"
                     className="rail-btn collapse-btn"
@@ -155,73 +145,52 @@ export function NavRail({
                     align-items: center;
                     justify-content: center;
                     width: 100%;
-                    height: 38px;
-                    background: transparent;
+                    height: 40px;
                     border: 0;
-                    color: var(--ink-faint);
-                    cursor: pointer;
-                    transition: color 0.12s, background 0.12s;
-                    flex-shrink: 0;
-                }
-
-                .rail-btn:hover {
-                    background: var(--bg-hover);
+                    border-left: 2px solid transparent;
+                    background: transparent;
                     color: var(--ink-dim);
-                }
-
-                .rail-btn:focus-visible {
-                    outline: 0;
-                    box-shadow: inset 0 0 0 1px var(--accent);
-                }
-
-                .rail-btn {
-                    transition: color 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                        background 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                        box-shadow 120ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
-                }
-                .rail-btn.active {
-                    color: var(--accent);
-                    background: var(--bg);
-                    box-shadow: 0 0 16px -6px var(--accent-dim);
-                }
-                .rail-btn.active::before {
-                    content: "";
-                    position: absolute;
-                    left: 0;
-                    top: 0;
-                    bottom: 0;
-                    width: 2px;
-                    background: var(--accent);
-                    box-shadow: 0 0 8px -1px var(--accent);
-                }
-
-                .rail-btn.settings-btn {
-                    margin-top: auto;
-                    border-top: 1px solid var(--hair);
-                }
-
-                .rail-btn.collapse-btn {
-                    border-top: 1px solid var(--hair);
-                    color: var(--ink-mute);
-                }
-                .rail-btn.collapse-btn:hover {
-                    color: var(--ink);
+                    cursor: pointer;
                 }
 
                 .rail-btn svg {
-                    width: 16px;
-                    height: 16px;
+                    width: 17px;
+                    height: 17px;
+                }
+
+                .rail-btn:hover {
+                    color: var(--ink);
+                    background: var(--bg-hover);
+                }
+
+                .rail-btn:focus-visible {
+                    outline: 2px solid var(--accent);
+                    outline-offset: -2px;
+                }
+
+                .rail-btn.active {
+                    color: var(--accent);
+                    border-left-color: var(--accent);
+                    background: var(--accent-soft);
                 }
 
                 .rail-dot {
                     position: absolute;
-                    top: 6px;
-                    right: 9px;
+                    top: 7px;
+                    right: 7px;
                     width: 6px;
                     height: 6px;
                     border-radius: 50%;
                     background: var(--warn);
-                    box-shadow: 0 0 0 1.5px var(--bg-bar);
+                    box-shadow: 0 0 0 2px var(--bg-bar);
+                }
+
+                .rail-spacer {
+                    flex: 1;
+                }
+
+                .collapse-btn {
+                    margin-top: auto;
                 }
             `}</style>
         </nav>

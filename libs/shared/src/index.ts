@@ -7,6 +7,12 @@
  */
 
 export {
+    type BoardReport,
+    type BoardRow,
+    type BoardStatus,
+    type BoardTicket,
+} from "./lib/board-types";
+export {
     type AgentStreamErrorField,
     type AgentStreamSafeError,
     agentStreamErrorMessage,

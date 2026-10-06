@@ -3,45 +3,59 @@ import { describe, expect, it, vi } from "vitest";
 import { NavRail } from "../nav-rail";
 
 const baseProps = {
-    activeView: "testing" as const,
-    activeSidebarTab: "files" as const,
-    sidebarCollapsed: false,
+    activeView: "workbench" as const,
+    workbenchView: "contract" as const,
+    onOpenWorkbench: vi.fn(),
     onNavigate: vi.fn(),
+    sidebarCollapsed: false,
     onToggleCollapse: vi.fn(),
 };
 
-describe("NavRail attention dots", () => {
+describe("NavRail — board-first, workbench behind", () => {
     it("renders no attention dots when nothing needs attention", () => {
         render(<NavRail {...baseProps} />);
         expect(document.querySelectorAll(".rail-dot")).toHaveLength(0);
     });
 
-    it("shows a dot on tests when a spec is broken", () => {
+    it("marks the workbench button as the one needing attention, naming the view", () => {
         render(<NavRail {...baseProps} attention={{ files: true }} />);
-        expect(screen.getByLabelText("tests, needs attention")).toBeDefined();
+        expect(screen.getByLabelText(/workbench \(contract\), needs attention/)).toBeDefined();
+        expect(document.querySelectorAll(".rail-dot")).toHaveLength(1);
     });
 
-    it("shows a dot on contract when acquisition (discovery) needs attention", () => {
+    it("surfaces discovery attention on the workbench button too (one dot, either cause)", () => {
         render(<NavRail {...baseProps} attention={{ discovery: true }} />);
-        expect(screen.getByLabelText("contract, needs attention")).toBeDefined();
-    });
-
-    it("can show multiple dots at once", () => {
-        render(<NavRail {...baseProps} attention={{ files: true, discovery: true }} />);
-        expect(document.querySelectorAll(".rail-dot")).toHaveLength(2);
+        expect(screen.getByLabelText(/needs attention/)).toBeDefined();
+        expect(document.querySelectorAll(".rail-dot")).toHaveLength(1);
     });
 
     it("falls back to plain labels when attention is undefined", () => {
         render(<NavRail {...baseProps} attention={undefined} />);
-        expect(screen.getByLabelText("contract")).toBeDefined();
-        expect(screen.getByLabelText("tests")).toBeDefined();
-        expect(screen.getByLabelText("quality")).toBeDefined();
+        expect(screen.getByLabelText("status board")).toBeDefined();
+        expect(screen.getByLabelText(/workbench \(contract\)/)).toBeDefined();
     });
 
-    it("leads with the contract button", () => {
+    it("leads with the board button — the Reader's screen is the front door", () => {
         render(<NavRail {...baseProps} />);
         const buttons = Array.from(document.querySelectorAll(".rail-btn"));
-        const labels = buttons.map((b) => b.getAttribute("aria-label"));
-        expect(labels.indexOf("contract")).toBe(0);
+        expect(buttons[0]?.getAttribute("aria-label")).toBe("status board");
+        expect(buttons[1]?.getAttribute("aria-label")).toContain("workbench");
+    });
+
+    it("marks the active entry with aria-current", () => {
+        const { rerender } = render(<NavRail {...baseProps} />);
+        expect(
+            screen.getByLabelText(/workbench \(contract\)/).getAttribute("aria-current"),
+        ).toBe("page");
+        expect(screen.getByLabelText("status board").getAttribute("aria-current")).toBeNull();
+
+        rerender(
+            <NavRail
+                {...baseProps}
+                activeView="board"
+                workbenchView="contract"
+            />,
+        );
+        expect(screen.getByLabelText("status board").getAttribute("aria-current")).toBe("page");
     });
 });

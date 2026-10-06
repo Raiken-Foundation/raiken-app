@@ -1,43 +1,45 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SqliteDbAdapter } from "../database/adapter";
-import { CodeGraphDB } from "../database/db";
+import type { ResolvedAIConfig } from "../agent/ai-providers";
+import { raikenConfigSchema } from "../config/schema";
+import { readRawConfigSync } from "../config/store";
 import {
+    type BehaviorFact,
     buildContractView,
+    type CaptureResult,
+    type CaptureRoute,
+    type ContractChanges,
+    type ContractDiff,
+    type ContractView,
     captureFormStates,
     computeContractChanges,
-    type ContractChanges,
     computeCoverage,
-    exploreUncovered,
-    extractSourceRoutes,
-    mergeKnownRoutes,
-    recordApiCalls,
-    snapshotRoutes,
     contractToJson,
     contractToMarkdown,
     diffContracts,
+    exploreUncovered,
+    extractRouteBindings,
+    extractSourceRoutes,
+    type FactVerdict,
     importRequirements,
+    loadDependentsGraph,
+    type MaterializeResult,
     materializeFacts,
+    mergeKnownRoutes,
     mintFromSiteKnowledge,
     parseRequirementsFile,
     parseTicketRequirements,
     projectBoard,
-    extractRouteBindings,
-    loadDependentsGraph,
+    recordApiCalls,
     scopeFactsByChanges,
     scopeFactsByImpact,
+    snapshotRoutes,
     verifyFacts,
-    type BehaviorFact,
-    type CaptureResult,
-    type CaptureRoute,
-    type ContractDiff,
-    type ContractView,
-    type FactVerdict,
-    type MaterializeResult,
 } from "../contract";
 import { ContractStore } from "../contract/store";
+import { SqliteDbAdapter } from "../database/adapter";
+import { CodeGraphDB } from "../database/db";
 import { notFoundError } from "../errors";
-import type { ResolvedAIConfig } from "../agent/ai-providers";
 import type { ProjectApplicationContext } from "./context";
 
 export interface ContractScope {
@@ -65,7 +67,9 @@ export class ContractApplication implements ProjectApplicationContext {
     private withStore<T>(fn: (store: ContractStore) => T): T {
         const db = new CodeGraphDB(this.projectPath);
         try {
-            return fn(new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), this.projectPath)));
+            return fn(
+                new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), this.projectPath)),
+            );
         } finally {
             db.close();
         }
@@ -79,7 +83,9 @@ export class ContractApplication implements ProjectApplicationContext {
     private async withStoreAsync<T>(fn: (store: ContractStore) => T | Promise<T>): Promise<T> {
         const db = new CodeGraphDB(this.projectPath);
         try {
-            return await fn(new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), this.projectPath)));
+            return await fn(
+                new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), this.projectPath)),
+            );
         } finally {
             db.close();
         }
@@ -90,7 +96,11 @@ export class ContractApplication implements ProjectApplicationContext {
         const db = new CodeGraphDB(this.projectPath);
         try {
             const result = mintFromSiteKnowledge(db.getRawDatabase(), this.projectPath);
-            return { minted: result.minted, refreshed: result.refreshed, total: result.facts.length };
+            return {
+                minted: result.minted,
+                refreshed: result.refreshed,
+                total: result.facts.length,
+            };
         } finally {
             db.close();
         }
@@ -225,6 +235,51 @@ export class ContractApplication implements ProjectApplicationContext {
         });
     }
 
+    /**
+     * POST a broken-promise alert to the configured webhook
+     * (`alerts.webhookUrl` in raiken.config.json). Returns configured: false
+     * when no webhook is set — the caller surfaces the setup hint instead of
+     * pretending an alert went out.
+     */
+    async alert(input: { text: string; detail: string; requirementKey: string }): Promise<{
+        configured: boolean;
+        delivered?: boolean;
+        reason?: string;
+    }> {
+        const raw = readRawConfigSync(this.projectPath);
+        const parsed = raikenConfigSchema.safeParse(raw);
+        const webhookUrl = parsed.success ? parsed.data.alerts?.webhookUrl : undefined;
+        if (!webhookUrl) {
+            return {
+                configured: false,
+                reason: "No webhook configured — add alerts.webhookUrl to raiken.config.json",
+            };
+        }
+        try {
+            const response = await fetch(webhookUrl, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                    text: input.text,
+                    detail: input.detail,
+                    requirementKey: input.requirementKey,
+                }),
+                signal: AbortSignal.timeout(5000),
+            });
+            return {
+                configured: true,
+                delivered: response.ok,
+                reason: response.ok ? undefined : `HTTP ${response.status}`,
+            };
+        } catch (error) {
+            return {
+                configured: true,
+                delivered: false,
+                reason: error instanceof Error ? error.message : String(error),
+            };
+        }
+    }
+
     /** Token search across both sides of the contract. */
     searchContract(query: string): {
         facts: import("../contract/types").BehaviorFact[];
@@ -234,7 +289,9 @@ export class ContractApplication implements ProjectApplicationContext {
     }
 
     /** Pending behavior-change reviews (violated facts awaiting a decision). */
-    listReviews(status?: "pending" | "accepted" | "rejected"): Array<import("../contract/types").FactReview> {
+    listReviews(
+        status?: "pending" | "accepted" | "rejected",
+    ): Array<import("../contract/types").FactReview> {
         return this.withStore((store) => store.listReviews(status));
     }
 
@@ -323,7 +380,13 @@ export class ContractApplication implements ProjectApplicationContext {
         // the check set the moment it fails.
         const allFacts = this.withStore((store) => store.listBehaviorFacts());
         const scope = input.verifyAll
-            ? { scoper: "all" as const, scoped: allFacts, reasons: [], globalReason: "--all", unmapped: [] }
+            ? {
+                  scoper: "all" as const,
+                  scoped: allFacts,
+                  reasons: [],
+                  globalReason: "--all",
+                  unmapped: [],
+              }
             : await this.scope(allFacts, input.changedFiles ?? []);
         if (scope.scoped.length === 0) {
             return { verdicts: [], scoped: 0, total: allFacts.length, scope };
@@ -465,7 +528,10 @@ export class ContractApplication implements ProjectApplicationContext {
         storageStatePath?: string | null;
     }): Promise<{ recorded: number; filePath: string }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
+        const baseURL =
+            input.baseURL ??
+            (await readPlaywrightBaseURL(this.projectPath)) ??
+            this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
@@ -473,7 +539,8 @@ export class ContractApplication implements ProjectApplicationContext {
         let discoveredUrls: string[] = [];
         try {
             discoveredUrls = (
-                db.getRawDatabase()
+                db
+                    .getRawDatabase()
                     .prepare(`SELECT url FROM discovered_pages WHERE project_path = ?`)
                     .all(this.projectPath) as Array<{ url: string }>
             ).map((r) => r.url);
@@ -504,9 +571,18 @@ export class ContractApplication implements ProjectApplicationContext {
     async snapshotRoutes(input: {
         baseURL?: string | null;
         storageStatePath?: string | null;
-    }): Promise<{ captured: string[]; failed: Array<{ route: string; reason: string }>; total: number; coverage: number; sources: number }> {
+    }): Promise<{
+        captured: string[];
+        failed: Array<{ route: string; reason: string }>;
+        total: number;
+        coverage: number;
+        sources: number;
+    }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
+        const baseURL =
+            input.baseURL ??
+            (await readPlaywrightBaseURL(this.projectPath)) ??
+            this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
@@ -515,7 +591,8 @@ export class ContractApplication implements ProjectApplicationContext {
         let discoveredUrls: string[] = [];
         try {
             discoveredUrls = (
-                db.getRawDatabase()
+                db
+                    .getRawDatabase()
                     .prepare(`SELECT url FROM discovered_pages WHERE project_path = ?`)
                     .all(this.projectPath) as Array<{ url: string }>
             ).map((r) => r.url);
@@ -572,27 +649,42 @@ export class ContractApplication implements ProjectApplicationContext {
         coverage: ReturnType<typeof computeCoverage>;
     }> {
         const { readPlaywrightBaseURL } = await import("../testing/playwright-config");
-        const baseURL = input.baseURL ?? (await readPlaywrightBaseURL(this.projectPath)) ?? this.discoveredBaseURLFallback();
+        const baseURL =
+            input.baseURL ??
+            (await readPlaywrightBaseURL(this.projectPath)) ??
+            this.discoveredBaseURLFallback();
         if (!baseURL) {
             throw notFoundError("No baseURL — set one in playwright.config.ts or pass --base-url.");
         }
         const db = new CodeGraphDB(this.projectPath);
         try {
-            const store = new ContractStore(new SqliteDbAdapter(db.getRawDatabase(), this.projectPath));
+            const store = new ContractStore(
+                new SqliteDbAdapter(db.getRawDatabase(), this.projectPath),
+            );
             const intents = store.listIntentFacts();
             const observed = store.listBehaviorFacts();
             const routes = mergeKnownRoutes(
                 extractSourceRoutes(this.projectPath),
                 (
-                    db.getRawDatabase()
+                    db
+                        .getRawDatabase()
                         .prepare(`SELECT url FROM discovered_pages WHERE project_path = ?`)
                         .all(this.projectPath) as Array<{ url: string }>
                 ).map((r) => r.url),
                 baseURL,
-            ).map((r) => ({ path: r.path, url: r.path.startsWith("http") ? r.path : baseURL + r.path }));
-            const formsByRoute = new Map<string, { fields: Array<{ label?: string }>; submits: string[] }>();
-            for (const row of db.getRawDatabase()
-                .prepare(`SELECT normalized_url, forms_json FROM discovered_pages WHERE project_path = ? AND forms_json IS NOT NULL`)
+            ).map((r) => ({
+                path: r.path,
+                url: r.path.startsWith("http") ? r.path : baseURL + r.path,
+            }));
+            const formsByRoute = new Map<
+                string,
+                { fields: Array<{ label?: string }>; submits: string[] }
+            >();
+            for (const row of db
+                .getRawDatabase()
+                .prepare(
+                    `SELECT normalized_url, forms_json FROM discovered_pages WHERE project_path = ? AND forms_json IS NOT NULL`,
+                )
                 .all(this.projectPath) as Array<{ normalized_url: string; forms_json: string }>) {
                 try {
                     formsByRoute.set(row.normalized_url, JSON.parse(row.forms_json));

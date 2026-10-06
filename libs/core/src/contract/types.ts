@@ -98,6 +98,10 @@ export interface FactEvent {
     eventType: "minted" | "verified" | "violated" | "unverified" | "retired" | "accepted" | "rejected" | "restored" | "forgotten";
     detail?: string;
     occurredAt: number;
+    /** Commit the event was observed at (absent outside git / on old rows). */
+    commitSha?: string;
+    /** The working tree had uncommitted changes at the time. */
+    commitDirty?: boolean;
 }
 
 export interface FactTraceRow {

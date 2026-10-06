@@ -11,8 +11,8 @@
 
 import { type CiEvent, type CiResult, GitError, runCi } from "@raiken/core";
 import chalk from "chalk";
-import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
 import { cliExit } from "../cli/exit";
+import { CLI_EXIT, mapErrorToCliExitCode, safeCliErrorMessage } from "../errors";
 
 interface CiCommandOptions {
     base?: string;
@@ -24,6 +24,7 @@ interface CiCommandOptions {
     timeout?: string;
     skipRun?: boolean;
     staged?: boolean;
+    fallback?: string;
     json?: boolean;
 }
 
@@ -62,6 +63,10 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
     const maxTests = parsePositiveInt(options.maxTests, undefined);
     const testTimeout = parsePositiveInt(options.timeout, 60_000) ?? 60_000;
     const jsonOutput = options.json === true;
+    const fallback = options.fallback === "none" ? "none" : "full";
+    if (options.fallback && options.fallback !== "none" && options.fallback !== "full") {
+        console.warn(chalk.yellow(`Unknown --fallback "${options.fallback}", using "full".`));
+    }
 
     if (!jsonOutput) {
         console.log(chalk.cyan("\nraiken ci\n"));
@@ -80,6 +85,7 @@ export async function ciCommand(options: CiCommandOptions): Promise<void> {
             testTimeout,
             skipRun: options.skipRun === true,
             staged: options.staged === true,
+            fallback,
             onEvent: jsonOutput ? undefined : (event) => logEvent(event),
         });
     } catch (err) {
@@ -171,6 +177,19 @@ function printHumanSummary(result: CiResult): void {
     console.log(chalk.dim("─".repeat(50)));
 
     console.log(`  ${chalk.bold("Changed files:")}     ${impact.changedFiles.length}`);
+    const mode = impact.selection.mode;
+    const modeLabel =
+        mode === "full"
+            ? chalk.yellow("full suite")
+            : mode === "none"
+              ? chalk.dim("nothing to run")
+              : "impact";
+    console.log(
+        `  ${chalk.bold("Selection:")}         ${modeLabel} ${chalk.dim(`— ${impact.selection.reason}`)}`,
+    );
+    if (!impact.selection.graph.available) {
+        console.log(chalk.yellow(`  ⚠ code graph unavailable: ${impact.selection.graph.reason}`));
+    }
     console.log(
         `  ${chalk.bold("Affected tests:")}    ${impact.affectedTests.length}` +
             (impact.skippedBelowThreshold.length > 0
@@ -209,6 +228,7 @@ function toMachineSummary(result: CiResult) {
         affectedTestCount: result.impact.affectedTests.length,
         skippedBelowThreshold: result.impact.skippedBelowThreshold.length,
         confidenceThreshold: result.impact.confidenceThreshold,
+        selection: result.impact.selection,
         run: {
             ran: result.run.ran,
             durationMs: result.run.durationMs,

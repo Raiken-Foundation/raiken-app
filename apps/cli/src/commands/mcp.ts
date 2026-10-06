@@ -40,6 +40,17 @@ const TOOLS: McpTool[] = [
         execute: async (_args, app) => JSON.stringify(app.contract.coverage(), null, 2),
     },
     {
+        name: "contract_changes",
+        description:
+            "Behavior changes between two commits: facts added, broken, fixed, accepted, or rejected, grouped by the commit they were observed at. `range` is git syntax (e.g. \"origin/main..HEAD\").",
+        inputSchema: {
+            type: "object",
+            properties: { range: { type: "string" } },
+            required: ["range"],
+        },
+        execute: async (args, app) => JSON.stringify(app.contract.changes(String(args["range"])), null, 2),
+    },
+    {
         name: "contract_facts",
         description: "Observed facts, optionally filtered by status and confidence.",
         inputSchema: {

@@ -200,7 +200,7 @@ program
     .command("contract [subcommand] [args...]")
     .description(
         "The two-sided behavior contract: observed facts vs ticket/AC requirements " +
-            "(show | coverage | capture | mint | import | export | diff | verify | review | history | search | forget | explore | materialize | routes | snapshot | record | watch)",
+            "(show | coverage | scope | capture | mint | import | export | diff | changes | verify | review | history | search | forget | explore | materialize | routes | snapshot | record | watch)",
     )
     .option("--json", "Emit machine-readable output", false)
     .option("--file <path>", "import: requirements markdown/text file")
@@ -402,6 +402,11 @@ program
     .option("--max-tests <number>", "Cap the number of tests executed")
     .option("--timeout <number>", "Per-test timeout in ms", "60000")
     .option("--skip-run", "Compute impact only; do not execute tests", false)
+    .option(
+        "--fallback <mode>",
+        "When a change's impact can't be proven: full (run the whole suite) | none (changed specs only)",
+        "full",
+    )
     .option("--json", "Emit a machine-readable summary to stdout", false)
     .action(async (options) => {
         try {

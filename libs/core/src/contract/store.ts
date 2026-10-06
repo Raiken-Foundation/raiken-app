@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DbAdapter } from "../database/adapter";
+import { type CommitStamp, readCommitStamp } from "./commit";
 import type { FactEvent,
     BehaviorFact,
     CoverageEntry,
@@ -20,8 +21,29 @@ import type { FactEvent,
  * (`fact_key`) so re-observation upserts instead of duplicating — the store
  * counts verifications, it never accumulates copies.
  */
+export interface ContractStoreOptions {
+    /**
+     * Commit to stamp ledger events with. Omit to read it from git on first
+     * write; pass null to record events unstamped (not a git checkout).
+     */
+    commit?: CommitStamp | null;
+}
+
 export class ContractStore {
-    constructor(private readonly adapter: DbAdapter) {}
+    private commitStamp: CommitStamp | null | undefined;
+
+    constructor(
+        private readonly adapter: DbAdapter,
+        options: ContractStoreOptions = {},
+    ) {
+        this.commitStamp = options.commit;
+    }
+
+    /** The commit this store's writes are stamped with (read once, lazily). */
+    currentCommit(): CommitStamp | null {
+        if (this.commitStamp === undefined) this.commitStamp = readCommitStamp(this.adapter.projectPath);
+        return this.commitStamp;
+    }
 
     // ==========================================================================
     // Observed facts
@@ -104,7 +126,7 @@ export class ContractStore {
                 fact.expectedObservable,
                 fact.status,
                 fact.evidence ? JSON.stringify(fact.evidence) : null,
-                fact.sourceCommit ?? null,
+                fact.sourceCommit ?? this.currentCommit()?.sha ?? null,
                 fact.capturedAt,
                 fact.status === "verified" ? now : null,
                 fact.status === "verified" ? 1 : 0,
@@ -139,12 +161,51 @@ export class ContractStore {
 
     /** Append to the per-fact event ledger (mint/verify/violate history). */
     private logFactEvent(factKey: string, type: string, detail?: string): void {
+        const commit = this.currentCommit();
         this.adapter.db
             .prepare(
-                `INSERT INTO fact_events (project_path, fact_key, event_type, detail, occurred_at)
-                 VALUES (?, ?, ?, ?, ?)`,
+                `INSERT INTO fact_events
+                   (project_path, fact_key, event_type, detail, occurred_at, commit_sha, commit_dirty)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
             )
-            .run(this.adapter.projectPath, factKey, type, detail ?? null, Date.now());
+            .run(
+                this.adapter.projectPath,
+                factKey,
+                type,
+                detail ?? null,
+                Date.now(),
+                commit?.sha ?? null,
+                commit ? (commit.dirty ? 1 : 0) : null,
+            );
+    }
+
+    /**
+     * Ledger events stamped with any of `shas`, oldest first. With
+     * `dirtyOnly`, only events recorded on top of uncommitted changes.
+     */
+    listFactEventsByCommits(shas: string[], options: { dirtyOnly?: boolean } = {}): FactEvent[] {
+        if (shas.length === 0) return [];
+        const placeholders = shas.map(() => "?").join(",");
+        const rows = this.adapter.db
+            .prepare(
+                `SELECT * FROM fact_events
+                 WHERE project_path = ? AND commit_sha IN (${placeholders})
+                 ${options.dirtyOnly ? "AND commit_dirty = 1" : ""}
+                 ORDER BY occurred_at ASC, id ASC`,
+            )
+            .all(this.adapter.projectPath, ...shas) as Array<Record<string, unknown>>;
+        return rows.map(mapEventRow);
+    }
+
+    /** The event recorded for a fact just before event `id` (its prior state). */
+    previousFactEvent(factKey: string, id: number): FactEvent | null {
+        const row = this.adapter.db
+            .prepare(
+                `SELECT * FROM fact_events WHERE project_path = ? AND fact_key = ? AND id < ?
+                 ORDER BY id DESC LIMIT 1`,
+            )
+            .get(this.adapter.projectPath, factKey, id) as Record<string, unknown> | undefined;
+        return row ? mapEventRow(row) : null;
     }
 
     /** Token search across both sides of the contract (route/action/
@@ -196,13 +257,7 @@ export class ContractStore {
                        ORDER BY occurred_at DESC, id DESC LIMIT ?`,
                   )
                   .all(this.adapter.projectPath, limit) as Array<Record<string, unknown>>);
-        return rows.map((r) => ({
-            id: Number(r["id"]),
-            factKey: String(r["fact_key"]),
-            eventType: String(r["event_type"]) as FactEvent["eventType"],
-            detail: (r["detail"] as string | null) ?? undefined,
-            occurredAt: Number(r["occurred_at"]),
-        }));
+        return rows.map(mapEventRow);
     }
 
     /** Queue a behavior change for review (one pending per fact). */
@@ -536,3 +591,15 @@ function safeParse(raw: string): unknown {
 
 /** Re-export so callers can compute verdicts without importing coverage.ts. */
 export type { CoverageEntry, CoverageReport };
+
+function mapEventRow(r: Record<string, unknown>): FactEvent {
+    const sha = r["commit_sha"] as string | null | undefined;
+    return {
+        id: Number(r["id"]),
+        factKey: String(r["fact_key"]),
+        eventType: String(r["event_type"]) as FactEvent["eventType"],
+        detail: (r["detail"] as string | null) ?? undefined,
+        occurredAt: Number(r["occurred_at"]),
+        ...(sha ? { commitSha: sha, commitDirty: Number(r["commit_dirty"]) === 1 } : {}),
+    };
+}

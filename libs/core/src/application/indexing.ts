@@ -81,6 +81,8 @@ export class IndexingApplication implements ProjectApplicationContext {
 
         return {
             projectRoot: projectPath,
+            /** Symbols/edges come from graft; `available: false` carries why. */
+            graph: graph.getGraphStatus(),
             entryPoints: entryPoints.map((ep) => ({
                 file: path.relative(projectPath, ep.file),
                 framework: ep.framework,

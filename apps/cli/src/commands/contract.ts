@@ -1,4 +1,4 @@
-import { createProjectApplication, resolveAuthStorageStatePath } from "@raiken/core";
+import { type ContractScope, createProjectApplication, resolveAuthStorageStatePath } from "@raiken/core";
 import chalk from "chalk";
 import { dim } from "../agent-stream";
 import { CLI_EXIT } from "../errors";
@@ -41,6 +41,7 @@ interface ContractOptions {
  *   explore     LLM-driven exploration of uncovered requirements
  *   record      record GET traffic for hermetic materialization mocks
  *   history     evidence ledger: mint/verify/violate timeline per fact
+ *   changes     behavior changes between commits (ledger events by commit)
  *   review      accept or reject behavior changes found by verify
  *   search      find facts/requirements by keyword
  *   forget      remove a junk or duplicate fact by key
@@ -283,6 +284,26 @@ export async function contractCommand(
             return;
         }
 
+        case "scope": {
+            // Dry run of verify's scoping: which facts would this change re-check, and why.
+            const opts0 = options as Record<string, unknown>;
+            const { getChangedFiles } = await import("../git-changed");
+            const changedFiles = await getChangedFiles(projectPath, String(opts0["base"] ?? "HEAD"));
+            const scope = await contract.scope(contract.view().observed, changedFiles);
+            if (opts0["json"]) {
+                process.stdout.write(
+                    `${JSON.stringify({ changedFiles, ...scope, scoped: scope.scoped.map((f) => f.factKey) }, null, 2)}\n`,
+                );
+                return;
+            }
+            console.log(chalk.cyan("\n  Contract scope\n"));
+            console.log(`  Changed files:    ${changedFiles.length}`);
+            console.log(`  Facts in scope:   ${scope.scoped.length}/${contract.view().observed.length}`);
+            printScope(scope);
+            console.log("");
+            return;
+        }
+
         case "verify": {
             const { resolveAuthStorageStatePath } = await import("@raiken/core");
             let changedFiles: string[] | undefined;
@@ -327,6 +348,7 @@ export async function contractCommand(
             console.log(
                 `  ${verifiedCount} verified · ${violations.length} violated · ${unverifiedCount} unverified  (${result.scoped}/${result.total} facts in scope)`,
             );
+            printScope(result.scope);
             const format = String((options as Record<string, unknown>)["format"] ?? "");
             for (const v of violations) {
                 if (format === "github") {
@@ -519,9 +541,61 @@ export async function contractCommand(
                           ? chalk.red("✗ violated")
                           : e.eventType === "minted"
                             ? chalk.magenta("+ minted")
-                            : chalk.yellow("○ unverified");
+                            : e.eventType === "unverified"
+                              ? chalk.yellow("○ unverified")
+                              : dim(`· ${e.eventType}`);
                 const when = new Date(e.occurredAt).toISOString().replace("T", " ").slice(0, 19);
-                console.log(`  ${dim(when)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`);
+                const at = e.commitSha ? `${e.commitSha.slice(0, 7)}${e.commitDirty ? "+" : " "}` : "       ";
+                console.log(`  ${dim(when)}  ${dim(at)}  ${mark}  ${e.detail ?? e.factKey.slice(0, 12)}${key ? "" : dim(`  (${e.factKey.slice(0, 8)})`)}`);
+            }
+            console.log("");
+            return;
+        }
+
+        case "changes": {
+            const { defaultBaseRef } = await import("@raiken/core");
+            const range = options.args?.[0] ?? `${defaultBaseRef(projectPath)}..HEAD`;
+            let changes: ReturnType<typeof contract.changes>;
+            try {
+                changes = contract.changes(range);
+            } catch (error) {
+                console.error(chalk.red(`\n  ✗ ${safeCliErrorMessage(error)}\n`));
+                cliExit(CLI_EXIT.USAGE);
+            }
+            if (options.json) {
+                process.stdout.write(`${JSON.stringify(changes, null, 2)}\n`);
+                return;
+            }
+            console.log(chalk.cyan(`\n  Behavior changes — ${range}\n`));
+            const s = changes.summary;
+            const parts = [
+                s.added && chalk.magenta(`+${s.added} added`),
+                s.broke && chalk.red(`✗${s.broke} broke`),
+                s.fixed && chalk.green(`✓${s.fixed} fixed`),
+                s.accepted && `${s.accepted} accepted`,
+                s.rejected && `${s.rejected} rejected`,
+                s.forgotten && `${s.forgotten} forgotten`,
+            ].filter(Boolean);
+            console.log(`  ${parts.length > 0 ? parts.join(" · ") : dim("no behavior changes recorded in this range")}`);
+            if (changes.silentCommits > 0) {
+                console.log(dim(`  ${changes.silentCommits} commit(s) in range have no ledger events (never verified at that commit)`));
+            }
+            for (const c of changes.commits) {
+                const label = c.uncommitted ? `${c.sha.slice(0, 7)}+ uncommitted edits` : `${c.sha.slice(0, 7)} ${c.subject}`;
+                console.log(`\n  ${chalk.bold(label)}`);
+                for (const e of c.events) {
+                    const mark =
+                        e.transition === "added"
+                            ? chalk.magenta("+ added   ")
+                            : e.transition === "broke"
+                              ? chalk.red("✗ broke   ")
+                              : e.transition === "fixed"
+                                ? chalk.green("✓ fixed   ")
+                                : dim(`${(e.transition ?? e.eventType).padEnd(10)}`);
+                    const what = e.route ? `${e.action} → ${e.expectedObservable}` : (e.detail ?? e.factKey);
+                    console.log(`    ${mark} ${what}`);
+                }
+                if (c.reverified > 0) console.log(dim(`    ${c.reverified} re-verified`));
             }
             console.log("");
             return;
@@ -661,5 +735,17 @@ export async function contractCommand(
             dim("     search | explore | materialize | routes | snapshot | record | watch\n"),
             );
             cliExit(CLI_EXIT.USAGE);
+    }
+}
+
+function printScope(scope: ContractScope): void {
+    const label = { graph: "code graph (graft)", names: "file names (code graph unavailable)", all: "--all" }[scope.scoper];
+    console.log(dim(`  Scoped by ${label}`));
+    if (scope.globalReason) console.log(dim(`  Whole contract in scope: ${scope.globalReason}`));
+    const seen = new Set<string>();
+    for (const { reason } of scope.reasons) {
+        if (!reason || seen.has(reason) || scope.globalReason) continue;
+        seen.add(reason);
+        console.log(dim(`    ${reason}`));
     }
 }

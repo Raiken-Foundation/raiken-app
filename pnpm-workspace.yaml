@@ -7,10 +7,22 @@ packages:
 # @img/sharp-* packages, so install can never fall back to a source build.
 overrides:
   sharp: ^0.33.5
+# @nanonets/graft (the code graph) parses with tree-sitter: the runtime and each
+# grammar compile a native addon on install (prebuilds where one exists).
 onlyBuiltDependencies:
+  - '@davisvaughan/tree-sitter-r'
   - '@swc/core'
   - better-sqlite3
   - esbuild
   - nx
   - protobufjs
+  - tree-sitter
+  - tree-sitter-go
+  - tree-sitter-java
+  - tree-sitter-javascript
+  - tree-sitter-kotlin
+  - tree-sitter-php
+  - tree-sitter-python
+  - tree-sitter-swift
+  - tree-sitter-typescript
   - unrs-resolver

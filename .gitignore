@@ -75,3 +75,6 @@ reports/
 
 # Playground QA output (generated Playwright reports, not source)
 /tools/playground-notes/test-reports/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

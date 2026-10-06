@@ -24,11 +24,12 @@ describe("mcp handler", () => {
         expect(res).toMatchObject({ id: 1, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} } } });
     });
 
-    it("lists the five contract tools", async () => {
+    it("lists the contract tools", async () => {
         const res = await handleMcpMessage({ method: "tools/list", id: 2 }, fakeApp());
         const names = (res?.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
         expect(names).toContain("contract_view");
         expect(names).toContain("contract_coverage");
+        expect(names).toContain("contract_changes");
         expect(names).toContain("contract_facts");
         expect(names).toContain("contract_requirements");
         expect(names).toContain("contract_materialize");

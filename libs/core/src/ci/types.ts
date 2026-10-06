@@ -67,6 +67,23 @@ export interface CiImpactReport {
     /** Tests dropped because their confidence was below the threshold. */
     skippedBelowThreshold: Array<{ testFile: string; confidence: number }>;
     confidenceThreshold: number;
+    /** How the test set was chosen, and why — never silently empty. */
+    selection: CiSelection;
+}
+
+/**
+ * How `raiken ci` chose what to run.
+ *   impact — every changed source file is connected to at least one test
+ *   full   — impact could not be proven (unmapped change, global file, or no
+ *            code graph), so the whole suite runs
+ *   none   — no source files changed; nothing needs to run
+ */
+export interface CiSelection {
+    mode: "impact" | "full" | "none";
+    reason: string;
+    graph: { available: boolean; reason?: string };
+    /** Changed source files no evidence connects to a test. */
+    unmapped: string[];
 }
 
 /**
@@ -106,6 +123,11 @@ export interface CiOptions {
     maxTests?: number;
     /** Per-test timeout in ms. Default: 60_000. */
     testTimeout?: number;
+    /**
+     * When the impact of a change cannot be proven: run the full suite
+     * ("full", default) or only the changed specs ("none").
+     */
+    fallback?: "full" | "none";
     /** If true, compute impact but do not actually run tests. */
     skipRun?: boolean;
     /**

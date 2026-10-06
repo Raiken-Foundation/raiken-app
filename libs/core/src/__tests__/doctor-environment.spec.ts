@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     findWebServerRunScripts,
     hasChromiumBrowser,
+    parseNodeEngines,
     resolvePlaywrightBrowsersPath,
     scanEnvironment,
 } from "../doctor/environment";
@@ -28,6 +29,10 @@ function scan(extra: Parameters<typeof scanEnvironment>[0] = {}) {
         testDirectory: "e2e",
         env: { PLAYWRIGHT_BROWSERS_PATH: browsersPath },
         probeUrl: async () => true,
+        // Hermetic defaults: a supported Node and a working native module,
+        // so assertions below don't depend on the dev machine's runtime.
+        nodeVersion: "22.22.1",
+        probeNativeModule: () => {},
         ...extra,
     });
 }
@@ -268,5 +273,47 @@ describe("scanEnvironment", () => {
         );
         const findings = await scan();
         expect(findings).toEqual([]);
+    });
+
+    it("flags a Node version outside the supported engines range", async () => {
+        const findings = await scan({ nodeVersion: "24.18.1" });
+        const finding = findings.find((f) => f.rule === "node-version-unsupported");
+        expect(finding?.severity).toBe("error");
+        expect(finding?.message).toContain("24.18.1");
+        expect(finding?.suggestion).toContain("nvm use 22");
+    });
+
+    it("accepts Node versions inside the range without a finding", async () => {
+        const findings = await scan({ nodeVersion: "22.12.0" });
+        expect(findings.some((f) => f.rule === "node-version-unsupported")).toBe(false);
+    });
+
+    it("flags a broken native module with the loader error and the rebuild fix", async () => {
+        const findings = await scan({
+            probeNativeModule: () => {
+                const error = new Error(
+                    "The module 'better_sqlite3.node' was compiled against a different Node.js version",
+                ) as NodeJS.ErrnoException;
+                error.code = "ERR_DLOPEN_FAILED";
+                throw error;
+            },
+        });
+        const finding = findings.find((f) => f.rule === "native-module-broken");
+        expect(finding?.severity).toBe("error");
+        expect(finding?.message).toContain("ERR_DLOPEN_FAILED");
+        expect(finding?.suggestion).toContain("pnpm rebuild better-sqlite3");
+    });
+});
+
+describe("parseNodeEngines", () => {
+    it("parses the supported >=X <Y shape into comparable bounds", () => {
+        expect(parseNodeEngines(">=22 <23")).toEqual({ minMajor: 22, maxMajorExclusive: 23 });
+        expect(parseNodeEngines(">= 18 < 21")).toEqual({ minMajor: 18, maxMajorExclusive: 21 });
+    });
+
+    it("returns null for shapes it does not understand", () => {
+        expect(parseNodeEngines(">=22")).toBeNull();
+        expect(parseNodeEngines("^20")).toBeNull();
+        expect(parseNodeEngines("")).toBeNull();
     });
 });

@@ -5,9 +5,9 @@
  * webServer script the config points at really exists, and (when Playwright
  * won't start the app itself) the baseURL answers.
  *
- * Every check is filesystem- or schema-based except the baseURL probe,
- * which only fires when the config has no `webServer` block (otherwise
- * Playwright starts the app and an unreachable URL is expected).
+ * Every check is filesystem- or schema-based except the baseURL probe
+ * (which only fires when the config has no `webServer` block) and the
+ * native-module probe (one in-memory SQLite open/close).
  */
 
 import * as fs from "node:fs";
@@ -15,6 +15,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
+import Database from "better-sqlite3";
 import { raikenConfigSchema } from "../config/schema";
 import { getConfigPath } from "../config/store";
 import { isRestrictiveTestMatch } from "../cover/draft-quality";
@@ -36,13 +37,26 @@ export interface EnvironmentScanOptions {
     env?: NodeJS.ProcessEnv;
     /** Injectable home directory for the browser-cache resolution (tests). */
     homeDir?: string;
+    /** Injectable Node version (tests); defaults to process.versions.node. */
+    nodeVersion?: string;
+    /** Injectable native-module probe (tests); defaults to opening better-sqlite3 in memory. */
+    probeNativeModule?: () => void;
 }
 
 const ENV_FILE = "(environment)";
 
+/**
+ * Node range Raiken supports — mirrors the `engines.node` field of the root
+ * and `apps/cli` package.json. When those change, change this. The
+ * native-module probe below is the symptom detector; this explains the why.
+ */
+export const RAIKEN_NODE_ENGINES = ">=22 <23";
+
 /** Rule ids produced by {@link scanEnvironment} — lets UIs section them off. */
 export const ENVIRONMENT_RULES: ReadonlySet<string> = new Set([
     "api-key-in-config",
+    "node-version-unsupported",
+    "native-module-broken",
     "playwright-package-missing",
     "playwright-browsers-missing",
     "raiken-config-invalid",
@@ -211,11 +225,71 @@ function defaultProbeUrl(url: string): Promise<boolean> {
     });
 }
 
+/**
+ * Parse a major-only `>=X <Y` engines range into comparable bounds.
+ * Returns null for shapes this parser does not understand — callers then
+ * skip the check rather than guess. Exported for unit tests.
+ */
+export function parseNodeEngines(
+    range: string,
+): { minMajor: number; maxMajorExclusive: number } | null {
+    const minMatch = range.match(/>=\s*(\d+)/);
+    const maxMatch = range.match(/<\s*(\d+)/);
+    if (!minMatch || !maxMatch) return null;
+    return { minMajor: Number(minMatch[1]), maxMajorExclusive: Number(maxMatch[1]) };
+}
+
+function defaultProbeNativeModule(): void {
+    const db = new Database(":memory:");
+    db.close();
+}
+
 export async function scanEnvironment(options: EnvironmentScanOptions): Promise<DoctorFinding[]> {
     const projectPath = path.resolve(options.projectPath);
     const env = options.env ?? process.env;
     const homeDir = options.homeDir ?? os.homedir();
     const findings: DoctorFinding[] = [];
+
+    // 0a. Node version inside the supported range. Native modules ship
+    //     prebuilt for engines.node; outside it they fail to load (the
+    //     0b probe) — this check names the cause and the fix.
+    const nodeVersion = options.nodeVersion ?? process.versions.node;
+    const majorMatch = nodeVersion.match(/^v?(\d+)\./);
+    const engines = parseNodeEngines(RAIKEN_NODE_ENGINES);
+    if (engines && majorMatch) {
+        const major = Number(majorMatch[1]);
+        if (major < engines.minMajor || major >= engines.maxMajorExclusive) {
+            findings.push(
+                finding({
+                    rule: "node-version-unsupported",
+                    severity: "error",
+                    message: `Node ${nodeVersion} is outside Raiken's supported range (${RAIKEN_NODE_ENGINES}) — native modules ship prebuilt for that range and fail to load elsewhere.`,
+                    suggestion: `Switch to Node 22 (e.g. \`nvm use 22\`) — the repo's .nvmrc pins it.`,
+                }),
+            );
+        }
+    }
+
+    // 0b. Native module actually loads. This is the symptom detector: an
+    //     ERR_DLOPEN_FAILED here is a broken install regardless of version.
+    const probeNative = options.probeNativeModule ?? defaultProbeNativeModule;
+    try {
+        probeNative();
+    } catch (error) {
+        const code =
+            error instanceof Error && "code" in error
+                ? ` (${String((error as NodeJS.ErrnoException).code)})`
+                : "";
+        findings.push(
+            finding({
+                rule: "native-module-broken",
+                severity: "error",
+                message: `Raiken's SQLite native module failed to load${code}: ${error instanceof Error ? error.message : String(error)}.`,
+                suggestion:
+                    "Run Raiken under Node 22 (`nvm use 22`), or rebuild the module for your Node (`pnpm rebuild better-sqlite3`).",
+            }),
+        );
+    }
 
     // 1. Playwright package present — pure fs so npx never auto-installs
     //    anything as a side effect of a lint command.

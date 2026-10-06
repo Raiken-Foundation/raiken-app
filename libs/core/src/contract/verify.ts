@@ -99,9 +99,9 @@ async function checkObservable(page: Page, spec: ObservableSpec): Promise<boolea
     const labelsOk = (spec.labels ?? []).every((label) =>
         fields.some((f) => f.label.toLowerCase().includes(label.toLowerCase())),
     );
+    const submitLabel = spec.submitLabel?.toLowerCase();
     const submitOk =
-        !spec.submitLabel ||
-        submits.some((s) => s.toLowerCase().includes(spec.submitLabel.toLowerCase()));
+        !submitLabel || submits.some((s) => s.toLowerCase().includes(submitLabel));
     return labelsOk && submitOk;
 }
 

@@ -53,18 +53,6 @@
     font-family: var(--mono);
 }
 
-.board-register-toggle {
-    margin-left: auto;
-    color: var(--accent);
-    font-size: 0.85rem;
-    text-decoration: none;
-    border-bottom: 1px solid transparent;
-}
-.board-register-toggle:hover,
-.board-register-toggle:focus-visible {
-    border-bottom-color: var(--accent);
-}
-
 .board-loading,
 .board-error {
     color: var(--ink-dim);

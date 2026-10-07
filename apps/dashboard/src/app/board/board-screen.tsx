@@ -93,13 +93,6 @@ export function BoardScreen() {
                         {summarize(data.counts)}
                     </p>
                 ) : null}
-                <a
-                    className="board-register-toggle"
-                    href="#/contract"
-                    aria-label="Switch to the technical view of the same contract"
-                >
-                    Technical view →
-                </a>
             </header>
 
             {data.watch ? (
